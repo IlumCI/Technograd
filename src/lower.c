@@ -280,6 +280,13 @@ static void load_into(Sx *out, const char *path, Seen *seen, int depth, int root
 	char *src = read_file(path, NULL);
 	Sx *ast = surface_parse(src, path);
 	xfree(src);
+	if (tr_on(2)) {
+		tr_begin(2, "import");
+		tr_str("file", path);
+		tr_num("depth", depth);
+		tr_str("role", root ? "root" : "library");
+		tr_end("%s %s (depth %d)", root ? "root" : "library", path, depth);
+	}
 	for (int i = 0; i < ast->len; i++) {
 		Sx *d = ast->v[i];
 		const char *h = d->v[0]->s;

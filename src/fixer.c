@@ -1132,6 +1132,18 @@ static void show(const Cand *c, const Diag *d, const char *path)
 	fprintf(stderr, "  autofix: %s at line %d (confidence %.2f)\n", rname[c->op], c->line + 1, (double)c->score);
 	if (c->old) fprintf(stderr, "  - %s\n", c->old);
 	if (c->new) fprintf(stderr, "  + %s\n", c->new);
+	tr_begin(1, "autofix");
+	tr_quiet();
+	tr_str("file", path);
+	tr_num("line", d->line);
+	tr_str("diagnostic", d->msg);
+	tr_str("decision", "applied");
+	tr_str("operator", rname[c->op]);
+	tr_num("edit_line", c->line + 1);
+	tr_num("confidence", c->score);
+	tr_str("old", c->old ? c->old : "");
+	tr_str("new", c->new ? c->new : "");
+	tr_end("%s at line %d (confidence %.2f)", rname[c->op], c->line + 1, (double)c->score);
 }
 
 char *autofix(const char *src, const char *path, int verbose, int *nfixed)
@@ -1164,7 +1176,17 @@ char *autofix(const char *src, const char *path, int verbose, int *nfixed)
 			if (progress && !cycle && c->score >= threshold() && (best < 0 || c->score > C.v[best].score)) best = i;
 		}
 		if (best < 0) {
-			if (verbose) fprintf(stderr, "%s:%d: error: %s\n  autofix: no confident repair among %d candidate(s)\n", path, d0.line, d0.msg, C.n);
+			if (verbose) {
+				fprintf(stderr, "%s:%d: error: %s\n  autofix: no confident repair among %d candidate(s)\n", path, d0.line, d0.msg, C.n);
+				tr_begin(1, "autofix");
+				tr_quiet();
+				tr_str("file", path);
+				tr_num("line", d0.line);
+				tr_str("diagnostic", d0.msg);
+				tr_str("decision", "abstained");
+				tr_num("candidates", C.n);
+				tr_end("no confident repair among %d candidate(s)", C.n);
+			}
 			cands_free(&C);
 			goto fail;
 		}

@@ -10,7 +10,44 @@ typedef struct {
 	float *arena;
 	const float **in;
 	int *steps;
+	int dbg; /* per-instruction and per-iteration debug events */
 } VM;
+
+/* Final halting delta of each think loop in the last vm_run (single run at a time). */
+static float *g_delta;
+static int g_ndelta;
+
+float vm_last_delta(int tid) { return tid < g_ndelta ? g_delta[tid] : 0.0f; }
+
+static void trace_ins(VM *vm, const Ins *in, const float *o, int n)
+{
+	const Module *m = vm->m;
+	char on[64], a0[64] = "", a1[64] = "", sh[64];
+	value_name(m, in->out, on, sizeof on);
+	if (in->na > 0) value_name(m, in->a[0], a0, sizeof a0);
+	if (in->na > 1) value_name(m, in->a[1], a1, sizeof a1);
+	if (in->op == OP_CONST) snprintf(a0, sizeof a0, "%.6g", (double)in->k);
+	shape_str(&m->val[in->out].sh, sh, sizeof sh);
+	double mn = o[0], mx = o[0], sum = 0;
+	int bad = 0;
+	for (int i = 0; i < n; i++) {
+		double x = o[i];
+		if (x != x || x > 3.4e38 || x < -3.4e38) { bad++; continue; }
+		if (x < mn) mn = x;
+		if (x > mx) mx = x;
+		sum += x;
+	}
+	tr_begin(2, "vm");
+	tr_str("value", on);
+	tr_str("op", tg_ops[in->op].name);
+	tr_str("shape", sh);
+	tr_num("min", mn);
+	tr_num("max", mx);
+	tr_num("mean", n > bad ? sum / (n - bad) : 0);
+	tr_num("nonfinite", bad);
+	tr_end("%s = %s(%s%s%s) %s  min %.4g max %.4g mean %.4g%s", on, tg_ops[in->op].name, a0, in->na > 1 ? ", " : "", a1, sh,
+	       mn, mx, n > bad ? sum / (n - bad) : 0.0, bad ? "  NONFINITE" : "");
+}
 
 static float *ptr(VM *vm, int v)
 {
@@ -99,6 +136,14 @@ static void exec(VM *vm, const Block *b)
 				it++;
 				y = ptr(vm, in->yield);
 				float d = tg_delta(y, o, n);
+				if (vm->dbg) {
+					tr_begin(2, "think");
+					tr_num("loop", in->tid);
+					tr_num("iteration", it);
+					tr_num("delta", d);
+					tr_end("think[%d] iteration %d delta %.6g", in->tid, it, (double)d);
+				}
+				if (in->tid < g_ndelta) g_delta[in->tid] = d;
 				tg_copy(o, y, n);
 				if (in->eps >= 0 && d <= in->eps) break;
 			}
@@ -106,12 +151,17 @@ static void exec(VM *vm, const Block *b)
 			break;
 		}
 		}
+		if (vm->dbg && in->op != OP_THINK) trace_ins(vm, in, o, n);
 	}
 }
 
 void vm_run(const Module *m, const float **in, float *out, int *steps)
 {
-	VM vm = { m, NULL, in, steps };
+	VM vm = { m, NULL, in, steps, m->trace && tr_on(2) && tg_verbose >= 2 };
+	if (g_ndelta < m->nthink) {
+		g_delta = alloc_keep(xrealloc(g_delta, (size_t)m->nthink * sizeof *g_delta)); /* outlives scoped releases */
+		g_ndelta = m->nthink;
+	}
 	vm.arena = xmalloc((size_t)(m->arena ? m->arena : 1) * sizeof(float));
 	exec(&vm, &m->top);
 	tg_copy(out, ptr(&vm, m->output), shape_numel(&m->val[m->output].sh));

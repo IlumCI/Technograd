@@ -85,6 +85,22 @@ $TGC run examples/newton.tg 2,9,16 -o "$TMP/nw.csv" && [ "$(cat "$TMP/nw.csv")" 
 $TGC batch examples/xor.tg tests/io/bad_row.csv -o "$TMP/partial.csv" >/dev/null 2>&1 && bad "bad row must fail" || ok
 [ ! -e "$TMP/partial.csv" ] && ok || bad "failed batch left a partial output file"
 
+# 4c. tracing and logs: stdout is never affected; -v reports stages; --log is valid JSONL
+plain=$($TGC run examples/latent_reasoner.tg 1,0,0,1,0,1,1,0)
+[ "$($TGC run examples/latent_reasoner.tg 1,0,0,1,0,1,1,0 -vv 2>/dev/null)" = "$plain" ] && ok || bad "-vv changed stdout"
+err=$($TGC run examples/latent_reasoner.tg 1,0,0,1,0,1,1,0 -v 2>&1 >/dev/null)
+case "$err" in *"[plan] arena 320 bytes"*"think[0]: 9/32 iteration(s)"*converged*) ok ;; *) bad "-v trace: [$err]" ;; esac
+log=$TMP/t.jsonl
+$TGC run examples/newton.tg 2,9,16 --log "$log" >/dev/null
+$TGC check tests/errors/matmul_dims.tg --log "$log" 2>/dev/null
+$TGC fix tests/fix/colon.tg --log "$log" >/dev/null 2>&1
+perl -MJSON::PP -ne 'decode_json($_)' "$log" 2>/dev/null && ok || bad "log is not valid JSON Lines"
+grep -q '"level":"error","stage":"error".*"file":"tests/errors/matmul_dims.tg","line":5' "$log" && ok || bad "error event missing file/line"
+grep -q '"stage":"autofix".*"decision":"applied"' "$log" && ok || bad "autofix decision not logged"
+grep -q '"level":"debug"' "$log" && bad "debug events leaked into log without -vv" || ok
+$TGC run examples/newton.tg 2,9,16 -vv --log "$TMP/d.jsonl" >/dev/null 2>&1
+grep -q '"stage":"vm".*"op":"div"' "$TMP/d.jsonl" && ok || bad "-vv log lacks vm events"
+
 # 4a. cross-file imports: diamond dedup and cycle termination
 expect_run tests/imports/diamond.tg "23 43" 10,20
 expect_run tests/imports/cycle.tg "11 21" 10,20

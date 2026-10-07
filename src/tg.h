@@ -135,6 +135,7 @@ typedef struct {
 	int nthink;
 	int arena; /* floats */
 	int planned;
+	int trace; /* VM tracing enabled (the user's model only) */
 } Module;
 
 Module *mod_new(const char *name);
@@ -154,7 +155,22 @@ void ir_write(const Module *m, FILE *f);
 void plan(Module *m);
 void plan_dump(const Module *m, FILE *f);
 void vm_run(const Module *m, const float **in, float *out, int *steps);
+float vm_last_delta(int tid); /* halting delta of think loop tid in the last run */
 void cgen(const Module *m, FILE *f);
+
+/* tracing and structured logs (trace.c): levels 0 error, 1 info (-v), 2 debug (-vv) */
+extern int tg_verbose;
+double tr_now_ms(void);
+void tr_open_log(const char *path);
+void tr_close_log(void);
+int tr_on(int level);
+void tr_begin(int level, const char *stage);
+void tr_str(const char *key, const char *val);
+void tr_num(const char *key, double val);
+void tr_end(const char *fmt, ...);
+void tr_quiet(void);
+void tr_error(const char *file, int line, const char *msg);
+int block_count(const Block *b); /* instructions, think bodies included */
 
 /* tensor file I/O (io.c): .bin/.f32 = raw little-endian f32, else text */
 int io_is_binary(const char *path);

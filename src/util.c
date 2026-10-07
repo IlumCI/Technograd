@@ -129,6 +129,7 @@ void die(const char *file, int line, const char *fmt, ...)
 	vsnprintf(tg_diag.msg, sizeof tg_diag.msg, fmt, ap);
 	va_end(ap);
 	if (tg_trap) longjmp(*tg_trap, 1);
+	tr_error(file, file ? line : 0, tg_diag.msg);
 	if (file) fprintf(stderr, "%s:%d: ", file, line);
 	fprintf(stderr, "error: %s\n", tg_diag.msg);
 	exit(1);
@@ -206,6 +207,33 @@ void value_name(const Module *m, int v, char *buf, size_t n)
 	else snprintf(buf, n, "%%%d", v);
 }
 
+int block_count(const Block *b)
+{
+	int n = 0;
+	for (int i = 0; i < b->len; i++) n += 1 + (b->v[i].op == OP_THINK ? block_count(b->v[i].body) : 0);
+	return n;
+}
+
+static void trace_module(const Module *m, const char *path, double ms)
+{
+	int params = 0, pvals = 0;
+	for (int v = 0; v < m->nval; v++)
+		if (m->val[v].kind == V_PARAM) { pvals++; params += shape_numel(&m->val[v].sh); }
+	int nins = block_count(&m->top);
+	tr_begin(1, "lower");
+	tr_str("file", path);
+	tr_str("model", m->name);
+	tr_num("inputs", m->ninputs);
+	tr_num("params", pvals);
+	tr_num("param_floats", params);
+	tr_num("values", m->nval);
+	tr_num("instructions", nins);
+	tr_num("think_loops", m->nthink);
+	tr_num("ms", ms);
+	tr_end("model %s: %d input(s), %d param(s) (%d floats), %d instruction(s), %d think loop(s) in %.2f ms",
+	       m->name, m->ninputs, pvals, params, nins, m->nthink, ms);
+}
+
 Module *load_module(const char *path)
 {
 	char *src = read_file(path, NULL);
@@ -213,13 +241,31 @@ Module *load_module(const char *path)
 	while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
 	int is_ir = (*p == '(' || *p == ';');
 	Module *m;
+	double t0 = tr_now_ms();
 	if (is_ir) {
 		m = ir_read(sx_read(src, path), path); /* TGIR is already flat: no imports */
-	} else {
 		xfree(src);
-		m = lower(surface_load(path), path);
+		if (tr_on(1)) {
+			tr_begin(1, "parse");
+			tr_str("file", path);
+			tr_str("format", "tgir");
+			tr_end("read TGIR %s", path);
+			trace_module(m, path, tr_now_ms() - t0);
+		}
 		return m;
 	}
 	xfree(src);
+	Sx *ast = surface_load(path);
+	double t1 = tr_now_ms();
+	if (tr_on(1)) {
+		tr_begin(1, "parse");
+		tr_str("file", path);
+		tr_str("format", "surface");
+		tr_num("decls", ast->len);
+		tr_num("ms", t1 - t0);
+		tr_end("parsed %s and its imports: %d declaration(s) in %.2f ms", path, ast->len, t1 - t0);
+	}
+	m = lower(ast, path);
+	if (tr_on(1)) trace_module(m, path, tr_now_ms() - t1);
 	return m;
 }

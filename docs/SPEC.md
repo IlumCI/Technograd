@@ -223,7 +223,45 @@ tgc batch <file> <data> [-o out]    one sample per row, or a raw f32 stream
   stream length) before anything is computed or any output file is created.
   A bad row 1000 produces no output at all, not 999 rows.
 
-## 13. Roadmap
+## 13. Tracing and logs
+
+```
+-v, --verbose   stage trace to stderr
+-vv             also every VM value and every think iteration
+--log FILE      append JSON Lines events (works with or without -v)
+```
+
+Tracing writes only to stderr and the log. Program output on stdout is
+identical at every verbosity level (this is tested).
+
+| Stage | Level | Fields |
+|-------|-------|--------|
+| `import` | debug | `file`, `depth`, `role` (`root`/`library`); one per merged file |
+| `parse` | info | `file`, `format` (`surface`/`tgir`), `decls`, `ms` |
+| `lower` | info | `model`, `inputs`, `params`, `param_floats`, `values`, `instructions`, `think_loops`, `ms` |
+| `plan` | info | `arena_bytes`, `unshared_bytes`, `ms` |
+| `run` | info | `model`, `ms` |
+| `think` | info | per loop after `run`: `loop`, `steps`, `budget`, `final_delta`, `stop` (`converged`/`budget`); after `batch`: `steps_min`, `steps_mean`, `steps_max` |
+| `batch` | info | `rows`, `ms`, `us_per_row` |
+| `cgen` | info | `output`, `arena_bytes` |
+| `vm` | debug | per instruction: `value`, `op`, `shape`, `min`, `max`, `mean`, `nonfinite` |
+| `think` | debug | per iteration: `loop`, `iteration`, `delta` |
+| `autofix` | info | `file`, `line`, `diagnostic`, `decision` (`applied`/`abstained`), and for applied: `operator`, `edit_line`, `confidence`, `old`, `new` |
+| `error` | error | `file`, `line` (when known); the message is in `msg` |
+
+Every line also has `t` (Unix seconds), `level`, `stage` and `msg`, the
+human-readable text.
+
+- **Log level policy.** Error and info events are always logged. Debug
+  events are logged only under `-vv`, so a large `batch` does not write
+  per-instruction records unless asked.
+- **Scope.** The VM traces only the user's model. The auto-fixer's internal
+  forest scoring and trial compilations emit no events.
+- **Non-finite values.** Under `-vv`, a value containing NaN or infinity is
+  flagged `NONFINITE` and counted in `nonfinite`, which locates where a
+  model first diverges.
+
+## 14. Roadmap
 
 Ordered by importance for latent-reasoning models on embedded targets:
 
