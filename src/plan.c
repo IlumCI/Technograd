@@ -16,8 +16,9 @@ static int number(Block *b, int pos)
 	for (int i = 0; i < b->len; i++) {
 		Ins *in = &b->v[i];
 		in->pbeg = pos++;
-		if (in->op == OP_THINK) pos = number(in->body, pos);
-		in->pend = in->op == OP_THINK ? pos++ : in->pbeg;
+		int loop = in->op == OP_THINK || in->op == OP_SCAN;
+		if (loop) pos = number(in->body, pos);
+		in->pend = loop ? pos++ : in->pbeg;
 	}
 	return pos;
 }
@@ -42,7 +43,29 @@ static void live(Module *m, Block *b, Ins **loops, int nl)
 {
 	for (int i = 0; i < b->len; i++) {
 		Ins *in = &b->v[i];
-		if (in->op == OP_THINK) {
+		if (in->op == OP_SCAN) { /* carries, slices and stacks live across the whole loop */
+			const Scan *s = in->sc;
+			for (int k = 0; k < s->nc; k++) {
+				use(m, s->init[k], in->pbeg, loops, nl);
+				def(m, s->c[k], in->pbeg);
+			}
+			for (int j = 0; j < s->nx; j++) {
+				use(m, s->x[j], in->pend, loops, nl);
+				def(m, s->xt[j], in->pbeg);
+			}
+			for (int y = 0; y < s->ny; y++) def(m, s->ys[y], in->pbeg);
+			loops[nl] = in;
+			live(m, in->body, loops, nl + 1);
+			for (int k = 0; k < s->nc; k++) {
+				use(m, s->next[k], in->pend, loops, nl + 1);
+				use(m, s->c[k], in->pend, loops, nl);
+			}
+			for (int j = 0; j < s->nx; j++) use(m, s->xt[j], in->pend, loops, nl);
+			for (int y = 0; y < s->ny; y++) {
+				use(m, s->y[y], in->pend, loops, nl + 1);
+				use(m, s->ys[y], in->pend, loops, nl);
+			}
+		} else if (in->op == OP_THINK) {
 			use(m, in->init, in->pbeg, loops, nl);
 			def(m, in->out, in->pbeg);
 			loops[nl] = in;
@@ -60,7 +83,7 @@ static int depth(const Block *b)
 {
 	int d = 0;
 	for (int i = 0; i < b->len; i++)
-		if (b->v[i].op == OP_THINK) {
+		if (b->v[i].op == OP_THINK || b->v[i].op == OP_SCAN) {
 			int k = 1 + depth(b->v[i].body);
 			if (k > d) d = k;
 		}

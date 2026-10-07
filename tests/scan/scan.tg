@@ -1,0 +1,31 @@
+# scan: two carries, two sequences, stacked outputs, a think loop inside a
+# scan body, a scan inside a def, and gradients by backpropagation through time
+# (the reverse scans run in the VM, in TGIR and in the C unit).
+model scantest
+
+param W : f32[3, 3] = rand(4, 0.5)
+param U : f32[3, 2] = rand(5, 0.8)
+param h0 : f32[3] = [0.1, -0.2, 0.3]
+
+def cumsum(v: f32[4]) -> f32[4]:
+    s = 0
+    scan s over vt in v:
+        s = s + vt
+        emit out = s
+    return out
+
+def forward(x: f32[4, 2], g: f32[4]) -> f32[3]:
+    h = h0
+    n = 0
+    scan h, n over xt in x, gt in g:
+        h = tanh(W @ h + U @ xt) * gt
+        n = n + sum(h * h)
+        emit hs = h
+    loss = sum(hs * hs) + n
+    r = h0
+    scan r over gt in g:
+        q = r
+        think q for 20 until 0.0001:
+            q = 0.5 * (q + r * gt)
+        r = tanh(q + 0.1)
+    return h + r + grad(loss, W) @ h0 + sum(grad(loss, x)) + sum(cumsum(g))

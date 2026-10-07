@@ -3,7 +3,9 @@
  * - Every user `def` is inlined at its call site (static graph, no call stack).
  * - Variables are renamed into SSA values.
  * - Parameter initializers are materialized so the IR is self-contained.
- * - `think` blocks become OP_THINK with exactly one loop-carried state. */
+ * - `think` blocks become OP_THINK with exactly one loop-carried state.
+ * - `scan` blocks become OP_SCAN: carries, per-step slices of sequences, and
+ *   `emit`ted values stacked over the steps. */
 #include "tg.h"
 
 #include <stdint.h>
@@ -27,9 +29,17 @@ typedef struct {
 	int ndefs;
 	Env globals;
 	int depth;    /* def-inlining depth; 0 = the body of forward */
-	int in_think; /* nesting of think bodies being lowered */
+	int in_think; /* nesting of think and scan bodies being lowered */
+	const char *loop_kw; /* the innermost of them: "think" or "scan" */
+	struct Emits *emits; /* the scan whose body is at the current level, if any */
 	int ntmp;
 } L;
+
+typedef struct Emits {
+	int level; /* in_think of the scan body */
+	const char **name;
+	int *val, n;
+} Emits;
 
 static int env_get(const Env *e, const char *name)
 {
@@ -202,6 +212,107 @@ static int lower_expr(L *l, Block *b, Env *e, Sx *x)
 	return emit_op(l, b, (Op)op, args, nargs, x->line);
 }
 
+/* scan C1, C2 over X1 in E1, X2 in E2: body
+ * Carries must be bound before the loop and keep their shapes; after it they
+ * hold the final values. Each `emit N = v` in the body binds N to the (T, ...)
+ * stack of v over the steps. */
+static void lower_scan(L *l, Block *b, Env *e, Sx *s)
+{
+	Module *m = l->m;
+	Sx *cs = s->v[1], *xs = s->v[2];
+	int T = -1, nc = cs->len, nx = xs->len;
+	int *seq = xmalloc((size_t)nx * sizeof *seq);
+	for (int j = 0; j < nx; j++) {
+		seq[j] = lower_expr(l, b, e, xs->v[j]->v[1]);
+		const Shape *q = &m->val[seq[j]].sh;
+		if (q->rank < 1) die(l->file, s->line, "scan sequence '%s' must have rank >= 1 (steps along the first axis)", xs->v[j]->v[0]->s);
+		if (T >= 0 && q->dim[0] != T)
+			die(l->file, s->line, "scan sequences differ in length: %d and %d steps", T, q->dim[0]);
+		T = q->dim[0];
+	}
+	Scan *sc = scan_new(T, 0);
+	for (int k = 0; k < nc; k++) {
+		const char *n = cs->v[k]->s;
+		for (int j = 0; j < k; j++)
+			if (!strcmp(cs->v[j]->s, n)) die(l->file, s->line, "scan carry '%s' listed twice", n);
+		int init = env_get(e, n);
+		if (init < 0) {
+			if (env_get(&l->globals, n) >= 0) die(l->file, s->line, "scan carry '%s' is a parameter", n);
+			die(l->file, s->line, "scan carry '%s' must be assigned before the loop", n);
+		}
+		Shape sh = m->val[init].sh;
+		scan_carry(sc, mod_value(m, V_TMP, &sh, NULL), init, -1);
+	}
+	for (int j = 0; j < nx; j++) {
+		Shape q = m->val[seq[j]].sh;
+		for (int d = 1; d < q.rank; d++) q.dim[d - 1] = q.dim[d];
+		q.rank--;
+		scan_seq(sc, seq[j], mod_value(m, V_TMP, &q, NULL));
+	}
+	Ins *ins = block_push(b);
+	int idx = (int)(ins - b->v);
+	ins->op = OP_SCAN;
+	ins->sc = sc;
+	ins->out = sc->c[0];
+	for (int k = 0; k < nc; k++) mod_note_def(m, sc->c[k], b, idx);
+	Block *body = xmalloc(sizeof *body);
+
+	Env inner = env_copy(e);
+	for (int k = 0; k < nc; k++) env_set(&inner, cs->v[k]->s, sc->c[k]);
+	for (int j = 0; j < nx; j++) env_set(&inner, xs->v[j]->v[0]->s, sc->xt[j]);
+	int outer_n = e->n;
+	const char *kw = l->loop_kw;
+	Emits em = { l->in_think + 1, NULL, NULL, 0 }, *save = l->emits;
+	l->loop_kw = "scan";
+	l->in_think++;
+	l->emits = &em;
+	m->open_think = xrealloc(m->open_think, (size_t)(m->nopen + nc + nx) * sizeof *m->open_think);
+	for (int k = 0; k < nc; k++) m->open_think[m->nopen++] = sc->c[k]; /* the body sees carries and slices as inputs */
+	for (int j = 0; j < nx; j++) m->open_think[m->nopen++] = sc->xt[j];
+	lower_block(l, body, &inner, s->v[3], 0);
+	m->nopen -= nc + nx;
+	l->in_think--;
+	l->loop_kw = kw;
+	l->emits = save;
+	for (int j = 0; j < outer_n; j++) {
+		const char *n = e->b[j].name;
+		int carried = 0;
+		for (int k = 0; k < nc; k++) carried |= !strcmp(n, cs->v[k]->s);
+		for (int j2 = 0; j2 < nx; j2++) carried |= !strcmp(n, xs->v[j2]->v[0]->s);
+		if (!carried && inner.b[j].val != e->b[j].val)
+			die(l->file, s->line, "scan block assigns outer variable '%s'; only the carries are carried (use emit to collect per-step values)", n);
+	}
+	for (int k = 0; k < nc; k++) {
+		int nv = env_get(&inner, cs->v[k]->s);
+		if (!shape_eq(&m->val[nv].sh, &m->val[sc->c[k]].sh)) {
+			char s0[64], s1[64];
+			shape_str(&m->val[sc->c[k]].sh, s0, sizeof s0);
+			shape_str(&m->val[nv].sh, s1, sizeof s1);
+			die(l->file, s->line, "scan carry '%s' changes shape from %s to %s", cs->v[k]->s, s0, s1);
+		}
+		for (int j = 0; j < nc; j++) /* another carry's value: copy it, so carries can advance in any order */
+			if (j != k && nv == sc->c[j]) nv = ir_op(m, body, OP_MUL, nv, ir_k(m, body, 1), l->file, s->line);
+		sc->next[k] = nv;
+	}
+	for (int i = 0; i < em.n; i++) {
+		Shape q = m->val[em.val[i]].sh;
+		if (q.rank == TG_MAXRANK) die(l->file, s->line, "emit '%s': a stack of rank-%d values exceeds rank %d", em.name[i], q.rank, TG_MAXRANK);
+		for (int d = q.rank; d > 0; d--) q.dim[d] = q.dim[d - 1];
+		q.dim[0] = T;
+		q.rank++;
+		int ys = mod_value(m, V_TMP, &q, NULL);
+		scan_stack(sc, em.val[i], ys);
+		mod_note_def(m, ys, b, idx);
+	}
+	xfree(inner.b);
+	b->v[idx].body = body; /* block may have been reallocated */
+	for (int k = 0; k < nc; k++) env_set(e, cs->v[k]->s, sc->c[k]);
+	for (int i = 0; i < em.n; i++) env_set(e, em.name[i], sc->ys[i]);
+	xfree(em.name);
+	xfree(em.val);
+	xfree(seq);
+}
+
 /* Returns the value of the `return` statement for function bodies, or -1. */
 static int lower_block(L *l, Block *b, Env *e, Sx *stmts, int is_fn)
 {
@@ -209,7 +320,7 @@ static int lower_block(L *l, Block *b, Env *e, Sx *stmts, int is_fn)
 		Sx *s = stmts->v[i];
 		const char *h = s->v[0]->s;
 		if (strcmp(h, "return") == 0) {
-			if (!is_fn) die(l->file, s->line, "'return' inside think block");
+			if (!is_fn) die(l->file, s->line, "'return' inside %s block", l->loop_kw);
 			if (i != stmts->len - 1) die(l->file, stmts->v[i + 1]->line, "unreachable statement after return");
 			return lower_expr(l, b, e, s->v[1]);
 		}
@@ -225,7 +336,7 @@ static int lower_block(L *l, Block *b, Env *e, Sx *stmts, int is_fn)
 		}
 		if (strcmp(h, "train") == 0) {
 			if (l->depth > 0) die(l->file, s->line, "'train' is only allowed in the body of 'forward', not in a def");
-			if (l->in_think) die(l->file, s->line, "'train' inside think block");
+			if (l->in_think) die(l->file, s->line, "'train' inside %s block", l->loop_kw);
 			int y = lower_expr(l, b, e, s->v[1]);
 			if (l->m->val[y].sh.rank != 0) die(l->file, s->line, "'train' needs a scalar loss; reduce it with sum(...) or mean(...)");
 			Sx *kv = s->v[3], *ov = s->v[4];
@@ -250,7 +361,7 @@ static int lower_block(L *l, Block *b, Env *e, Sx *stmts, int is_fn)
 		if (strcmp(h, "update") == 0) {
 			const char *n = s->v[1]->s;
 			if (l->depth > 0) die(l->file, s->line, "'update' is only allowed in the body of 'forward', not in a def");
-			if (l->in_think) die(l->file, s->line, "'update' inside think block (a state changes once per run)");
+			if (l->in_think) die(l->file, s->line, "'update' inside %s block (a state changes once per run)", l->loop_kw);
 			int sv = env_get(&l->globals, n);
 			if (sv >= 0 && l->m->val[sv].kind == V_PARAM)
 				die(l->file, s->line, "'%s' is a read-only param; declare it with 'state' to update it", n);
@@ -287,12 +398,15 @@ static int lower_block(L *l, Block *b, Env *e, Sx *stmts, int is_fn)
 			Env inner = env_copy(e);
 			env_set(&inner, st->s, state);
 			int outer_n = e->n;
+			const char *kw = l->loop_kw;
+			l->loop_kw = "think";
 			l->in_think++;
 			l->m->open_think = xrealloc(l->m->open_think, (size_t)(l->m->nopen + 1) * sizeof *l->m->open_think);
 			l->m->open_think[l->m->nopen++] = state; /* its body sees the state as an input */
 			lower_block(l, body, &inner, s->v[4], 0);
 			l->m->nopen--;
 			l->in_think--;
+			l->loop_kw = kw;
 			/* Only the state may be carried: reject assignments to other outer names. */
 			for (int j = 0; j < outer_n; j++) {
 				const char *n = e->b[j].name;
@@ -305,6 +419,23 @@ static int lower_block(L *l, Block *b, Env *e, Sx *stmts, int is_fn)
 			ins->body = body;
 			ins->yield = y;
 			env_set(e, st->s, state);
+			continue;
+		}
+		if (strcmp(h, "emit") == 0) {
+			Emits *em = l->emits;
+			if (!em || em->level != l->in_think) die(l->file, s->line, "'emit' is only allowed directly in a scan body");
+			const char *n = s->v[1]->s;
+			for (int k = 0; k < em->n; k++)
+				if (!strcmp(em->name[k], n)) die(l->file, s->line, "'%s' emitted twice in one scan", n);
+			int v = lower_expr(l, b, e, s->v[2]);
+			em->name = xrealloc(em->name, (size_t)(em->n + 1) * sizeof *em->name);
+			em->val = xrealloc(em->val, (size_t)(em->n + 1) * sizeof *em->val);
+			em->name[em->n] = n;
+			em->val[em->n++] = v;
+			continue;
+		}
+		if (strcmp(h, "scan") == 0) {
+			lower_scan(l, b, e, s);
 			continue;
 		}
 		die(l->file, s->line, "bad statement '%s'", h);
@@ -462,29 +593,76 @@ static float *materialize(L *l, Sx *init, const Shape *sh, const char *pname)
 }
 
 /* Dead-code elimination. Roots are the output and the update sources; a think
- * loop that is live keeps its init and whatever its yield needs. Instructions
- * are pure, so anything unreachable from a root is removed. Compiler-generated
+ * loop that is live keeps its init and whatever its yield needs. A scan keeps
+ * the carries that are read after the loop or by its live body, and the
+ * stacks read after it; the rest are removed from the scan. Instructions are
+ * pure, so anything unreachable from a root is removed. Compiler-generated
  * params (autodiff constants) that end up unreferenced are marked dead so the
  * writers skip them. */
-static void dce_block(Block *b, char *live)
+static void mark_block(const Block *b, char *live);
+
+/* Liveness of one scan; returns whether any output is live. */
+static int mark_scan(const Ins *in, char *live)
 {
-	int k = 0;
+	const Scan *s = in->sc;
+	int any = 0;
+	for (int m = 0; m < s->ny; m++)
+		if (live[s->ys[m]]) { live[s->y[m]] = 1; any = 1; }
+	for (int changed = 1; changed;) { /* a carry read by the live body is needed too */
+		mark_block(in->body, live);
+		changed = 0;
+		for (int k = 0; k < s->nc; k++)
+			if (live[s->c[k]] && !live[s->next[k]]) { live[s->next[k]] = 1; changed = 1; }
+	}
+	for (int k = 0; k < s->nc; k++)
+		if (live[s->c[k]]) { live[s->init[k]] = 1; any = 1; }
+	if (any)
+		for (int j = 0; j < s->nx; j++) live[s->x[j]] = 1;
+	return any;
+}
+
+static void mark_block(const Block *b, char *live)
+{
 	for (int i = b->len - 1; i >= 0; i--) {
-		Ins *in = &b->v[i];
-		if (!live[in->out]) {
-			in->out = -1; /* removed */
-			continue;
-		}
-		if (in->op == OP_THINK) {
-			live[in->init] = 1;
-			live[in->yield] = 1;
-			dce_block(in->body, live);
-		} else {
-			for (int j = 0; j < in->na; j++) live[in->a[j]] = 1;
+		const Ins *in = &b->v[i];
+		if (in->op == OP_SCAN) {
+			mark_scan(in, live);
+		} else if (live[in->out]) {
+			if (in->op == OP_THINK) {
+				live[in->init] = 1;
+				live[in->yield] = 1;
+				mark_block(in->body, live);
+			} else {
+				for (int j = 0; j < in->na; j++) live[in->a[j]] = 1;
+			}
 		}
 	}
-	for (int i = 0; i < b->len; i++)
-		if (b->v[i].out >= 0) b->v[k++] = b->v[i];
+}
+
+static void dce_block(Block *b, char *live)
+{
+	mark_block(b, live);
+	int k = 0;
+	for (int i = 0; i < b->len; i++) {
+		Ins *in = &b->v[i];
+		if (in->op == OP_SCAN) {
+			Scan *s = in->sc;
+			int nc = 0, ny = 0;
+			for (int c = 0; c < s->nc; c++)
+				if (live[s->c[c]]) { s->c[nc] = s->c[c]; s->init[nc] = s->init[c]; s->next[nc++] = s->next[c]; }
+			for (int m = 0; m < s->ny; m++)
+				if (live[s->ys[m]]) { s->y[ny] = s->y[m]; s->ys[ny++] = s->ys[m]; }
+			s->nc = nc;
+			s->ny = ny;
+			if (!nc && !ny) continue;
+			in->out = nc ? s->c[0] : s->ys[0];
+			dce_block(in->body, live);
+		} else {
+			if (!live[in->out]) continue;
+			if (in->op == OP_THINK) dce_block(in->body, live);
+		}
+		b->v[k++] = *in;
+	}
 	b->len = k;
 }
 

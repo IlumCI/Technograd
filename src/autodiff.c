@@ -18,7 +18,20 @@
  * Both Jacobian products come from cloning the loop body at h* and running
  * this same reverse pass over the clone. Memory is constant in the number of
  * iterations; a truncated adjoint solve is the Neumann-series ("phantom")
- * approximation. Fixed-budget loops have no fixed point and are rejected. */
+ * approximation. Fixed-budget loops have no fixed point and are rejected.
+ *
+ * scan loops are differentiated by backpropagation through time, as another
+ * scan. The forward scan is extended to stack each carry's start-of-step
+ * value (the activation store, T x carry, planned statically like any other
+ * tensor). The reverse scan runs t = T-1 .. 0 over those stacks, the
+ * sequences and the adjoints of the stacked outputs. Its carries are the
+ * carry adjoints u (starting from the adjoints of the final carries) and one
+ * accumulator per outer value the body reads; its body is the forward body
+ * cloned at the stored carries and swept in reverse, so
+ *   u      <- (d next / d c)^T u + (d y / d c)^T gy[t]
+ *   acc_w  <- acc_w + (d next / d w)^T u + (d y / d w)^T gy[t]
+ * and the per-step adjoints of the sequence rows are stacked. Memory is
+ * O(T x carry); no recomputation. */
 #include "tg.h"
 
 #include <stdlib.h>
@@ -110,8 +123,9 @@ static int K(AD *a, float k)
 }
 
 /* A constant all-ones tensor, shared per shape (compiler-generated param). */
-static int ONES(AD *a, const Shape *s)
+static int ONES(AD *a, const Shape *sp)
 {
+	Shape s0 = *sp, *s = &s0; /* sp may point into m->val, which may move */
 	char name[64];
 	size_t o = (size_t)snprintf(name, sizeof name, "__ones");
 	for (int i = 0; i < s->rank; i++) o += (size_t)snprintf(name + o, sizeof name - o, "_%d", s->dim[i]);
@@ -125,8 +139,9 @@ static int ONES(AD *a, const Shape *s)
 }
 
 /* A constant selecting one slot of ELLPACK pairs: 1 at slot (0 index, 1 value), 0 elsewhere. */
-static int ELL_SLOT(AD *a, const Shape *s, int slot)
+static int ELL_SLOT(AD *a, const Shape *sp, int slot)
 {
+	Shape s0 = *sp, *s = &s0; /* sp may point into m->val, which may move */
 	char name[64];
 	size_t o = (size_t)snprintf(name, sizeof name, "__ell%d", slot);
 	for (int i = 0; i < s->rank; i++) o += (size_t)snprintf(name + o, sizeof name - o, "_%d", s->dim[i]);
@@ -146,8 +161,14 @@ static const Shape *SH(AD *a, int v) { return &a->m->val[v].sh; }
 static void mark_defs(const Block *b, char *in)
 {
 	for (int i = 0; i < b->len; i++) {
+		if (b->v[i].op == OP_SCAN) {
+			const Scan *s = b->v[i].sc;
+			for (int k = 0; k < s->nc; k++) in[s->c[k]] = 1;
+			for (int j = 0; j < s->nx; j++) in[s->xt[j]] = 1;
+			for (int y = 0; y < s->ny; y++) in[s->ys[y]] = 1;
+		}
 		in[b->v[i].out] = 1;
-		if (b->v[i].op == OP_THINK) mark_defs(b->v[i].body, in);
+		if (b->v[i].op == OP_THINK || b->v[i].op == OP_SCAN) mark_defs(b->v[i].body, in);
 	}
 }
 
@@ -157,6 +178,16 @@ static void outer_reads_rec(const Block *b, const char *in, int state, void (*f)
 	for (int i = 0; i < b->len; i++) {
 		const Ins *ins = &b->v[i];
 		int r[TG_MAXARGS + 1] = { -1, -1, -1, -1 };
+		if (ins->op == OP_SCAN) {
+			const Scan *s = ins->sc;
+			int lists[4] = { s->nc, s->nx, s->nc, s->ny };
+			const int *vals[4] = { s->init, s->x, s->next, s->y };
+			for (int l = 0; l < 4; l++)
+				for (int k = 0; k < lists[l]; k++)
+					if (vals[l][k] != state && !in[vals[l][k]]) f(ctx, vals[l][k]);
+			outer_reads_rec(ins->body, in, state, f, ctx);
+			continue;
+		}
 		if (ins->op == OP_THINK) {
 			r[0] = ins->init;
 			r[1] = ins->yield;
@@ -175,6 +206,22 @@ static void outer_reads(AD *a, const Ins *t, void (*f)(void *, int), void *ctx)
 	mark_defs(t->body, in);
 	outer_reads_rec(t->body, in, t->out, f, ctx);
 	if (t->yield != t->out && !in[t->yield]) f(ctx, t->yield);
+	xfree(in);
+}
+
+/* Values the body of scan t reads from outside it (carries and slices excluded). */
+static void scan_outer_reads(AD *a, const Ins *t, void (*f)(void *, int), void *ctx)
+{
+	const Scan *s = t->sc;
+	char *in = xmalloc((size_t)a->m->nval);
+	mark_defs(t->body, in);
+	for (int k = 0; k < s->nc; k++) in[s->c[k]] = 1;
+	for (int j = 0; j < s->nx; j++) in[s->xt[j]] = 1;
+	outer_reads_rec(t->body, in, -1, f, ctx);
+	for (int k = 0; k < s->nc; k++)
+		if (!in[s->next[k]]) { in[s->next[k]] = 1; f(ctx, s->next[k]); }
+	for (int y = 0; y < s->ny; y++)
+		if (!in[s->y[y]]) { in[s->y[y]] = 1; f(ctx, s->y[y]); }
 	xfree(in);
 }
 
@@ -208,6 +255,13 @@ static int depends(AD *a, int v)
 		Ins t = *in;
 		DepScan s = { a, depends(a, t.init) };
 		if (!s.any) outer_reads(a, &t, dep_cb, &s);
+		r = s.any;
+	} else if (in && in->op == OP_SCAN) { /* any output depends if any input does */
+		Ins t = *in;
+		DepScan s = { a, 0 };
+		for (int k = 0; k < t.sc->nc && !s.any; k++) s.any = depends(a, t.sc->init[k]);
+		for (int j = 0; j < t.sc->nx && !s.any; j++) s.any = depends(a, t.sc->x[j]);
+		if (!s.any) scan_outer_reads(a, &t, dep_cb, &s);
 		r = s.any;
 	} else if (in) {
 		for (int j = 0; j < in->na && !r; j++) r = depends(a, in->a[j]);
@@ -260,6 +314,16 @@ static int bcast_rows(AD *a, int v, int cols) /* (r) -> (r,c) */
 /* ---- vector-Jacobian products ------------------------------------------- */
 
 static void think_vjp(AD *a, Ins t, int g, Adj *adj);
+static void scan_vjp(AD *a, Ins t, Adj *adj);
+
+static int scan_has_adj(const Ins *in, const Adj *adj)
+{
+	for (int k = 0; k < in->sc->nc; k++)
+		if (adj_get(adj, in->sc->c[k]) >= 0) return 1;
+	for (int y = 0; y < in->sc->ny; y++)
+		if (adj_get(adj, in->sc->ys[y]) >= 0) return 1;
+	return 0;
+}
 
 static void vjp(AD *a, const Ins *in, int g, Adj *adj)
 {
@@ -414,6 +478,7 @@ static void vjp(AD *a, const Ins *in, int g, Adj *adj)
 	}
 	case OP_SPMM_TC: /* optimizer-internal compact gradient */
 	case OP_THINK:
+	case OP_SCAN:
 	case OP_COUNT:
 		break;
 	}
@@ -425,6 +490,10 @@ static void sweep(AD *a, Block *b, int lo, int hi, Adj *adj)
 {
 	for (int i = hi - 1; i >= lo; i--) {
 		Ins in = b->v[i]; /* copy: emission may reallocate b */
+		if (in.op == OP_SCAN) {
+			if (scan_has_adj(&in, adj)) scan_vjp(a, in, adj);
+			continue;
+		}
 		int g = adj_get(adj, in.out);
 		if (g < 0) continue;
 		if (in.op == OP_THINK) think_vjp(a, in, g, adj);
@@ -437,27 +506,216 @@ static void sweep(AD *a, Block *b, int lo, int hi, Adj *adj)
 static int has_think(const Block *b)
 {
 	for (int i = 0; i < b->len; i++)
-		if (b->v[i].op == OP_THINK) return 1;
+		if (b->v[i].op == OP_THINK || b->v[i].op == OP_SCAN) return 1;
 	return 0;
+}
+
+/* Re-emit a loop body into a->b with the values from[i] replaced by to[i].
+ * Returns the map from body values to their clones (-1 outside the body);
+ * the caller frees it. Bodies hold no nested loops (checked by callers). */
+typedef struct {
+	int *map, n;
+	const int *from, *to;
+	int nsub;
+} Clone;
+
+static int cl_get(const Clone *c, int v)
+{
+	for (int i = 0; i < c->nsub; i++)
+		if (c->from[i] == v) return c->to[i];
+	return v < c->n && c->map[v] >= 0 ? c->map[v] : v;
+}
+
+static Clone clone_block(AD *a, const Block *body, const int *from, const int *to, int nsub)
+{
+	Clone c = { NULL, a->m->nval, from, to, nsub };
+	c.map = xmalloc((size_t)c.n * sizeof *c.map);
+	for (int i = 0; i < c.n; i++) c.map[i] = -1;
+	for (int i = 0; i < body->len; i++) {
+		Ins in = body->v[i];
+		c.map[in.out] = in.op == OP_CONST ? K(a, in.k)
+			      : E3(a, in.op, cl_get(&c, in.a[0]), in.na > 1 ? cl_get(&c, in.a[1]) : -1, in.na > 2 ? cl_get(&c, in.a[2]) : -1);
+	}
+	return c;
 }
 
 /* Re-emit the body of t into a->b with its state replaced by h. Returns the
  * clone of the yielded value. */
 static int clone_body(AD *a, const Ins *t, int h)
 {
-	int n = a->m->nval;
-	int *map = xmalloc((size_t)n * sizeof *map);
-	for (int i = 0; i < n; i++) map[i] = -1;
-#define MAP(v) ((v) == t->out ? h : (v) < n && map[v] >= 0 ? map[v] : (v))
-	for (int i = 0; i < t->body->len; i++) {
-		Ins in = t->body->v[i];
-		map[in.out] = in.op == OP_CONST ? K(a, in.k)
-			    : E3(a, in.op, MAP(in.a[0]), in.na > 1 ? MAP(in.a[1]) : -1, in.na > 2 ? MAP(in.a[2]) : -1);
-	}
-	int y = MAP(t->yield);
-#undef MAP
-	xfree(map);
+	Clone c = clone_block(a, t->body, &t->out, &h, 1);
+	int y = cl_get(&c, t->yield);
+	xfree(c.map);
 	return y;
+}
+
+static int ZEROS(AD *a, const Shape *sp)
+{
+	Shape s = *sp;
+	return E(a, OP_MUL, ONES(a, &s), K(a, 0));
+}
+
+/* ---- scan: backpropagation through time ---------------------------------- */
+
+typedef struct {
+	int *v, n;
+} List;
+
+static void list_cb(void *ctx, int v)
+{
+	List *l = ctx;
+	for (int i = 0; i < l->n; i++)
+		if (l->v[i] == v) return;
+	l->v = xrealloc(l->v, (size_t)(l->n + 1) * sizeof *l->v);
+	l->v[l->n++] = v;
+}
+
+static void scan_vjp(AD *a, Ins t, Adj *adj)
+{
+	Module *m = a->m;
+	Scan *s = t.sc; /* shared with the instruction in its block: history is added in place */
+	if (has_think(t.body)) die(a->file, a->line, "grad through loops nested in a scan is not supported yet");
+	AD save = *a;
+	Block *outer = a->b;
+	int T = s->T, nc = s->nc, nx = s->nx, ny0 = s->ny;
+
+	/* 1. activation store: the forward scan stacks every carry's start-of-step value */
+	int *hist = xmalloc((size_t)nc * sizeof *hist);
+	Block *fb = m->def_blk[t.out];
+	int fi = m->def_idx[t.out];
+	for (int k = 0; k < nc; k++) {
+		hist[k] = -1;
+		for (int y = 0; y < s->ny; y++)
+			if (s->y[y] == s->c[k]) hist[k] = s->ys[y];
+		if (hist[k] < 0) {
+			Shape q = m->val[s->c[k]].sh;
+			if (q.rank == TG_MAXRANK) die(a->file, a->line, "grad through scan: carry rank %d leaves no room for the time axis", q.rank);
+			for (int d = q.rank; d > 0; d--) q.dim[d] = q.dim[d - 1];
+			q.dim[0] = T;
+			q.rank++;
+			hist[k] = mod_value(m, V_TMP, &q, NULL);
+			scan_stack(s, s->c[k], hist[k]);
+			mod_note_def(m, hist[k], fb, fi);
+		}
+	}
+
+	/* 2. the reverse scan's carries (carry adjoints) and sequences */
+	Scan *r = scan_new(T, !s->reverse);
+	int lo = m->nval;
+	for (int k = 0; k < nc; k++) scan_carry(r, mod_value(m, V_TMP, &m->val[s->c[k]].sh, NULL), -1, -1);
+	int *hk = xmalloc((size_t)nc * sizeof *hk), *xs = xmalloc((size_t)nx * sizeof *xs), *gs = xmalloc((size_t)(ny0 ? ny0 : 1) * sizeof *gs);
+	for (int k = 0; k < nc; k++) {
+		hk[k] = mod_value(m, V_TMP, &m->val[s->c[k]].sh, NULL);
+		scan_seq(r, hist[k], hk[k]);
+	}
+	for (int j = 0; j < nx; j++) {
+		xs[j] = mod_value(m, V_TMP, &m->val[s->xt[j]].sh, NULL);
+		scan_seq(r, s->x[j], xs[j]);
+	}
+	for (int y = 0; y < ny0; y++) {
+		int g = adj_get(adj, s->ys[y]);
+		gs[y] = -1;
+		if (g < 0) continue;
+		gs[y] = mod_value(m, V_TMP, &m->val[s->y[y]].sh, NULL);
+		scan_seq(r, g, gs[y]);
+	}
+
+	/* 3. the reverse body: the forward body at the stored carries, swept backwards */
+	Block *rb = xmalloc(sizeof *rb);
+	a->b = rb;
+	int nsub = nc + nx, *from = xmalloc((size_t)nsub * sizeof *from), *to = xmalloc((size_t)nsub * sizeof *to);
+	for (int k = 0; k < nc; k++) { from[k] = s->c[k]; to[k] = hk[k]; }
+	for (int j = 0; j < nx; j++) { from[nc + j] = s->xt[j]; to[nc + j] = xs[j]; }
+	Clone cl = clone_block(a, t.body, from, to, nsub);
+	int ncl = rb->len;
+	a->clo = lo;
+	a->chi = m->nval;
+	a->hs = -1;
+	a->excl = -1;
+	a->use_dep = 1;
+	Adj in = { 0 };
+	for (int k = 0; k < nc; k++) acc(a, &in, cl_get(&cl, s->next[k]), r->c[k]);
+	for (int y = 0; y < ny0; y++)
+		if (gs[y] >= 0) acc(a, &in, cl_get(&cl, s->y[y]), gs[y]);
+	sweep(a, rb, 0, ncl, &in);
+	for (int k = 0; k < nc; k++) {
+		int u = adj_get(&in, hk[k]);
+		r->next[k] = u >= 0 ? u : ZEROS(a, &m->val[s->c[k]].sh);
+	}
+	/* per-step adjoints of the sequence rows, restored to the outer want() */
+	a->clo = save.clo;
+	a->chi = save.chi;
+	a->hs = save.hs;
+	a->excl = save.excl;
+	a->use_dep = save.use_dep;
+	int *dx = xmalloc((size_t)(nx ? nx : 1) * sizeof *dx);
+	for (int j = 0; j < nx; j++) {
+		dx[j] = -1;
+		int g = adj_get(&in, xs[j]);
+		if (g < 0 || !want(a, s->x[j])) continue;
+		dx[j] = mod_value(m, V_TMP, &m->val[s->x[j]].sh, NULL);
+		scan_stack(r, g, dx[j]);
+	}
+	/* accumulators for the outer values the body reads */
+	List rd = { NULL, 0 };
+	scan_outer_reads(a, &t, list_cb, &rd);
+	int *accv = xmalloc((size_t)(rd.n ? rd.n : 1) * sizeof *accv), nacc = 0;
+	int *accw = xmalloc((size_t)(rd.n ? rd.n : 1) * sizeof *accw);
+	for (int i = 0; i < rd.n; i++) {
+		int w = rd.v[i], g = adj_get(&in, w);
+		if (g < 0 || !want(a, w)) continue;
+		int st = mod_value(m, V_TMP, &m->val[w].sh, NULL);
+		scan_carry(r, st, -1, E(a, OP_ADD, st, g));
+		accv[nacc] = st;
+		accw[nacc++] = w;
+	}
+	xfree(in.v);
+	xfree(cl.map);
+
+	/* 4. initial values in the outer block, then the reverse scan itself */
+	a->b = outer;
+	for (int k = 0; k < r->nc; k++) {
+		if (k < nc) {
+			int g = adj_get(adj, s->c[k]);
+			r->init[k] = g >= 0 ? g : ZEROS(a, &m->val[s->c[k]].sh);
+		} else {
+			r->init[k] = ZEROS(a, &m->val[r->c[k]].sh);
+		}
+	}
+	Ins *ri = block_push(outer);
+	int idx = outer->len - 1;
+	ri->op = OP_SCAN;
+	ri->sc = r;
+	ri->body = rb;
+	ri->out = r->c[0];
+	for (int k = 0; k < r->nc; k++) mod_note_def(m, r->c[k], outer, idx);
+	for (int y = 0; y < r->ny; y++) mod_note_def(m, r->ys[y], outer, idx);
+
+	/* 5. hand the results to the outer adjoints */
+	for (int k = 0; k < nc; k++)
+		if (want(a, s->init[k])) acc(a, adj, s->init[k], r->c[k]);
+	for (int i = 0; i < nacc; i++) acc(a, adj, accw[i], accv[i]);
+	for (int j = 0, y = 0; j < nx; j++)
+		if (dx[j] >= 0) acc(a, adj, s->x[j], r->ys[y++]);
+
+	if (tr_on(2)) {
+		tr_begin(2, "grad");
+		tr_num("scan_steps", T);
+		tr_num("carries", nc);
+		tr_num("accumulators", nacc);
+		tr_end("backpropagation through a %d-step scan: %d carr%s, %d accumulated gradient(s), %d stacked carry history", T, nc,
+		       nc == 1 ? "y" : "ies", nacc, nc);
+	}
+	xfree(hist);
+	xfree(hk);
+	xfree(xs);
+	xfree(gs);
+	xfree(from);
+	xfree(to);
+	xfree(dx);
+	xfree(rd.v);
+	xfree(accv);
+	xfree(accw);
 }
 
 static void think_vjp(AD *a, Ins t, int g, Adj *adj)
@@ -549,6 +807,15 @@ static void collect(Tape *tp, int v)
 	if (tp->n == tp->cap) tp->v = xrealloc(tp->v, (size_t)(tp->cap = tp->cap ? tp->cap * 2 : 32) * sizeof *tp->v);
 	tp->v[tp->n++] = (Ref){ a->m->def_blk[v], a->m->def_idx[v] };
 	Ins t = *in;
+	if (t.op == OP_SCAN) { /* one tape entry for all its outputs */
+		int *outs = xmalloc((size_t)ins_outs(&t, NULL) * sizeof *outs), no = ins_outs(&t, outs);
+		for (int i = 0; i < no; i++) tp->seen[outs[i]] = 1;
+		xfree(outs);
+		for (int k = 0; k < t.sc->nc; k++) collect(tp, t.sc->init[k]);
+		for (int j = 0; j < t.sc->nx; j++) collect(tp, t.sc->x[j]);
+		scan_outer_reads(a, &t, collect_cb, tp);
+		return;
+	}
 	if (t.op == OP_THINK) outer_reads(a, &t, collect_cb, tp); /* the fixed point does not depend on init */
 	else
 		for (int j = 0; j < t.na; j++) collect(tp, t.a[j]);
@@ -580,6 +847,10 @@ static GradCache *gc_get(AD *a0, int y)
 		adj_put(&adj, y, K(&a, 1));
 		for (int i = 0; i < tp.n; i++) {
 			Ins in = tp.v[i].b->v[tp.v[i].i];
+			if (in.op == OP_SCAN) {
+				if (scan_has_adj(&in, &adj)) scan_vjp(&a, in, &adj);
+				continue;
+			}
 			int g = adj_get(&adj, in.out);
 			if (g < 0) continue;
 			if (in.op == OP_THINK) think_vjp(&a, in, g, &adj);

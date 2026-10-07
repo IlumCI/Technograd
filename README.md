@@ -31,7 +31,7 @@ file is the black box you ship to the target.
 make            # builds build/tgc (C11, no dependencies beyond libm; perl at build time)
 build/tgc train hf:scikit-learn/iris            # any dataset, no configuration: detect, featurize, train, export
 build/tgc predict iris_model new_flowers.csv     # predictions on raw new data
-make test       # 170 checks (offline; TG_TEST_NETWORK=1 adds a Hugging Face run)
+make test       # 189 checks (offline; TG_TEST_NETWORK=1 adds a Hugging Face run)
 make fixer      # retrain the auto-fix forest (deterministic, ~15 s) and evaluate it on held-out programs
 
 build/tgc run  examples/latent_reasoner.tg 1,0,0,1,0,1,1,0
@@ -44,6 +44,7 @@ build/tgc run examples/newton.tg 2,9,16 -vv --log run.jsonl   # stage/value/iter
 build/tgc batch examples/latent_reasoner.tg data.bin -j auto -o out.bin   # rows across all cores, bit-identical to -j 1
 build/tgc batch examples/delta_memory.tg tests/state/mem.csv   # a model that rewrites its own memory every run
 build/tgc batch examples/train_xor.tg xor.csv --save-state xor   # online SGD via grad(); writes xor.<weight>.bin
+build/tgc batch examples/selective_ssm.tg seqs.csv   # a Mamba-style layer over 12-step sequences, trained by BPTT
 build/tgc plan examples/latent_reasoner.tg   # arena layout: 320 B instead of 624 B unshared
 build/tgc c    examples/latent_reasoner.tg -o reasoner.c
 cc -O2 -DTG_MAIN reasoner.c -lm -o reasoner && ./reasoner 1,0,0,1,0,1,1,0
@@ -213,6 +214,7 @@ every failure.
 - Survey: *A Survey on Latent Reasoning*, [arXiv:2507.06203](https://arxiv.org/abs/2507.06203).
 - Static arena planning, greedy by size: Pisarchyk & Lee, [arXiv:2001.03288](https://arxiv.org/abs/2001.03288).
 - Sparse rows: feature hashing, Weinberger et al., [arXiv:0902.2206](https://arxiv.org/abs/0902.2206); sparse embedding-bag layers over hashed ids as in DLRM, [arXiv:1906.00091](https://arxiv.org/abs/1906.00091). This is the basis for `spmm` and the text path of `tgc train`. Row-sparse (lazy) optimizer steps on the touched rows follow the lazy Adam used for sparse embeddings (TensorFlow's TPU embedding optimizers, MXNet `lazy_update`), with a closed-form catch-up of the skipped steps.
+- Sequence loops: `scan` follows the carry/sequence/stack form of JAX's `lax.scan`; its gradient is backpropagation through time (Werbos, 1990) as a reverse scan over a statically planned activation store. Selective state-space models: Mamba, [arXiv:2312.00752](https://arxiv.org/abs/2312.00752); Mamba-3, [arXiv:2603.15569](https://arxiv.org/abs/2603.15569). This is the basis for `scan` and `examples/selective_ssm.tg`.
 - Self-updating state: test-time training layers, [arXiv:2407.04620](https://arxiv.org/abs/2407.04620); Titans, [arXiv:2501.00663](https://arxiv.org/abs/2501.00663); DeltaNet, [arXiv:2406.06484](https://arxiv.org/abs/2406.06484); Gated DeltaNet, [arXiv:2412.06464](https://arxiv.org/abs/2412.06464); test-time regression as the unifying view, [arXiv:2501.12352](https://arxiv.org/abs/2501.12352). This is the basis for `state` and `update`.
 - Optimizers: Muon, [arXiv:2502.16982](https://arxiv.org/abs/2502.16982); optimizer comparison for tabular MLPs, [arXiv:2604.15297](https://arxiv.org/abs/2604.15297). Text features: feature hashing, Weinberger et al., [arXiv:0902.2206](https://arxiv.org/abs/0902.2206).
 - Automatic differentiation through `think` loops: Deep Equilibrium Models, [arXiv:1909.01377](https://arxiv.org/abs/1909.01377) (implicit differentiation at the fixed point); truncated adjoints are the Neumann-series phantom gradients related to Jacobian-free backpropagation, [arXiv:2103.12803](https://arxiv.org/abs/2103.12803).
@@ -232,7 +234,8 @@ src/        compiler: parse.c (surface), lower.c (inline/SSA), ir.c (TGIR read/w
 fixer/      forest.tg (trained ranker, a Technograd program), corpus/ (training programs)
 runtime/    tg_rt.h: kernels shared by the VM and the generated code
 examples/   xor.tg, newton.tg, latent_reasoner.tg, activations.tg + use_import.tg (cross-file),
-            delta_memory.tg, drift_calibration.tg (self-updating state), train_xor.tg (train + adamw), sgd_by_hand.tg (the same, via grad + update)
+            delta_memory.tg, drift_calibration.tg (self-updating state), train_xor.tg (train + adamw), sgd_by_hand.tg (the same, via grad + update),
+            selective_ssm.tg (scan + backpropagation through time)
 tests/      run.sh, positive cases, diagnostic cases, fix/ (auto-fix), imports/ (cross-file), data/ (datasets)
 docs/       SPEC.md
 ```

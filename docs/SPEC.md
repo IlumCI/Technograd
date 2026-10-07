@@ -72,6 +72,9 @@ update NAME = expr               set a state for the next run (section 15)
 update NAME[rows] = expr         set only rows `rows` (n) of a state (D, ...) to expr (n, ...)
 think S for N [until EPS]:       latent loop, see section 7
     block
+scan C, ... over X in E, ...:    loop over the rows of sequences, see section 19
+    block
+emit N = expr                    in a scan body: stack expr over the steps as N
 ```
 
 ## 6. Expressions
@@ -144,6 +147,8 @@ TYPE  := (f32 d...)
 INSTR := (NAME TYPE (OP VALUE...))        ; OP from the builtin table, by name; 1 to 3 operands
        | (NAME TYPE (const NUMBER))
        | (NAME TYPE (think INIT MAX EPS|none INSTR... (yield VALUE)))
+       | (scan T forward|reverse (carry C TYPE INIT)... (in X TYPE SEQ)...
+               (body INSTR...) (next C VALUE)... (emit Y TYPE VALUE)...)   ; section 19
 ```
 
 Rules enforced by the reader:
@@ -442,7 +447,9 @@ model compiles to freestanding C like any other.
   get zero. Its two derivative operations are themselves differentiable, so
   second-order gradients through `spmm` work;
 - `take` sends its gradient to the table as a scatter-add (`take_t`), whose
-  own derivative is `take`; `active` returns indices and has none.
+  own derivative is `take`; `active` returns indices and has none;
+- `scan` loops are differentiated by backpropagation through time
+  (section 19).
 
 ### Through `think` loops
 
@@ -482,7 +489,7 @@ model itself also compiles to C (about 11.5 KB for the XOR MLP, using only
 
 `tests/gradcheck.pl` compares every derivative rule, including both
 implicit-differentiation cases and both second-order `spmm` cases, against
-central finite differences (31 cases, worst relative error 3.4e-4). A planted bug in one rule makes 9 cases fail.
+central finite differences (37 cases, worst relative error 4.3e-4). A planted bug in one rule makes 9 cases fail.
 
 ## 17. Training statement and optimizers
 
@@ -729,18 +736,117 @@ default of 32768 takes the plateau; `infer.c` then holds 4 MB of weights
 (compiles in about 6 s with `gcc -O2`). `--text-dim` trades accuracy for size
 on small targets.
 
-## 19. Roadmap
+## 19. `scan` and backpropagation through time
+
+```python
+h = h0
+scan h, c over xt in x, gt in g:      # x : f32[T, ...], g : f32[T, ...]
+    h = f(h, xt, gt)
+    c = c + sum(h)
+    emit hs = h                        # hs : f32[T, shape of h] after the loop
+```
+
+`scan` steps through the first axis of one or more sequences (the shape of
+JAX's `lax.scan`: carries, sequences, stacked outputs).
+
+1. **Carries** (`h, c`) must be bound before the loop; their values are the
+   initial carries. At the end of each step the value bound to each carry
+   name is its next value; it must keep the carry's shape. After the loop the
+   names hold the final carries.
+2. **Sequences** (`xt in x`) all have the same length T along their first
+   axis. In step t the slice name is row t (`x[t]`, shape `x` without its
+   first axis). Each sequence is an expression, so a projection such as
+   `xt in x @ W` is computed for all steps at once before the loop.
+3. **`emit N = v`**, directly in the scan body, binds N after the loop to the
+   `(T, shape of v)` stack of v. Rows are written before the carries advance,
+   so emitting a carry name before reassigning it stacks the start-of-step
+   value.
+4. Assigning any other outer name is a compile error, as are `update`,
+   `train` and `return` inside the body. `think` and `scan` nest inside a
+   scan body and inside defs.
+
+TGIR spells a scan out with its carries, slices, body, next values and
+stacks (section 8). In C it is a `for` loop over row offsets; nothing is
+allocated: carries, slices and stacks are arena tensors.
+
+### Backpropagation through time
+
+`grad` through a scan builds a second scan that runs backwards:
+
+1. **Activation store.** The forward scan is extended to stack each carry's
+   start-of-step value, `(T, carry)`. It is planned like any tensor, so a
+   training step still has a fixed memory size, known at compile time.
+2. **Reverse scan** (TGIR `reverse`), t = T-1 .. 0, over the stored carries,
+   the sequences and the adjoints of the stacked outputs. Its carries are
+   the carry adjoints u, starting from the adjoints of the final carries,
+   and one accumulator per outer value the body reads (weights, earlier
+   values). Its body is the forward body cloned at the stored carries and
+   swept in reverse:
+
+   ```
+   u      <- (d next / d c)^T u + (d y / d c)^T gy[t]
+   acc_w  <- acc_w + (d next / d w)^T u + (d y / d w)^T gy[t]
+   dx[t]  <- (d next / d x_t)^T u + (d y / d x_t)^T gy[t]      stacked
+   ```
+3. After the loop: u is the gradient of the initial carries, each
+   accumulator the gradient of its value, and the stacks the gradients of
+   the sequences.
+
+Nothing is recomputed: memory is O(T x carry) for the store plus the forward
+body's temporaries once. The reverse scan is itself a scan, so gradients of
+gradients work (tested). Carries and accumulators nobody uses are removed by
+dead-code elimination. `-vv` reports each transform:
+`[grad] backpropagation through a 12-step scan: 1 carry, 6 accumulated
+gradient(s), 1 stacked carry history`.
+
+Not yet supported: gradients through loops nested in a scan body (a compile
+error). Forward execution of nested loops works.
+
+**Verification.** Six finite-difference cases in `tests/gradcheck.pl`:
+gradients with respect to the sequence, the weights and the initial carry;
+two carries with a swap and a start-of-step `emit`; a selective SSM; and a
+second-order gradient. `tests/scan/scan.tg` runs forward scans, a think loop
+inside a scan, a scan in a def and two reverse scans in the VM, from TGIR
+and as C, with identical output.
+
+### Example: a selective state-space layer
+
+`examples/selective_ssm.tg` is a Mamba-style layer (Gu & Dao,
+arXiv:2312.00752) with an input-dependent step size and zero-order-hold
+discretization, trained with `train mse(y, target) with adamw(lr=0.01)` by
+BPTT through a 12-step scan:
+
+```python
+a = softplus(la)
+h = h0
+scan h over xt in x:
+    dt = softplus(xt @ Wd + bd)
+    e = exp(-(dt * a))
+    h = e * h + (1 - e) / a * (B @ xt)
+    emit y = dot(c, h) + d
+train mse(y, target) with adamw(lr=0.01)
+```
+
+On the task in `tests/run.sh` (a running sum that a flag in the input
+resets) one pass over 20,000 sequences brings the error to under 30% of
+predicting zero (about 20% measured) in 0.8 s. The full training step
+(forward scan, reverse scan, AdamW) needs a 1,936-byte arena. The same
+model compiles to C and trains on the device exactly like the VM (tested
+over 100 sequences).
+
+## 20. Roadmap
 
 Ordered by importance for latent-reasoning models on embedded targets:
 
 1. int8/int4 weights with per-channel scales, and fixed-point kernels for
    targets without an FPU.
-2. Causal attention over a fixed-size KV ring, for token-level Coconut
-   models, where continuous thoughts are mixed with token embeddings. Token
-   embedding itself is already available as `spmm` with one `(token, 1)`
-   pair per row.
-3. Autodiff through fixed-budget and nested think loops: unrolled
-   backpropagation through time with a statically planned activation store.
+2. Token-level sequence models: a Mamba-3 layer (arXiv:2603.15569:
+   exponential-trapezoidal discretization, complex-valued transitions as 2x2
+   rotations) on `scan`, and `tgc train --model ssm` feeding hashed word ids
+   through `spmm` embeddings, against the bag-of-words baseline. Causal
+   attention over a fixed-size KV ring only where a hybrid needs it.
+3. Autodiff through fixed-budget think loops (as a scan with a stored
+   history) and through loops nested in scan and think bodies.
 4. Learned halting heads (`until` driven by a predicate value) in addition to
    convergence halting.
 5. Native backends from the planned IR: ARMv7-M/ARMv8-M assembly with

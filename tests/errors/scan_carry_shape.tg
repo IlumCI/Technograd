@@ -1,0 +1,7 @@
+# expect: scan carry 'h' changes shape from (f32 4 2) to (f32)
+model e
+def forward(x: f32[4, 2]) -> f32[2]:
+    h = x * 0
+    scan h over xt in x:
+        h = sum(xt)
+    return h

@@ -9,7 +9,13 @@
  *     (%N (f32) (const V))
  *     (%N (f32 d...) (think INIT MAX EPS|none
  *        ...body instructions...
- *        (yield V))))
+ *        (yield V)))
+ *     (scan T forward|reverse
+ *       (carry C (f32 d...) INIT) ...      ; C: the carry in the body, the final value after
+ *       (in XT (f32 d...) SEQ) ...         ; XT: row t of SEQ, visible in the body only
+ *       (body ...instructions...)
+ *       (next C V) ...                     ; one per carry, in order
+ *       (emit YS (f32 T d...) V) ...))     ; YS: the stack of V over the steps
  *   (output V))
  *
  * Values are SSA. Inside a think body the instruction's own name denotes the
@@ -36,6 +42,14 @@ static int *ren;
 static void number(const Block *b, int *next)
 {
 	for (int i = 0; i < b->len; i++) {
+		if (b->v[i].op == OP_SCAN) { /* reader order: carries, slices, body, stacks */
+			const Scan *s = b->v[i].sc;
+			for (int k = 0; k < s->nc; k++) ren[s->c[k]] = (*next)++;
+			for (int j = 0; j < s->nx; j++) ren[s->xt[j]] = (*next)++;
+			number(b->v[i].body, next);
+			for (int y = 0; y < s->ny; y++) ren[s->ys[y]] = (*next)++;
+			continue;
+		}
 		ren[b->v[i].out] = (*next)++;
 		if (b->v[i].op == OP_THINK) number(b->v[i].body, next);
 	}
@@ -52,9 +66,48 @@ static void write_block(const Module *m, const Block *b, FILE *f, int d)
 	char sh[64], n0[64], n1[64], n2[64];
 	for (int i = 0; i < b->len; i++) {
 		const Ins *in = &b->v[i];
+		indent(f, d);
+		if (in->op == OP_SCAN) {
+			const Scan *s = in->sc;
+			fprintf(f, "(scan %d %s\n", s->T, s->reverse ? "reverse" : "forward");
+			for (int k = 0; k < s->nc; k++) {
+				vname(m, s->c[k], n0, sizeof n0);
+				vname(m, s->init[k], n1, sizeof n1);
+				shape_str(&m->val[s->c[k]].sh, sh, sizeof sh);
+				indent(f, d + 1);
+				fprintf(f, "(carry %s %s %s)\n", n0, sh, n1);
+			}
+			for (int j = 0; j < s->nx; j++) {
+				vname(m, s->xt[j], n0, sizeof n0);
+				vname(m, s->x[j], n1, sizeof n1);
+				shape_str(&m->val[s->xt[j]].sh, sh, sizeof sh);
+				indent(f, d + 1);
+				fprintf(f, "(in %s %s %s)\n", n0, sh, n1);
+			}
+			indent(f, d + 1);
+			fputs("(body\n", f);
+			write_block(m, in->body, f, d + 2);
+			indent(f, d + 1);
+			fputs(")\n", f);
+			for (int k = 0; k < s->nc; k++) {
+				vname(m, s->c[k], n0, sizeof n0);
+				vname(m, s->next[k], n1, sizeof n1);
+				indent(f, d + 1);
+				fprintf(f, "(next %s %s)\n", n0, n1);
+			}
+			for (int y = 0; y < s->ny; y++) {
+				vname(m, s->ys[y], n0, sizeof n0);
+				vname(m, s->y[y], n1, sizeof n1);
+				shape_str(&m->val[s->ys[y]].sh, sh, sizeof sh);
+				indent(f, d + 1);
+				fprintf(f, "(emit %s %s %s)\n", n0, sh, n1);
+			}
+			indent(f, d);
+			fputs(")\n", f);
+			continue;
+		}
 		vname(m, in->out, n0, sizeof n0);
 		shape_str(&m->val[in->out].sh, sh, sizeof sh);
-		indent(f, d);
 		fprintf(f, "(%s %s ", n0, sh);
 		if (in->op == OP_CONST) {
 			fprintf(f, "(const %.9g))\n", (double)in->k);
@@ -175,11 +228,108 @@ static void need(R *r, const Sx *x, int ok, const char *what)
 	if (!ok) die(r->file, x->line, "malformed %s", what);
 }
 
+static void r_block(R *r, Block *b, const Sx *forms, int from, int to);
+
+static void r_scan(R *r, Block *b, const Sx *x)
+{
+	Module *m = r->m;
+	char s0[64], s1[64];
+	need(r, x, x->len >= 4 && x->v[1]->k == SX_NUM && x->v[1]->n >= 1 && x->v[1]->n == (double)(int)x->v[1]->n, "scan (steps)");
+	need(r, x, sx_issym(x->v[2], "forward") || sx_issym(x->v[2], "reverse"), "scan (direction)");
+	Scan *s = scan_new((int)x->v[1]->n, sx_issym(x->v[2], "reverse"));
+	int i = 3, mark = r->n;
+	const Sx **cname = xmalloc((size_t)x->len * sizeof *cname);
+	for (; i < x->len && x->v[i]->k == SX_LIST && x->v[i]->len == 4 && sx_issym(x->v[i]->v[0], "carry"); i++) {
+		const Sx *c = x->v[i];
+		int init = r_get(r, c->v[3]);
+		Shape sh = r_shape(r, c->v[2]);
+		if (!shape_eq(&sh, &m->val[init].sh)) die(r->file, c->line, "carry type differs from its initial value");
+		cname[s->nc] = c->v[1];
+		scan_carry(s, mod_value(m, V_TMP, &sh, NULL), init, -1);
+	}
+	need(r, x, s->nc >= 1, "scan (needs a carry)");
+	int *seqv = xmalloc((size_t)x->len * sizeof *seqv);
+	const Sx **xname = xmalloc((size_t)x->len * sizeof *xname);
+	int nx = 0;
+	for (; i < x->len && x->v[i]->k == SX_LIST && x->v[i]->len == 4 && sx_issym(x->v[i]->v[0], "in"); i++) {
+		const Sx *c = x->v[i];
+		int q = r_get(r, c->v[3]);
+		Shape sh = r_shape(r, c->v[2]), want = m->val[q].sh;
+		if (want.rank < 1 || want.dim[0] != s->T) die(r->file, c->line, "sequence does not have %d steps along its first axis", s->T);
+		for (int d = 1; d < want.rank; d++) want.dim[d - 1] = want.dim[d];
+		want.rank--;
+		if (!shape_eq(&sh, &want)) die(r->file, c->line, "slice type differs from a row of its sequence");
+		seqv[nx] = q;
+		xname[nx++] = c->v[1];
+		scan_seq(s, q, mod_value(m, V_TMP, &sh, NULL));
+	}
+	need(r, x, nx >= 1, "scan (needs a sequence)");
+	for (int k = 0; k < s->nc; k++) r_def(r, cname[k], s->c[k]); /* body scope: carries and slices */
+	for (int j = 0; j < nx; j++) r_def(r, xname[j], s->xt[j]);
+	need(r, x, i < x->len && x->v[i]->k == SX_LIST && x->v[i]->len >= 1 && sx_issym(x->v[i]->v[0], "body"), "scan (body)");
+	Ins *ins = block_push(b);
+	int idx = (int)(ins - b->v);
+	Block *body = xmalloc(sizeof *body);
+	r_block(r, body, x->v[i], 1, x->v[i]->len);
+	i++;
+	for (int k = 0; k < s->nc; k++, i++) {
+		need(r, x, i < x->len && x->v[i]->k == SX_LIST && x->v[i]->len == 3 && sx_issym(x->v[i]->v[0], "next"), "scan (next)");
+		if (r_get(r, x->v[i]->v[1]) != s->c[k]) die(r->file, x->v[i]->line, "'next' entries must follow the carries in order");
+		int nv = r_get(r, x->v[i]->v[2]);
+		if (!shape_eq(&m->val[nv].sh, &m->val[s->c[k]].sh)) die(r->file, x->v[i]->line, "next value shape differs from its carry");
+		for (int j = 0; j < s->nc; j++)
+			if (j != k && nv == s->c[j]) die(r->file, x->v[i]->line, "a carry's next value cannot be another carry");
+		s->next[k] = nv;
+	}
+	int *yv = xmalloc((size_t)x->len * sizeof *yv), ny = 0;
+	const Sx **yname = xmalloc((size_t)x->len * sizeof *yname);
+	for (; i < x->len; i++) {
+		const Sx *c = x->v[i];
+		need(r, c, c->k == SX_LIST && c->len == 4 && sx_issym(c->v[0], "emit"), "scan (emit)");
+		int v = r_get(r, c->v[3]);
+		Shape sh = r_shape(r, c->v[2]), want = m->val[v].sh;
+		if (want.rank == TG_MAXRANK) die(r->file, c->line, "stack rank exceeds %d", TG_MAXRANK);
+		for (int d = want.rank; d > 0; d--) want.dim[d] = want.dim[d - 1];
+		want.dim[0] = s->T;
+		want.rank++;
+		if (!shape_eq(&sh, &want)) {
+			shape_str(&sh, s0, sizeof s0);
+			shape_str(&want, s1, sizeof s1);
+			die(r->file, c->line, "emit declared %s but stacks to %s", s0, s1);
+		}
+		yv[ny] = v;
+		yname[ny++] = c->v[1];
+	}
+	r->n = mark; /* drop the body scope */
+	for (int k = 0; k < s->nc; k++) r_def(r, cname[k], s->c[k]);
+	for (int y = 0; y < ny; y++) {
+		Shape sh = r_shape(r, x->v[x->len - ny + y]->v[2]);
+		int ys = mod_value(m, V_TMP, &sh, NULL);
+		scan_stack(s, yv[y], ys);
+		r_def(r, yname[y], ys);
+	}
+	ins = &b->v[idx];
+	ins->op = OP_SCAN;
+	ins->sc = s;
+	ins->body = body;
+	ins->out = s->c[0];
+	ins->init = ins->yield = -1;
+	xfree(cname);
+	xfree(seqv);
+	xfree(xname);
+	xfree(yv);
+	xfree(yname);
+}
+
 static void r_block(R *r, Block *b, const Sx *forms, int from, int to)
 {
 	char err[256], s0[64], s1[64];
 	for (int i = from; i < to; i++) {
 		const Sx *x = forms->v[i];
+		if (x->k == SX_LIST && x->len >= 1 && sx_issym(x->v[0], "scan")) {
+			r_scan(r, b, x);
+			continue;
+		}
 		need(r, x, x->k == SX_LIST && x->len == 3 && x->v[2]->k == SX_LIST && x->v[2]->len >= 1, "instruction");
 		Shape decl = r_shape(r, x->v[1]);
 		const Sx *e = x->v[2];

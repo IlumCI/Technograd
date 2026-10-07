@@ -38,12 +38,13 @@ const OpInfo tg_ops[OP_COUNT] = {
 	[OP_TAKE_T]    = { "take_t",    3, CLS_ROWS },
 	[OP_SPMM_TC]   = { "spmm_tc",   3, CLS_ROWS },
 	[OP_THINK]     = { "think",     0, CLS_THINK },
+	[OP_SCAN]      = { "scan",      0, CLS_SCAN },
 };
 
 int op_lookup(const char *name)
 {
 	for (int i = 0; i < OP_COUNT; i++)
-		if (i != OP_CONST && i != OP_THINK && strcmp(tg_ops[i].name, name) == 0) return i;
+		if (i != OP_CONST && i != OP_THINK && i != OP_SCAN && strcmp(tg_ops[i].name, name) == 0) return i;
 	return -1;
 }
 
@@ -214,6 +215,7 @@ int op_infer(Op op, const Shape *a, int na, Shape *out, char *err, size_t errn)
 		return 1;
 	}
 	case CLS_THINK:
+	case CLS_SCAN:
 		break;
 	}
 	snprintf(err, errn, "'%s' is not a value operation", oi->name);

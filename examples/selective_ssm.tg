@@ -1,0 +1,32 @@
+# A selective state-space layer (Mamba-style), trained by backpropagation
+# through time. Each step reads a value and a reset flag; the target is the
+# sum of the values since the last reset. Solving it needs selectivity: the
+# step size dt depends on the input, so the layer can hold its state (small
+# dt) or flush and rewrite it (large dt) token by token.
+#
+#   dt  = softplus(x_t Wd + bd)                    per-channel step size
+#   e   = exp(-dt * a)                             per-channel decay, a > 0
+#   h   = e * h + (1 - e) / a * (B x_t)            zero-order-hold update
+#   y_t = c . h + d                                readout
+#
+# One run = one sequence of 12 steps and one AdamW step on its loss.
+model selective_ssm
+
+state Wd : f32[2, 8] = rand(1, 0.5)
+state bd : f32[8] = zeros
+state la : f32[8] = [-2, -1.5, -1, -0.5, 0, 0.5, 1, 1.5]
+state B : f32[8, 2] = rand(2, 0.5)
+state c : f32[8] = rand(3, 0.5)
+state d : f32 = 0
+param h0 : f32[8] = zeros
+
+def forward(x: f32[12, 2], target: f32[12]) -> f32[12]:
+    a = softplus(la)
+    h = h0
+    scan h over xt in x:
+        dt = softplus(xt @ Wd + bd)
+        e = exp(-(dt * a))
+        h = e * h + (1 - e) / a * (B @ xt)
+        emit y = dot(c, h) + d
+    train mse(y, target) with adamw(lr=0.01)
+    return y

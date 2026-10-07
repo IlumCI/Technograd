@@ -1,0 +1,9 @@
+# expect: 'update' inside scan block (a state changes once per run)
+model e
+state m : f32 = 0
+def forward(x: f32[4]) -> f32:
+    s = 0
+    scan s over xt in x:
+        s = s + xt
+        update m = s
+    return s

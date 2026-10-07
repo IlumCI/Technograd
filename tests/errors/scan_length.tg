@@ -1,0 +1,8 @@
+# expect: scan sequences differ in length: 4 and 3 steps
+model e
+def forward(x: f32[4, 2], g: f32[3]) -> f32[2]:
+    h = x * 0
+    s = sum(h)
+    scan s over xt in x, gt in g:
+        s = s + sum(xt) * gt
+    return xt

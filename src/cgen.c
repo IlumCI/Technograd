@@ -118,6 +118,47 @@ static void block(G *g, const Block *b, int d)
 			fprintf(g->f, "tg_transpose(%s, %s, %d, %d);\n", o, a, s->dim[0], s->dim[1]);
 			break;
 		}
+		case CLS_SCAN: {
+			const Scan *s = in->sc;
+			char p[64], q[64];
+			fprintf(g->f, "/* scan: %d steps%s, %d carr%s, %d sequence(s), %d stack(s) */\n", s->T, s->reverse ? " in reverse" : "",
+				s->nc, s->nc == 1 ? "y" : "ies", s->nx, s->ny);
+			for (int k = 0; k < s->nc; k++) {
+				ref(g, s->c[k], p, sizeof p);
+				ref(g, s->init[k], q, sizeof q);
+				ind(g, d);
+				fprintf(g->f, "tg_copy(%s, %s, %d);\n", p, q, shape_numel(&m->val[s->c[k]].sh));
+			}
+			ind(g, d);
+			fprintf(g->f, "for (int s%d = 0; s%d < %d; s%d++) {\n", d, d, s->T, d);
+			ind(g, d + 1);
+			if (s->reverse) fprintf(g->f, "const int t%d = %d - s%d;\n", d, s->T - 1, d);
+			else fprintf(g->f, "const int t%d = s%d;\n", d, d);
+			for (int j = 0; j < s->nx; j++) {
+				int w = shape_numel(&m->val[s->xt[j]].sh);
+				ref(g, s->xt[j], p, sizeof p);
+				ref(g, s->x[j], q, sizeof q);
+				ind(g, d + 1);
+				fprintf(g->f, "tg_copy(%s, %s + t%d * %d, %d);\n", p, q, d, w, w);
+			}
+			block(g, in->body, d + 1);
+			for (int y = 0; y < s->ny; y++) {
+				int w = shape_numel(&m->val[s->y[y]].sh);
+				ref(g, s->ys[y], p, sizeof p);
+				ref(g, s->y[y], q, sizeof q);
+				ind(g, d + 1);
+				fprintf(g->f, "tg_copy(%s + t%d * %d, %s, %d);\n", p, d, w, q, w);
+			}
+			for (int k = 0; k < s->nc; k++) {
+				ref(g, s->c[k], p, sizeof p);
+				ref(g, s->next[k], q, sizeof q);
+				ind(g, d + 1);
+				fprintf(g->f, "tg_copy(%s, %s, %d);\n", p, q, shape_numel(&m->val[s->c[k]].sh));
+			}
+			ind(g, d);
+			fputs("}\n", g->f);
+			break;
+		}
 		case CLS_THINK: {
 			char init[64], y[64];
 			ref(g, in->init, init, sizeof init);

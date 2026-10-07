@@ -1,0 +1,6 @@
+# expect: scan carry 'h' must be assigned before the loop
+model e
+def forward(x: f32[4, 2]) -> f32[2]:
+    scan h over xt in x:
+        h = xt
+    return h

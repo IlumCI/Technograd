@@ -1,0 +1,9 @@
+# expect: scan block assigns outer variable 'z'; only the carries are carried (use emit to collect per-step values)
+model e
+def forward(x: f32[4, 2]) -> f32:
+    s = 0
+    z = 1
+    scan s over xt in x:
+        z = sum(xt)
+        s = s + z
+    return s

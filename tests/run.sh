@@ -38,6 +38,7 @@ tests/cases/nested.tg:0.3,-0.7 tests/cases/multi_input.tg:1,2,3:0.5 tests/cases/
 examples/use_import.tg:1,-1,2,-2 examples/delta_memory.tg:1,0,0,0:1,2,3,4 tests/bcast/broadcast.tg:0.1,-0.2,0.3,1,2,-1,0,0,0,-3,0.5,0.25
 tests/sparse/spmm.tg:0,1,2,0.5,5,-1,0,0,1,1,1,1,9,3,-1,2:0.5,-0.5
 tests/sparse/rows.tg:0,1,2,0.5,5,-1,1,1,1,1,9,0.3:0.5,-0.5
+tests/scan/scan.tg:1,2,3,4,5,6,7,8:1,0.5,-1,2 examples/selective_ssm.tg:0.1,0,0.2,0,-0.3,1,0.4,0,0.1,0,0.2,1,-0.1,0,0.3,0,0.2,0,-0.4,1,0.1,0,0.2,0:0.1,0.3,-0.3,0.1,0.2,0.2,0.1,0.4,0.6,-0.4,-0.3,-0.1
 examples/drift_calibration.tg:10,20,30"
 for c in $CASES; do
 	f=${c%%:*}
@@ -137,7 +138,7 @@ $TGC ir examples/delta_memory.tg | grep -q "(update mem %" && ok || bad "TGIR lo
 #     on-device training in generated C matching the VM bit for bit
 mkdir -p "$TMP/gc"
 if perl tests/gradcheck.pl "$TGC" "$TMP/gc" > "$TMP/gc.out"; then ok; else bad "gradcheck: $(grep FAIL "$TMP/gc.out")"; fi
-[ "$(grep -c "^ok" "$TMP/gc.out")" -ge 31 ] && ok || bad "gradcheck ran too few cases"
+[ "$(grep -c "^ok" "$TMP/gc.out")" -ge 37 ] && ok || bad "gradcheck ran too few cases"
 perl -e 'srand(3); my @d=([0,0,0],[0,1,1],[1,0,1],[1,1,0]); for (1..1500) { for my $r (sort { rand() <=> 0.5 } @d) { print join(",", @$r), "\n" } }' > "$TMP/xt.csv"
 $TGC batch examples/train_xor.tg "$TMP/xt.csv" --save-state "$TMP/xor" -o "$TMP/xp.csv"
 paste -d, "$TMP/xt.csv" "$TMP/xp.csv" | tail -8 | awk -F, '{ if ($3 == 1 && $4 < 0.9 || $3 == 0 && $4 > 0.1) bad = 1 } END { exit bad }' && ok || bad "XOR not learned"
@@ -168,6 +169,14 @@ for f in model.tg infer.tg infer.c features.tgf report.txt weights.w1.bin; do [ 
 printf 'b,a\n0.1,0.2\n3.1,0.1\n0.2,2.9\n' > "$TMP/new.csv"   # columns reordered, no target
 [ "$($TGC predict "$TMP/blobs_model" "$TMP/new.csv" 2>/dev/null | cut -d, -f1 | tr '\n' ' ')" = 'prediction "k0" "k2" "k1" ' ] && ok || bad "predict on reordered columns"
 $CC -std=c99 -Wall -Werror -c -o "$TMP/infer.o" "$TMP/blobs_model/infer.c" && ok || bad "generated infer.c does not compile"
+# scan + backpropagation through time: a selective SSM learns a resettable sum
+perl -e 'srand(7); for (1..20000) { my (@x, @t); my $s = 0; for (1..12) { my $r = rand() < 0.2 ? 1 : 0; my $v = sprintf("%.2f", rand() - 0.5); $s = 0 if $r; $s += $v; push @x, $v, $r; push @t, sprintf("%.4f", $s) } print join(",", @x, @t), "\n" }' > "$TMP/ssm.csv"
+$TGC batch examples/selective_ssm.tg "$TMP/ssm.csv" -o "$TMP/ssm.out"
+paste -d, "$TMP/ssm.csv" "$TMP/ssm.out" | awk -F, '{ se = 0; z = 0; for (i = 1; i <= 12; i++) { e = $(24 + i) - $(36 + i); se += e * e; z += $(24 + i) ^ 2 } if (NR > 19000) { b += se; zz += z } } END { exit !(b < 0.3 * zz) }' && ok || bad "selective SSM did not learn"
+$TGC c examples/selective_ssm.tg -o "$TMP/ssm.c" && $CC -std=c99 -O2 -Wall -Wextra -Werror -pedantic -DTG_MAIN -o "$TMP/ssmb" "$TMP/ssm.c" -lm && ok || bad "BPTT training unit compile"
+head -100 "$TMP/ssm.csv" > "$TMP/ssm100.csv"
+[ "$("$TMP/ssmb" $(awk -F, '{ x = $1; for (i = 2; i <= 24; i++) x = x "," $i; t = $25; for (i = 26; i <= 36; i++) t = t "," $i; printf "%s %s ", x, t }' "$TMP/ssm100.csv") | tr ' ' ',')" = "$($TGC batch examples/selective_ssm.tg "$TMP/ssm100.csv")" ] && ok || bad "on-device BPTT training differs from VM"
+[ "$($TGC check examples/selective_ssm.tg -vv 2>&1 | grep -c 'backpropagation through a 12-step scan')" = 1 ] && ok || bad "BPTT trace"
 # row-sparse (lazy) optimizer steps on spmm tables
 lz() { sed "s/OPT/$1/" > "$TMP/lz.tg" <<'TG'
 model lz

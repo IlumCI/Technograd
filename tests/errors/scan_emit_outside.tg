@@ -1,0 +1,5 @@
+# expect: 'emit' is only allowed directly in a scan body
+model e
+def forward(x: f32[2]) -> f32[2]:
+    emit y = x
+    return x

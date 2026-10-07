@@ -13,6 +13,8 @@
  *   block    := NL INDENT stmt {stmt} DEDENT
  *   stmt     := NAME '=' expr NL | 'return' expr NL
  *             | 'think' NAME 'for' INT ['until' num] ':' block
+ *             | 'scan' NAME {',' NAME} 'over' NAME 'in' expr {',' NAME 'in' expr} ':' block
+ *             | 'emit' NAME '=' expr NL            (scan bodies only)
  *   expr     := term {('+'|'-') term}
  *   term     := unary {('*'|'/'|'@') unary}
  *   unary    := '-' unary | primary
@@ -21,6 +23,7 @@
  * AST forms:
  *   (model N) (param N TYPE INIT) (def N ((a TYPE)...) TYPE (stmts...))
  *   (set N E) (return E) (think N MAX EPS (stmts...))
+ *   (scan (C...) ((XT E)...) (stmts...)) (emit N E)
  *   (num V) (ref N) (call F E...)
  *   TYPE = (f32 d...)   INIT = (zeros) (ones) (fill v) (rand s k) (file "p") (data v...) */
 #include "tg.h"
@@ -161,7 +164,7 @@ static Tok *expect(P *p, TokKind k, const char *what)
 	return t;
 }
 
-static const char *kw[] = { "model", "param", "def", "return", "think", "for", "until", "f32", "import", "state", "update", "train", "with", "over", NULL };
+static const char *kw[] = { "model", "param", "def", "return", "think", "for", "until", "f32", "import", "state", "update", "train", "with", "over", "scan", "emit", NULL }; /* `in` is contextual (scan only) */
 
 static Tok *expect_name(P *p)
 {
@@ -385,6 +388,37 @@ static Sx *stmt(P *p)
 		Sx *u = sx_list(line, 3, sx_sym("update", line), sx_sym(n->s, line), e);
 		if (rows) sx_push(u, rows);
 		return u;
+	}
+	if (iskw(t, "scan")) {
+		next(p);
+		Sx *cs = sx_new(SX_LIST, line), *xs = sx_new(SX_LIST, line);
+		for (;;) {
+			Tok *n = expect_name(p);
+			sx_push(cs, sx_sym(n->s, n->line));
+			if (!isop(peek(p), ",")) break;
+			next(p);
+		}
+		Tok *o = next(p);
+		if (!iskw(o, "over")) die(p->file, o->line, "expected 'over' after the scan carries, got '%s'", tokdesc(o));
+		for (;;) {
+			Tok *n = expect_name(p);
+			Tok *in = next(p);
+			if (!iskw(in, "in")) die(p->file, in->line, "expected 'in' after scan slice '%s', got '%s'", n->s, tokdesc(in));
+			sx_push(xs, sx_list(n->line, 2, sx_sym(n->s, n->line), expr(p)));
+			if (!isop(peek(p), ",")) break;
+			next(p);
+		}
+		expect_op(p, ":");
+		Sx *b = block(p);
+		return sx_list(line, 4, sx_sym("scan", line), cs, xs, b);
+	}
+	if (iskw(t, "emit")) {
+		next(p);
+		Tok *n = expect_name(p);
+		expect_op(p, "=");
+		Sx *e = expr(p);
+		expect(p, T_NL, "end of line");
+		return sx_list(line, 3, sx_sym("emit", line), sx_sym(n->s, line), e);
 	}
 	if (iskw(t, "think")) {
 		next(p);

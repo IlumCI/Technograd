@@ -77,10 +77,11 @@ typedef enum {
 	OP_SPMM, OP_SPMM_T, OP_SPMM_DX,
 	OP_ACTIVE, OP_TAKE, OP_TAKE_T, OP_SPMM_TC,
 	OP_THINK,
+	OP_SCAN,
 	OP_COUNT
 } Op;
 
-typedef enum { CLS_CONST, CLS_BIN, CLS_UN, CLS_MATMUL, CLS_ROW, CLS_RED, CLS_TRANS, CLS_OUTER, CLS_SPMM, CLS_ROWS, CLS_THINK } OpClass;
+typedef enum { CLS_CONST, CLS_BIN, CLS_UN, CLS_MATMUL, CLS_ROW, CLS_RED, CLS_TRANS, CLS_OUTER, CLS_SPMM, CLS_ROWS, CLS_THINK, CLS_SCAN } OpClass;
 
 typedef struct {
 	const char *name;
@@ -89,7 +90,7 @@ typedef struct {
 } OpInfo;
 
 extern const OpInfo tg_ops[OP_COUNT];
-int op_lookup(const char *name); /* -1 if unknown; never returns OP_CONST/OP_THINK */
+int op_lookup(const char *name); /* -1 if unknown; never returns OP_CONST/OP_THINK/OP_SCAN */
 int op_infer(Op op, const Shape *a, int na, Shape *out, char *err, size_t errn);
 
 /* matmul operand geometry: o[m,n] = a[m,k] @ b[k,n] */
@@ -114,6 +115,18 @@ typedef struct {
 
 typedef struct Block Block;
 
+/* OP_SCAN: a loop over the leading axis of T-row sequences (JAX-style scan).
+ * Carries c[k] start at init[k] and become next[k] after every step; after the
+ * loop c[k] holds the final value. Each step sees row t of every sequence x[j]
+ * as the slice value xt[j], and row t of every stack ys[m] receives the body
+ * value y[m] (read before the carries advance). reverse runs t = T-1 .. 0. */
+typedef struct {
+	int T, reverse;
+	int nc, *c, *init, *next;
+	int nx, *x, *xt;
+	int ny, *y, *ys;
+} Scan;
+
 typedef struct GradCache {
 	int y;
 	Block *b;
@@ -132,6 +145,7 @@ typedef struct {
 	Block *body;  /* OP_THINK */
 	int yield;    /* OP_THINK: next-state value computed by body */
 	int tid;      /* OP_THINK: index into the steps vector */
+	Scan *sc;     /* OP_SCAN (body in `body`; `out` is one of its outputs) */
 	int pbeg, pend;
 } Ins;
 
@@ -168,6 +182,11 @@ typedef struct {
 Module *mod_new(const char *name);
 int mod_value(Module *m, VKind k, const Shape *sh, const char *name);
 Ins *block_push(Block *b);
+Scan *scan_new(int T, int reverse);
+void scan_carry(Scan *s, int c, int init, int next);
+void scan_seq(Scan *s, int x, int xt);
+void scan_stack(Scan *s, int y, int ys);
+int ins_outs(const Ins *in, int *buf); /* every value an instruction defines; buf may be NULL */
 void mod_update(Module *m, int state, int src); /* record `update state = src` */
 void mod_update_rows(Module *m, int state, int src, int rows); /* `update state[rows] = src` */
 int upd_check(const Module *m, int state, int src, int rows, char *err, size_t n); /* shape rules of an update */

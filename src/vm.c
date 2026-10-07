@@ -180,6 +180,24 @@ static void exec(VM *vm, const Block *b)
 			tg_transpose(o, a, s->dim[0], s->dim[1]);
 			break;
 		}
+		case CLS_SCAN: {
+			const Scan *s = in->sc;
+			for (int k = 0; k < s->nc; k++) tg_copy(ptr(vm, s->c[k]), ptr(vm, s->init[k]), shape_numel(&m->val[s->c[k]].sh));
+			for (int step = 0; step < s->T; step++) {
+				int t = s->reverse ? s->T - 1 - step : step;
+				for (int j = 0; j < s->nx; j++) {
+					int w = shape_numel(&m->val[s->xt[j]].sh);
+					tg_copy(ptr(vm, s->xt[j]), ptr(vm, s->x[j]) + (size_t)t * (size_t)w, w);
+				}
+				exec(vm, in->body);
+				for (int y = 0; y < s->ny; y++) {
+					int w = shape_numel(&m->val[s->y[y]].sh);
+					tg_copy(ptr(vm, s->ys[y]) + (size_t)t * (size_t)w, ptr(vm, s->y[y]), w);
+				}
+				for (int k = 0; k < s->nc; k++) tg_copy(ptr(vm, s->c[k]), ptr(vm, s->next[k]), shape_numel(&m->val[s->c[k]].sh));
+			}
+			break;
+		}
 		case CLS_THINK: {
 			tg_copy(o, ptr(vm, in->init), n);
 			const float *y = NULL;
@@ -204,7 +222,7 @@ static void exec(VM *vm, const Block *b)
 			break;
 		}
 		}
-		if (vm->dbg && in->op != OP_THINK) trace_ins(vm, in, o, n);
+		if (vm->dbg && in->op != OP_THINK && in->op != OP_SCAN) trace_ins(vm, in, o, n);
 	}
 }
 

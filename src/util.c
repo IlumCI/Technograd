@@ -177,8 +177,9 @@ Module *mod_new(const char *name)
 	return m;
 }
 
-int mod_value(Module *m, VKind k, const Shape *sh, const char *name)
+int mod_value(Module *m, VKind k, const Shape *shp, const char *name)
 {
+	Shape sh0 = *shp, *sh = &sh0; /* shp may point into m->val, which may move */
 	if (m->nval == m->capval) {
 		m->capval = m->capval ? m->capval * 2 : 64;
 		m->val = xrealloc(m->val, (size_t)m->capval * sizeof *m->val);
@@ -327,4 +328,53 @@ int upd_check(const Module *m, int state, int src, int rows, char *err, size_t n
 	snprintf(err, n, "row update of state '%s' %s needs rows (n) and a value (n, ...) matching its trailing dimensions; got rows %s and value %s",
 		 m->val[state].name, s0, s2, s1);
 	return 0;
+}
+
+Scan *scan_new(int T, int reverse)
+{
+	Scan *s = xmalloc(sizeof *s);
+	s->T = T;
+	s->reverse = reverse;
+	return s;
+}
+
+void scan_carry(Scan *s, int c, int init, int next)
+{
+	s->c = xrealloc(s->c, (size_t)(s->nc + 1) * sizeof *s->c);
+	s->init = xrealloc(s->init, (size_t)(s->nc + 1) * sizeof *s->init);
+	s->next = xrealloc(s->next, (size_t)(s->nc + 1) * sizeof *s->next);
+	s->c[s->nc] = c;
+	s->init[s->nc] = init;
+	s->next[s->nc++] = next;
+}
+
+void scan_seq(Scan *s, int x, int xt)
+{
+	s->x = xrealloc(s->x, (size_t)(s->nx + 1) * sizeof *s->x);
+	s->xt = xrealloc(s->xt, (size_t)(s->nx + 1) * sizeof *s->xt);
+	s->x[s->nx] = x;
+	s->xt[s->nx++] = xt;
+}
+
+void scan_stack(Scan *s, int y, int ys)
+{
+	s->y = xrealloc(s->y, (size_t)(s->ny + 1) * sizeof *s->y);
+	s->ys = xrealloc(s->ys, (size_t)(s->ny + 1) * sizeof *s->ys);
+	s->y[s->ny] = y;
+	s->ys[s->ny++] = ys;
+}
+
+int ins_outs(const Ins *in, int *buf)
+{
+	if (in->op != OP_SCAN) {
+		if (buf) buf[0] = in->out;
+		return 1;
+	}
+	const Scan *s = in->sc;
+	int n = 0;
+	for (int k = 0; k < s->nc; k++, n++)
+		if (buf) buf[n] = s->c[k];
+	for (int m = 0; m < s->ny; m++, n++)
+		if (buf) buf[n] = s->ys[m];
+	return n;
 }
