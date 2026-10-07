@@ -548,7 +548,7 @@ int autotrain_main(int argc, char **argv)
 	Opts o = { 0 };
 	o.val = 0.2;
 	o.max_rows = 20000;
-	o.text_dim = 8192;
+	o.text_dim = 32768;
 	const char *cmd = argv[1];
 	if (!strcmp(cmd, "predict")) return cmd_predict(argc, argv);
 	if (!strcmp(cmd, "train")) {

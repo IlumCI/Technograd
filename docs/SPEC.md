@@ -69,6 +69,7 @@ themselves.
 NAME = expr                      bind (SSA rename; rebinding allowed; params cannot be assigned)
 return expr                      last statement of a def; not allowed inside think
 update NAME = expr               set a state for the next run (section 15)
+update NAME[rows] = expr         set only rows `rows` (n) of a state (D, ...) to expr (n, ...)
 think S for N [until EPS]:       latent loop, see section 7
     block
 ```
@@ -90,6 +91,8 @@ and parentheses. All binary operators are left associative.
 | `outer(a, b)` | `(m),(n)->(m,n)`, `a b^T`; the rank-1 write of delta-rule and Hebbian updates |
 | `step(x)` | elementwise `x > 0 ? 1 : 0`; the derivative of relu, max and min |
 | `spmm(s, w)` | sparse rows times a matrix: `s` is `(K, 2)` or `(B, K, 2)`, each row K `(index, value)` pairs (ELLPACK form), `w` is `(D, H)`; returns `(H)` or `(B, H)`, `sum_k value_k * w[index_k]`. Cost O(B K H), independent of D. Indices round to the nearest integer; padding has value 0; an index outside `[0, D)` is skipped, so no input can address out of bounds. With one pair `(token, 1)` per row it is an embedding gather |
+| `active(s, w)` | `(n)`, n = B K: the distinct rows of `w` that sparse rows `s` touch with a nonzero value, ascending, padded with -1. Not differentiable (indices) |
+| `take(w, r)` | `(D, ...) , (n) -> (n, ...)`: rows `r` of `w`; zero for -1 or out-of-range indices; repeats allowed |
 | `grad(y, x)` | `y` scalar, `x` a name; returns dy/dx with the shape of `x` (section 16) |
 | `mse(p, t)`, `bce(p, t)`, `xent(logits, onehot)` | scalar losses (section 17) |
 
@@ -158,7 +161,11 @@ Writing the reader's output back with `tgc ir` gives the same text again
 Two operations appear only in TGIR, as derivatives of `spmm` written by
 autodiff: `(spmm_t S G W)`, the scatter-add `S^T G` with the shape of `W`
 (gradient for the matrix), and `(spmm_dx S W G)`, with the shape of `S`
-(0 for each index, `W[index] . G[row]` for each value).
+(0 for each index, `W[index] . G[row]` for each value). Likewise
+`(take_t R G W)` scatter-adds the rows of `G` into the shape of `W` (the
+derivative of `take`), and the optimizer writes `(spmm_tc S G R)`, the
+gradient of an `spmm` table restricted to the row set `R`, as `(n, H)`.
+A row update is `(update NAME VALUE ROWS)`.
 
 ## 9. Compiled unit ABI
 
@@ -338,6 +345,12 @@ def forward(k: f32[4], v: f32[4]) -> f32[4]:
 
 - **Declaration.** `state` declares a tensor like `param` does, with the same
   initializers. It can be read anywhere a param can be.
+- **Row updates.** `update NAME[rows] = expr` writes only the listed rows of
+  a state: `rows` is `(n)`, `expr` is `(n, ...)` with the state's trailing
+  dimensions. Indices round to the nearest integer; -1 and out-of-range
+  indices are skipped; a repeated index takes the later row. Staging holds
+  the value and the indices, so the commit costs O(n), not O(state). Under
+  `-v` the trace reads `state NAME: k of D rows updated`.
 - **When updates apply.** `update NAME = expr` computes the next value. All
   updates of a run are committed after the output is computed, in two phases:
   every source is copied to a staging area, then into its state. Every read
@@ -347,7 +360,8 @@ def forward(k: f32[4], v: f32[4]) -> f32[4]:
 - **Restrictions**, each a compile error:
   - `update` only in the body of `forward` (not in a `def`, not in a `think`);
   - each state updated at most once per run;
-  - the value must have the state's shape;
+  - the value must have the state's shape (a row update: rows `(n)` and a
+    value `(n, ...)` matching the state's trailing dimensions);
   - a `param` cannot be updated;
   - a state cannot be assigned with `=`.
 - **Persistence across runs:**
@@ -426,7 +440,9 @@ model compiles to freestanding C like any other.
 - `spmm` sends gradients to the matrix (a scatter-add over the active rows)
   and to the values of the sparse rows; indices are piecewise constant and
   get zero. Its two derivative operations are themselves differentiable, so
-  second-order gradients through `spmm` work.
+  second-order gradients through `spmm` work;
+- `take` sends its gradient to the table as a scatter-add (`take_t`), whose
+  own derivative is `take`; `active` returns indices and has none.
 
 ### Through `think` loops
 
@@ -466,7 +482,7 @@ model itself also compiles to C (about 11.5 KB for the XOR MLP, using only
 
 `tests/gradcheck.pl` compares every derivative rule, including both
 implicit-differentiation cases and both second-order `spmm` cases, against
-central finite differences (29 cases, worst relative error 3.4e-4). A planted bug in one rule makes 9 cases fail.
+central finite differences (31 cases, worst relative error 3.4e-4). A planted bug in one rule makes 9 cases fail.
 
 ## 17. Training statement and optimizers
 
@@ -498,6 +514,51 @@ placement rules as `update`: only in the body of `forward`, and not inside
 `clip=c` (any optimizer) rescales all gradients so that their global L2 norm
 is at most `c`. An unknown optimizer or option is a compile error that lists
 the valid ones.
+
+### Row-sparse steps for `spmm` tables
+
+A weight used only as the matrix of `spmm` has a gradient that is zero outside
+the rows the batch touched. `train` detects this from the shared backward pass
+and steps those rows alone (lazy updates, as for sparse embeddings):
+
+1. `r = active(s, w)`, the touched rows; `gc = spmm_tc(s, g, r)`, the compact
+   gradient, `(n, H)`;
+2. the step runs on `take(w, r)` and `take` of the moments;
+3. `update w[r] = ...` and `update m[r] = ...` write the rows back.
+
+Per-step cost is O(n H) with n = B K, instead of O(D H). The dense gradient is
+removed by dead-code elimination. Clipping uses the compact gradient, which
+has the same norm.
+
+**Catch-up.** Each table row records the step it was last updated
+(`__opt_last_<w>`). When a row returns after k skipped steps, the k steps the
+dense optimizer would have taken with a zero gradient are applied first, in
+closed form:
+
+| Optimizer | Catch-up for k skipped steps |
+|-----------|------------------------------|
+| `sgd` | none needed: the lazy step equals the dense step exactly |
+| `momentum` | `w -= lr m mu (1 - mu^k) / (1 - mu)`; `m *= mu^k` (exact) |
+| `adam`, `adamw` | `w -= lr m^/sqrt(v^) q (1 - q^k) / (1 - q)` with `q = beta1 / sqrt(beta2)`, holding the bias corrections at the current step and neglecting eps; `m *= beta1^k`; `v *= beta2^k`; `w *= (1 - lr wd)^k` |
+| `muon` | tables take the AdamW step: Muon orthogonalizes whole matrices and leaves embeddings to AdamW |
+
+A row's trajectory thus follows the dense one, deferred: the forward pass sees
+a row as of its last update. When every row is touched at every step the lazy
+and dense steps are identical; both properties are tested. `lazy=0` forces
+dense steps.
+
+Measured on SST-2 (8192 buckets, AdamW lr 0.01, 3 seeds, validation
+accuracy):
+
+| Step | Accuracy | Time per run |
+|------|----------|--------------|
+| dense | 76.16, 75.07, 74.86 (mean 75.36) | 11.0 s |
+| lazy, no catch-up | 73.41, 74.28, 74.13 (mean 73.94) | 4.0 s |
+| lazy, decay catch-up only | 74.86, 72.40, 74.86 (mean 74.04) | 4.6 s |
+| lazy, full catch-up (default) | 74.93, 75.29, 75.87 (mean 75.36) | 5.3 s |
+
+Most of the gap without catch-up comes from the drift a dense optimizer keeps
+applying to a row on its stale momentum, not from weight decay.
 
 Loss builtins expand to existing operations, so they differentiate like any
 other expression:
@@ -572,7 +633,7 @@ Each column is classified:
 |------|------|----------|
 | numeric | every value parses as a number | standardized; plus a 0/1 missing-value indicator if the column has missing values |
 | categorical | strings with few distinct values (≤ 64, or ≤ 5% of rows and short) | one-hot over the 32 most frequent values |
-| text | longer strings with many distinct values | 8192 signed hashed word-unigram buckets (feature hashing; `--text-dim N`), L2-normalized; enters the model as sparse rows |
+| text | longer strings with many distinct values | 32768 signed hashed word-unigram buckets (feature hashing; `--text-dim N`), L2-normalized; enters the model as sparse rows |
 | vector | fixed-length numeric lists | each component standardized |
 | dropped | identifiers (`id`, `*_id`, ...; or unique increasing integers), nested objects (images, audio), lists of varying length, empty columns | none, and the reason is printed |
 
@@ -637,7 +698,7 @@ present.
 | Dataset (no configuration given) | Result |
 |----------------------------------|--------|
 | `hf:scikit-learn/iris` (150 rows) | 96.67% validation accuracy (mean of 3 seeds); `Id` dropped as an identifier |
-| `hf:SetFit/sst2` (6920 sentences) | 76.16% validation accuracy in 11 s; `label_text` caught as a leak |
+| `hf:SetFit/sst2` (6920 sentences) | 77.48% validation accuracy (mean of 3 seeds) in 6.9 s; `label_text` caught as a leak |
 | synthetic reviews: text + a numeric column, `--target mood` | 100% (regression-tested, including `predict` and compiling `infer.c`) |
 | synthetic `y = 3 x1 - 2 x2 + [red] 1.5 + noise`, 3% missing `x2` | predictions 2.99 and -0.52 for true 3.0 and -0.5 |
 | synthetic 3-class blobs | 100% (regression-tested) |
@@ -646,22 +707,27 @@ On text, unigrams outperformed unigrams+bigrams at every bucket count tried
 (256 to 4096). With a few thousand sentences, bigram collisions add more
 noise than signal.
 
-Sparse rows, SST-2, batch 32, AdamW lr 0.01 (end-to-end time, same machine):
+SST-2, batch 32, AdamW lr 0.01, end-to-end time per run on one machine. Dense
+input and sparse rows with dense steps are single runs (seed 1); row-sparse
+steps are the mean of 3 seeds:
 
-| Buckets | Dense input (previous) | Sparse rows (`spmm`) | Validation accuracy |
-|---------|------------------------|----------------------|---------------------|
-| 1024 | 7.2 s | 2.2 s | 69.4–69.7% |
-| 4096 | 26.4 s | 6.4 s | 72.4–72.8% |
-| 8192 (default) | | 11.0 s | 76.16% |
-| 16384 | | 22.6 s | 76.88% |
-| 32768 | | 49.9 s | 78.40% |
-| 65536 | | 105.9 s | 77.67% |
+| Buckets | Dense input | Sparse rows, dense steps | Sparse rows, row-sparse steps | Accuracy (row-sparse) | `infer.c` |
+|---------|-------------|--------------------------|-------------------------------|-----------------------|-----------|
+| 1024 | 7.2 s | 2.2 s | | | |
+| 4096 | 26.4 s | 6.4 s | | | |
+| 8192 | | 11.0 s | 5.3 s | 75.36% | 4.8 MB |
+| 16384 | | 22.6 s | 5.5 s | 76.37% | 9.5 MB |
+| 32768 (default) | | 49.9 s | 6.9 s | 77.48% | 19 MB |
+| 65536 | | 105.9 s | 9.2 s | 77.26% | 38 MB |
+| 131072 | | | 13.2 s | 77.53% | 76 MB |
 
-More buckets mean fewer hash collisions, and accuracy rises past the 75.7%
-that a linear bag-of-words model reached on 4096 buckets. The remaining cost
-grows with the bucket count because the optimizer still updates every row of
-`wt` on every step (roadmap). The default of 8192 balances accuracy against
-time and the size of `infer.c`; `--text-dim` changes it.
+More buckets mean fewer hash collisions; accuracy passes the 75.7% that a
+linear bag-of-words model reached on 4096 buckets and levels off near 77.5%
+from 32768. What still grows with the bucket count is featurization, the
+initial weights and the best-weights snapshot, not the training step. The
+default of 32768 takes the plateau; `infer.c` then holds 4 MB of weights
+(compiles in about 6 s with `gcc -O2`). `--text-dim` trades accuracy for size
+on small targets.
 
 ## 19. Roadmap
 
@@ -677,8 +743,5 @@ Ordered by importance for latent-reasoning models on embedded targets:
    backpropagation through time with a statically planned activation store.
 4. Learned halting heads (`until` driven by a predicate value) in addition to
    convergence halting.
-5. Row-sparse optimizer steps: update only the rows of a `spmm` table that
-   the batch touched (lazy moments, as in sparse embedding training), so a
-   step costs O(active rows) instead of O(table).
-6. Native backends from the planned IR: ARMv7-M/ARMv8-M assembly with
+5. Native backends from the planned IR: ARMv7-M/ARMv8-M assembly with
    CMSIS-NN style kernels, and RISC-V with the vector extension.

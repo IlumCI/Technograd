@@ -39,6 +39,8 @@ my @cases = (
 	[ 'spmm: values', 'f32[2, 4, 2]', "param I : f32[2, 4, 2] = [[[0, 0], [2, 0], [5, 0], [3, 0]], [[1, 0], [1, 0], [4, 0], [0, 0]]]\nparam M : f32[2, 4, 2] = [[[0, 1], [0, 1], [0, 1], [0, 1]], [[0, 1], [0, 1], [0, 1], [0, 1]]]\nparam W : f32[6, 3] = rand(13, 0.8)", 'sum(tanh(spmm(x * M + I, W)))' ],
 	[ 'spmm: second order (scatter)', 'f32[6, 3]', "param S : f32[2, 4, 2] = [[[0, 1], [2, 0.5], [5, -1], [0, 0]], [[1, 1], [1, 0.7], [9, 3], [4, 2]]]\nparam C : f32[6, 3] = rand(14, 1)", 'sum(grad(sum(tanh(spmm(S, x))), x) * C)' ],
 	[ 'spmm: second order (values)', 'f32[6, 3]', "param S : f32[2, 4, 2] = [[[0, 1], [2, 0.5], [5, -1], [0, 0]], [[1, 1], [1, 0.7], [9, 3], [4, 2]]]\nparam P : f32[2, 4, 2] = rand(15, 1)", 'sum(grad(sum(tanh(spmm(S, x))), S) * P)' ],
+	[ 'take (rows, repeated)', 'f32[5, 3]', "param r : f32[4] = [3, 0, -1, 3]\nparam C : f32[4, 3] = rand(16, 1)", 'sum(tanh(take(x, r)) * C)' ],
+	[ 'take: second order', 'f32[5, 3]', "param r : f32[4] = [3, 0, -1, 3]\nparam C : f32[5, 3] = rand(17, 1)", 'sum(grad(sum(tanh(take(x, r))), x) * C)' ],
 	[ 'think: sqrt fixed point', 'f32[3]', '',
 	  "SETUP h = x * 0.5 + 0.5\n    think h for 200 until 0.0000001:\n        h = 0.5 * (h + x / h)\n    OBJ sum(h)" ],
 	[ 'think: contraction with input', 'f32[4]', "param W : f32[4, 4] = rand(9, 0.3)\nparam c : f32[4] = [1, -1, 2, 0.5]",

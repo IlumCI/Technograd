@@ -257,14 +257,11 @@ static int lower_block(L *l, Block *b, Env *e, Sx *stmts, int is_fn)
 			if (sv < 0 || l->m->val[sv].kind != V_STATE) die(l->file, s->line, "'%s' is not a state", n);
 			for (int k = 0; k < l->m->nupd; k++)
 				if (l->m->upd_state[k] == sv) die(l->file, s->line, "state '%s' updated twice in one run", n);
+			int rows = s->len > 3 ? lower_expr(l, b, e, s->v[3]) : -1; /* update NAME[rows] = v */
 			int v = lower_expr(l, b, e, s->v[2]);
-			if (!shape_eq(&l->m->val[v].sh, &l->m->val[sv].sh)) {
-				char s0[64], s1[64];
-				shape_str(&l->m->val[sv].sh, s0, sizeof s0);
-				shape_str(&l->m->val[v].sh, s1, sizeof s1);
-				die(l->file, s->line, "update of state '%s' %s with a value of shape %s", n, s0, s1);
-			}
-			mod_update(l->m, sv, v);
+			char err[300];
+			if (!upd_check(l->m, sv, v, rows, err, sizeof err)) die(l->file, s->line, "%s", err);
+			mod_update_rows(l->m, sv, v, rows);
 			continue;
 		}
 		if (strcmp(h, "think") == 0) {
@@ -495,7 +492,10 @@ static void dce(Module *m)
 {
 	char *live = xmalloc((size_t)m->nval);
 	live[m->output] = 1;
-	for (int i = 0; i < m->nupd; i++) live[m->upd_src[i]] = 1;
+	for (int i = 0; i < m->nupd; i++) {
+		live[m->upd_src[i]] = 1;
+		if (m->upd_rows[i] >= 0) live[m->upd_rows[i]] = 1;
+	}
 	dce_block(&m->top, live);
 	for (int v = 0; v < m->nval; v++)
 		if (m->val[v].kind == V_PARAM && m->val[v].name && strncmp(m->val[v].name, "__", 2) == 0 && !live[v]) m->val[v].dead = 1;

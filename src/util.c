@@ -210,8 +210,12 @@ void mod_note_def(Module *m, int v, Block *b, int idx)
 	m->def_idx[v] = idx;
 }
 
-void mod_update(Module *m, int state, int src)
+void mod_update(Module *m, int state, int src) { mod_update_rows(m, state, src, -1); }
+
+void mod_update_rows(Module *m, int state, int src, int rows)
 {
+	m->upd_rows = xrealloc(m->upd_rows, (size_t)(m->nupd + 1) * sizeof *m->upd_rows);
+	m->upd_rows[m->nupd] = rows;
 	m->upd_state = xrealloc(m->upd_state, (size_t)(m->nupd + 1) * sizeof *m->upd_state);
 	m->upd_src = xrealloc(m->upd_src, (size_t)(m->nupd + 1) * sizeof *m->upd_src);
 	m->upd_state[m->nupd] = state;
@@ -299,4 +303,28 @@ Module *load_module(const char *path)
 	m = lower(ast, path);
 	if (tr_on(1)) trace_module(m, path, tr_now_ms() - t1);
 	return m;
+}
+
+/* A full update needs the state's shape. A row update `state[rows] = src`
+ * needs a rank >= 1 state (D, ...), rows (n) and src (n, ...). */
+int upd_check(const Module *m, int state, int src, int rows, char *err, size_t n)
+{
+	const Shape *st = &m->val[state].sh, *sr = &m->val[src].sh;
+	char s0[64], s1[64];
+	shape_str(st, s0, sizeof s0);
+	shape_str(sr, s1, sizeof s1);
+	if (rows < 0) {
+		if (shape_eq(st, sr)) return 1;
+		snprintf(err, n, "update of state '%s' %s with a value of shape %s", m->val[state].name, s0, s1);
+		return 0;
+	}
+	const Shape *ri = &m->val[rows].sh;
+	int ok = st->rank >= 1 && ri->rank == 1 && sr->rank == st->rank && sr->dim[0] == ri->dim[0];
+	for (int i = 1; ok && i < st->rank; i++) ok = sr->dim[i] == st->dim[i];
+	if (ok) return 1;
+	char s2[64];
+	shape_str(ri, s2, sizeof s2);
+	snprintf(err, n, "row update of state '%s' %s needs rows (n) and a value (n, ...) matching its trailing dimensions; got rows %s and value %s",
+		 m->val[state].name, s0, s2, s1);
+	return 0;
 }

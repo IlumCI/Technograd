@@ -33,6 +33,10 @@ const OpInfo tg_ops[OP_COUNT] = {
 	[OP_SPMM]      = { "spmm",      2, CLS_SPMM },
 	[OP_SPMM_T]    = { "spmm_t",    3, CLS_SPMM },
 	[OP_SPMM_DX]   = { "spmm_dx",   3, CLS_SPMM },
+	[OP_ACTIVE]    = { "active",    2, CLS_ROWS },
+	[OP_TAKE]      = { "take",      2, CLS_ROWS },
+	[OP_TAKE_T]    = { "take_t",    3, CLS_ROWS },
+	[OP_SPMM_TC]   = { "spmm_tc",   3, CLS_ROWS },
 	[OP_THINK]     = { "think",     0, CLS_THINK },
 };
 
@@ -151,6 +155,62 @@ int op_infer(Op op, const Shape *a, int na, Shape *out, char *err, size_t errn)
 			return 0;
 		}
 		*out = op == OP_SPMM_T ? *w : *x;
+		return 1;
+	}
+	case CLS_ROWS: {
+		/* active(s, w) -> (n): the distinct rows of w that s touches, ascending, padded with -1
+		 * take(w, r) -> (n, ...): rows r of w, zero for -1
+		 * take_t(r, g, w) -> shape of w: rows of g added at r (the gradient of take)
+		 * spmm_tc(s, g, r) -> (n, H): s^T g restricted to rows r (compact gradient) */
+		if (op == OP_TAKE_T) {
+			Shape want = a[2];
+			int ok = a[0].rank == 1 && want.rank >= 1;
+			if (ok) want.dim[0] = a[0].dim[0];
+			if (!ok || !shape_eq(&a[1], &want)) {
+				snprintf(err, errn, "'take_t' needs rows (n), a gradient (n, ...) and the table it scatters into");
+				return 0;
+			}
+			*out = a[2];
+			return 1;
+		}
+		if (op == OP_TAKE) {
+			if (a[0].rank < 1 || a[1].rank != 1) {
+				shape_str(&a[0], s0, sizeof s0);
+				shape_str(&a[1], s1, sizeof s1);
+				snprintf(err, errn, "'take' needs a tensor (D, ...) and row indices (n), got %s and %s", s0, s1);
+				return 0;
+			}
+			*out = a[0];
+			out->dim[0] = a[1].dim[0];
+			return 1;
+		}
+		const Shape *x = &a[0];
+		if ((x->rank != 2 && x->rank != 3) || x->dim[x->rank - 1] != 2) {
+			shape_str(x, s0, sizeof s0);
+			snprintf(err, errn, "'%s' needs sparse rows (K, 2) or (B, K, 2), got %s", oi->name, s0);
+			return 0;
+		}
+		int n = x->rank == 3 ? x->dim[0] * x->dim[1] : x->dim[0];
+		if (op == OP_ACTIVE) {
+			if (a[1].rank < 1) {
+				snprintf(err, errn, "'active' needs the table (D, ...) the rows index");
+				return 0;
+			}
+			out->rank = 1;
+			out->dim[0] = n;
+			return 1;
+		}
+		const Shape *g = &a[1], *r = &a[2];
+		int gr = x->rank == 3 ? 2 : 1;
+		if (g->rank != gr || (gr == 2 && g->dim[0] != x->dim[0]) || r->rank != 1 || r->dim[0] != n) {
+			shape_str(g, s0, sizeof s0);
+			shape_str(r, s1, sizeof s1);
+			snprintf(err, errn, "'spmm_tc' needs a product gradient with one row per sparse row and rows (%d), got %s and %s", n, s0, s1);
+			return 0;
+		}
+		out->rank = 2;
+		out->dim[0] = n;
+		out->dim[1] = g->dim[g->rank - 1];
 		return 1;
 	}
 	case CLS_THINK:

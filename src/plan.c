@@ -95,7 +95,10 @@ void plan(Module *m)
 	Ins **loops = xmalloc((size_t)(depth(&m->top) + 1) * sizeof *loops);
 	live(m, &m->top, loops, 0);
 	use(m, m->output, end, loops, 0);
-	for (int i = 0; i < m->nupd; i++) use(m, m->upd_src[i], end, loops, 0); /* read by the commit */
+	for (int i = 0; i < m->nupd; i++) { /* read by the commit */
+		use(m, m->upd_src[i], end, loops, 0);
+		if (m->upd_rows[i] >= 0) use(m, m->upd_rows[i], end, loops, 0);
+	}
 	xfree(loops);
 
 	int *order = xmalloc((size_t)m->nval * sizeof *order), n = 0;
@@ -129,7 +132,10 @@ void plan(Module *m)
 	/* Commit staging: every update source is copied here first, then into its
 	 * state, so an update reading another state sees the start-of-run value. */
 	m->stage = m->arena;
-	for (int i = 0; i < m->nupd; i++) m->arena += asize(&m->val[m->upd_state[i]]);
+	for (int i = 0; i < m->nupd; i++) {
+		m->arena += asize(&m->val[m->upd_src[i]]);
+		if (m->upd_rows[i] >= 0) m->arena += asize(&m->val[m->upd_rows[i]]);
+	}
 	xfree(order);
 	xfree(placed);
 	xfree(ov);

@@ -174,6 +174,100 @@ TG_FN void tg_spmm_dx(float *o, const float *x, const float *w, const float *g, 
 		}
 }
 
+/* ---- row-sparse steps ----------------------------------------------------
+ * A row set r[n] lists distinct row indices in ascending order, padded with
+ * -1. It lets an optimizer touch only the rows a batch used (lazy updates):
+ * cost O(n H) instead of O(D H). */
+
+TG_FN void tg_sift(float *o, int root, int end)
+{
+	for (;;) {
+		int ch = 2 * root + 1;
+		if (ch >= end) return;
+		if (ch + 1 < end && o[ch + 1] > o[ch]) ch++;
+		if (o[root] >= o[ch]) return;
+		float t = o[root]; o[root] = o[ch]; o[ch] = t;
+		root = ch;
+	}
+}
+
+/* Distinct valid indices of sparse rows x[rows, k, 2] that carry a nonzero
+ * value, ascending (heapsort, no allocation), then -1 padding. */
+TG_FN void tg_active(float *o, const float *x, int rows, int k, int d)
+{
+	int n = rows * k, c = 0;
+	for (int i = 0; i < n; i++) {
+		int t = tg_ell_idx(x[2 * i], d);
+		if (t >= 0 && x[2 * i + 1] != 0.0f) o[c++] = (float)t;
+	}
+	for (int s = c / 2 - 1; s >= 0; s--) tg_sift(o, s, c);
+	for (int end = c - 1; end > 0; end--) {
+		float t = o[0]; o[0] = o[end]; o[end] = t;
+		tg_sift(o, 0, end);
+	}
+	int u = 0;
+	for (int i = 0; i < c; i++)
+		if (u == 0 || o[i] != o[u - 1]) o[u++] = o[i];
+	for (int i = u; i < n; i++) o[i] = -1.0f;
+}
+
+/* Position of row t in the row set, or -1. */
+TG_FN int tg_row_slot(const float *r, int n, int t)
+{
+	int lo = 0, hi = n;
+	while (lo < hi) { /* -1 padding sorts last */
+		int mid = (lo + hi) / 2;
+		if (r[mid] >= 0.0f && r[mid] < (float)t) lo = mid + 1;
+		else hi = mid;
+	}
+	return lo < n && r[lo] == (float)t ? lo : -1;
+}
+
+/* o[n, h] = rows r of w[d, h]; zero for padding. */
+TG_FN void tg_take(float *o, const float *w, const float *r, int n, int d, int h)
+{
+	for (int i = 0; i < n; i++) {
+		int t = tg_ell_idx(r[i], d);
+		for (int j = 0; j < h; j++) o[i * h + j] = t >= 0 ? w[t * h + j] : 0.0f;
+	}
+}
+
+/* Gradient of take: o[d, h] = 0, then g's rows added at rows r. */
+TG_FN void tg_take_t(float *o, const float *r, const float *g, int n, int d, int h)
+{
+	for (int i = 0; i < d * h; i++) o[i] = 0.0f;
+	for (int i = 0; i < n; i++) {
+		int t = tg_ell_idx(r[i], d);
+		if (t >= 0)
+			for (int j = 0; j < h; j++) o[t * h + j] += g[i * h + j];
+	}
+}
+
+/* Compact gradient: o[n, h] = (x^T g) restricted to the rows in r. */
+TG_FN void tg_spmm_tc(float *o, const float *x, const float *g, const float *r, int rows, int k, int n, int h)
+{
+	for (int i = 0; i < n * h; i++) o[i] = 0.0f;
+	for (int i = 0; i < rows; i++)
+		for (int p = 0; p < k; p++) {
+			const float *e = x + (i * k + p) * 2;
+			if (e[1] == 0.0f || !(e[0] > -0.5f && e[0] < 16777216.0f)) continue; /* also rejects NaN */
+			int s = tg_row_slot(r, n, (int)floorf(e[0] + 0.5f));
+			if (s < 0) continue;
+			for (int j = 0; j < h; j++) o[s * h + j] += e[1] * g[i * h + j];
+		}
+}
+
+/* Row-scatter commit: rows r of state w[d, h] = src[n, h]; padding and
+ * out-of-range indices are skipped, a repeated index takes the later row. */
+TG_FN void tg_put_rows(float *w, const float *src, const float *r, int n, int d, int h)
+{
+	for (int i = 0; i < n; i++) {
+		int t = tg_ell_idx(r[i], d);
+		if (t >= 0)
+			for (int j = 0; j < h; j++) w[t * h + j] = src[i * h + j];
+	}
+}
+
 /* Halting criterion for latent loops: max |a - b|. */
 TG_FN float tg_delta(const float *a, const float *b, int n)
 {

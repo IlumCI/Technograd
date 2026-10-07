@@ -75,11 +75,12 @@ typedef enum {
 	OP_OUTER,
 	OP_STEP,
 	OP_SPMM, OP_SPMM_T, OP_SPMM_DX,
+	OP_ACTIVE, OP_TAKE, OP_TAKE_T, OP_SPMM_TC,
 	OP_THINK,
 	OP_COUNT
 } Op;
 
-typedef enum { CLS_CONST, CLS_BIN, CLS_UN, CLS_MATMUL, CLS_ROW, CLS_RED, CLS_TRANS, CLS_OUTER, CLS_SPMM, CLS_THINK } OpClass;
+typedef enum { CLS_CONST, CLS_BIN, CLS_UN, CLS_MATMUL, CLS_ROW, CLS_RED, CLS_TRANS, CLS_OUTER, CLS_SPMM, CLS_ROWS, CLS_THINK } OpClass;
 
 typedef struct {
 	const char *name;
@@ -149,6 +150,7 @@ typedef struct {
 	Block top;
 	int nthink;
 	int *upd_state, *upd_src; /* update i: upd_state[i] <- upd_src[i] after the run */
+	int *upd_rows;            /* -1, or a row-index vector: only those rows of the state are written */
 	int nupd;
 	int stage;       /* arena offset of the commit staging area (floats) */
 	/* Lowering-time tape for autodiff: the instruction defining each value, and
@@ -167,10 +169,13 @@ Module *mod_new(const char *name);
 int mod_value(Module *m, VKind k, const Shape *sh, const char *name);
 Ins *block_push(Block *b);
 void mod_update(Module *m, int state, int src); /* record `update state = src` */
+void mod_update_rows(Module *m, int state, int src, int rows); /* `update state[rows] = src` */
+int upd_check(const Module *m, int state, int src, int rows, char *err, size_t n); /* shape rules of an update */
 void mod_note_def(Module *m, int v, Block *b, int idx); /* record b->v[idx] as v's definition */
 int ad_grad(Module *m, Block *b, int y, int x, const char *file, int line); /* autodiff.c */
 int ad_depends(Module *m, Block *b, int y, int x, const char *file, int line);
 int ir_op(Module *m, Block *b, Op op, int p, int q, const char *file, int line); /* emit, shape-checked */
+int ir_op3(Module *m, Block *b, Op op, int p, int q, int r, const char *file, int line);
 int ir_k(Module *m, Block *b, float k);
 void optim_train(Module *m, Block *b, int loss, const char *opt, const char **keys, const double *vals, int nkv,
 		 const int *over, int nover, const char *file, int line); /* optim.c */

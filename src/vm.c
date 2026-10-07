@@ -161,6 +161,20 @@ static void exec(VM *vm, const Block *b)
 			else tg_spmm_dx(o, a, c, e, r, k, d, h);
 			break;
 		}
+		case CLS_ROWS: {
+			const Shape *s0 = &m->val[in->a[0]].sh;
+			if (in->op == OP_TAKE) {
+				tg_take(o, a, c, m->val[in->a[1]].sh.dim[0], s0->dim[0], shape_numel(s0) / s0->dim[0]);
+			} else if (in->op == OP_TAKE_T) {
+				const Shape *w = &m->val[in->a[2]].sh;
+				tg_take_t(o, a, c, s0->dim[0], w->dim[0], shape_numel(w) / w->dim[0]);
+			} else {
+				int r = s0->rank == 3 ? s0->dim[0] : 1, k = s0->dim[s0->rank - 2];
+				if (in->op == OP_ACTIVE) tg_active(o, a, r, k, m->val[in->a[1]].sh.dim[0]);
+				else tg_spmm_tc(o, a, c, e, r, k, r * k, m->val[in->out].sh.dim[1]);
+			}
+			break;
+		}
 		case CLS_TRANS: {
 			const Shape *s = &m->val[in->a[0]].sh;
 			tg_transpose(o, a, s->dim[0], s->dim[1]);
@@ -201,24 +215,52 @@ static void commit(VM *vm, int trace)
 {
 	const Module *m = vm->m;
 	int off = m->stage;
-	for (int i = 0; i < m->nupd; i++) {
-		int n = shape_numel(&m->val[m->upd_state[i]].sh);
+	for (int i = 0; i < m->nupd; i++) { /* stage: source, then the row set of a row update */
+		int n = shape_numel(&m->val[m->upd_src[i]].sh);
 		tg_copy(vm->arena + off, ptr(vm, m->upd_src[i]), n);
 		off += (n + TG_ALIGN - 1) / TG_ALIGN * TG_ALIGN;
+		if (m->upd_rows[i] >= 0) {
+			int nr = shape_numel(&m->val[m->upd_rows[i]].sh);
+			tg_copy(vm->arena + off, ptr(vm, m->upd_rows[i]), nr);
+			off += (nr + TG_ALIGN - 1) / TG_ALIGN * TG_ALIGN;
+		}
 	}
 	off = m->stage;
 	for (int i = 0; i < m->nupd; i++) {
 		const Value *s = &m->val[m->upd_state[i]];
-		int n = shape_numel(&s->sh);
-		if (trace) {
-			float d = tg_delta(vm->arena + off, s->data, n);
-			tr_begin(1, "update");
-			tr_str("state", s->name);
-			tr_num("max_change", d);
-			tr_end("state %s updated, max |change| %.4g", s->name, (double)d);
-		}
-		tg_copy(s->data, vm->arena + off, n);
+		int n = shape_numel(&m->val[m->upd_src[i]].sh), rows = m->upd_rows[i];
+		const float *src = vm->arena + off;
 		off += (n + TG_ALIGN - 1) / TG_ALIGN * TG_ALIGN;
+		if (rows < 0) {
+			if (trace) {
+				float d = tg_delta(src, s->data, n);
+				tr_begin(1, "update");
+				tr_str("state", s->name);
+				tr_num("max_change", d);
+				tr_end("state %s updated, max |change| %.4g", s->name, (double)d);
+			}
+			tg_copy(s->data, src, n);
+		} else {
+			int nr = shape_numel(&m->val[rows].sh), d = s->sh.dim[0], h = shape_numel(&s->sh) / d, touched = 0;
+			const float *r = vm->arena + off;
+			off += (nr + TG_ALIGN - 1) / TG_ALIGN * TG_ALIGN;
+			if (trace) {
+				float mx = 0;
+				for (int j = 0; j < nr; j++) {
+					int t = tg_ell_idx(r[j], d);
+					if (t < 0) continue;
+					touched++;
+					float dd = tg_delta(src + j * h, s->data + t * h, h);
+					if (dd > mx) mx = dd;
+				}
+				tr_begin(1, "update");
+				tr_str("state", s->name);
+				tr_num("rows", touched);
+				tr_num("max_change", mx);
+				tr_end("state %s: %d of %d rows updated, max |change| %.4g", s->name, touched, d, (double)mx);
+			}
+			tg_put_rows(s->data, src, r, nr, d, h);
+		}
 	}
 }
 

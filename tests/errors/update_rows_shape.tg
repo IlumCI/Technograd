@@ -1,0 +1,6 @@
+# expect: row update of state 'w' (f32 6 2) needs rows (n) and a value (n, ...) matching its trailing dimensions; got rows (f32 3) and value (f32 3 3)
+model e
+state w : f32[6, 2] = zeros
+def forward(x: f32[3]) -> f32[3]:
+    update w[x] = outer(x, x)
+    return x

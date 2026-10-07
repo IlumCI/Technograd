@@ -373,10 +373,18 @@ static Sx *stmt(P *p)
 	if (iskw(t, "update")) {
 		next(p);
 		Tok *n = expect_name(p);
+		Sx *rows = NULL;
+		if (isop(peek(p), "[")) { /* row update: update NAME[rows] = value */
+			next(p);
+			rows = expr(p);
+			expect_op(p, "]");
+		}
 		expect_op(p, "=");
 		Sx *e = expr(p);
 		expect(p, T_NL, "end of line");
-		return sx_list(line, 3, sx_sym("update", line), sx_sym(n->s, line), e);
+		Sx *u = sx_list(line, 3, sx_sym("update", line), sx_sym(n->s, line), e);
+		if (rows) sx_push(u, rows);
+		return u;
 	}
 	if (iskw(t, "think")) {
 		next(p);

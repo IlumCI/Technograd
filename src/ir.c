@@ -111,7 +111,12 @@ void ir_write(const Module *m, FILE *f)
 	for (int i = 0; i < m->nupd; i++) {
 		char s[64];
 		vname(m, m->upd_src[i], s, sizeof s);
-		fprintf(f, "\n  (update %s %s)", m->val[m->upd_state[i]].name, s);
+		fprintf(f, "\n  (update %s %s", m->val[m->upd_state[i]].name, s);
+		if (m->upd_rows[i] >= 0) {
+			vname(m, m->upd_rows[i], s, sizeof s);
+			fprintf(f, " %s", s);
+		}
+		fputc(')', f);
 	}
 	fputs(")\n", f);
 	xfree(ren);
@@ -283,13 +288,14 @@ Module *ir_read(Sx *forms, const char *file)
 			seen_block = 1;
 			r_block(&r, &r.m->top, f, 1, f->len);
 		} else if (strcmp(h, "update") == 0) {
-			need(&r, f, seen_block && f->len == 3, "update");
-			int sv = r_get(&r, f->v[1]), src = r_get(&r, f->v[2]);
+			need(&r, f, seen_block && (f->len == 3 || f->len == 4), "update");
+			int sv = r_get(&r, f->v[1]), src = r_get(&r, f->v[2]), rows = f->len == 4 ? r_get(&r, f->v[3]) : -1;
 			if (r.m->val[sv].kind != V_STATE) die(file, f->line, "'%s' is not a state", f->v[1]->s);
 			for (int k = 0; k < r.m->nupd; k++)
 				if (r.m->upd_state[k] == sv) die(file, f->line, "state '%s' updated twice", f->v[1]->s);
-			if (!shape_eq(&r.m->val[sv].sh, &r.m->val[src].sh)) die(file, f->line, "update value shape differs from state '%s'", f->v[1]->s);
-			mod_update(r.m, sv, src);
+			char err[300];
+			if (!upd_check(r.m, sv, src, rows, err, sizeof err)) die(file, f->line, "%s", err);
+			mod_update_rows(r.m, sv, src, rows);
 		} else if (strcmp(h, "output") == 0) {
 			need(&r, f, seen_block && !seen_out && f->len == 2, "output");
 			seen_out = 1;

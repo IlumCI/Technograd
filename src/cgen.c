@@ -99,6 +99,20 @@ static void block(G *g, const Block *b, int d)
 			else fprintf(g->f, "tg_%s(%s, %s, %s, %d, %d, %d, %d);\n", tg_ops[in->op].name, o, a, c, r, k, dd, h);
 			break;
 		}
+		case CLS_ROWS: {
+			const Shape *s0 = &m->val[in->a[0]].sh;
+			if (in->op == OP_TAKE) {
+				fprintf(g->f, "tg_take(%s, %s, %s, %d, %d, %d);\n", o, a, c, m->val[in->a[1]].sh.dim[0], s0->dim[0], shape_numel(s0) / s0->dim[0]);
+			} else if (in->op == OP_TAKE_T) {
+				const Shape *w = &m->val[in->a[2]].sh;
+				fprintf(g->f, "tg_take_t(%s, %s, %s, %d, %d, %d);\n", o, a, c, s0->dim[0], w->dim[0], shape_numel(w) / w->dim[0]);
+			} else {
+				int r = s0->rank == 3 ? s0->dim[0] : 1, k = s0->dim[s0->rank - 2];
+				if (in->op == OP_ACTIVE) fprintf(g->f, "tg_active(%s, %s, %d, %d, %d);\n", o, a, r, k, m->val[in->a[1]].sh.dim[0]);
+				else fprintf(g->f, "tg_spmm_tc(%s, %s, %s, %s, %d, %d, %d, %d);\n", o, a, c, e, r, k, r * k, m->val[in->out].sh.dim[1]);
+			}
+			break;
+		}
 		case CLS_TRANS: {
 			const Shape *s = &m->val[in->a[0]].sh;
 			fprintf(g->f, "tg_transpose(%s, %s, %d, %d);\n", o, a, s->dim[0], s->dim[1]);
@@ -230,18 +244,32 @@ void cgen(const Module *m, FILE *f)
 		int off = m->stage;
 		for (int i = 0; i < m->nupd; i++) {
 			char s[64];
-			int n = shape_numel(&m->val[m->upd_state[i]].sh);
+			int n = shape_numel(&m->val[m->upd_src[i]].sh);
 			ref(&g, m->upd_src[i], s, sizeof s);
 			fprintf(f, "\ttg_copy(A + %d, %s, %d);\n", off, s, n);
 			off += (n + TG_ALIGN - 1) / TG_ALIGN * TG_ALIGN;
+			if (m->upd_rows[i] >= 0) {
+				int nr = shape_numel(&m->val[m->upd_rows[i]].sh);
+				ref(&g, m->upd_rows[i], s, sizeof s);
+				fprintf(f, "\ttg_copy(A + %d, %s, %d);\n", off, s, nr);
+				off += (nr + TG_ALIGN - 1) / TG_ALIGN * TG_ALIGN;
+			}
 		}
 		off = m->stage;
 		for (int i = 0; i < m->nupd; i++) {
 			char s[64];
-			int n = shape_numel(&m->val[m->upd_state[i]].sh);
+			const Shape *st = &m->val[m->upd_state[i]].sh;
+			int n = shape_numel(&m->val[m->upd_src[i]].sh);
 			ref(&g, m->upd_state[i], s, sizeof s);
-			fprintf(f, "\ttg_copy(%s, A + %d, %d);\n", s, off, n);
-			off += (n + TG_ALIGN - 1) / TG_ALIGN * TG_ALIGN;
+			if (m->upd_rows[i] < 0) {
+				fprintf(f, "\ttg_copy(%s, A + %d, %d);\n", s, off, n);
+				off += (n + TG_ALIGN - 1) / TG_ALIGN * TG_ALIGN;
+			} else { /* row update: only the listed rows are written */
+				int nr = shape_numel(&m->val[m->upd_rows[i]].sh);
+				int ro = off + (n + TG_ALIGN - 1) / TG_ALIGN * TG_ALIGN;
+				fprintf(f, "\ttg_put_rows(%s, A + %d, A + %d, %d, %d, %d);\n", s, off, ro, nr, st->dim[0], shape_numel(st) / st->dim[0]);
+				off = ro + (nr + TG_ALIGN - 1) / TG_ALIGN * TG_ALIGN;
+			}
 		}
 	}
 	fputs("}\n", f);

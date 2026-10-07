@@ -1,0 +1,23 @@
+# Row-sparse state updates. active() lists the distinct table rows a batch of
+# sparse rows touches (ascending, padded with -1); take() reads those rows;
+# `update table[r] = ...` writes only them. Here a hand-written lazy SGD step
+# with a per-row visit counter, next to `train` with row-sparse AdamW on a
+# second table.
+model rows
+
+state table : f32[8, 3] = rand(5, 0.5)
+state visits : f32[8] = zeros
+state emb : f32[8, 3] = rand(6, 0.5)
+param head : f32[3] = [1, -0.5, 0.25]
+param head2 : f32[3] = [0.5, 0.5, -1]
+
+def forward(s: f32[2, 3, 2], t: f32[2]) -> f32[2]:
+    y = tanh(spmm(s, table)) @ head
+    loss = mean((y - t) * (y - t))
+    r = active(s, table)
+    g = grad(loss, table)
+    update table[r] = take(table, r) - 0.5 * take(g, r)
+    update visits[r] = take(visits, r) + 1
+    z = tanh(spmm(s, emb)) @ head2
+    train mse(z, t) with adamw(lr=0.05) over emb
+    return y + z + sum(visits) * 0.001

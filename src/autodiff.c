@@ -372,6 +372,14 @@ static void vjp(AD *a, const Ins *in, int g, Adj *adj)
 		if (w2) acc(a, adj, x2, E(a, OP_SPMM, z, x1));
 		return;
 	}
+	case OP_ACTIVE: /* row indices: piecewise constant */
+		return;
+	case OP_TAKE: /* rows are piecewise constant */
+		if (w0) acc(a, adj, x0, E3(a, OP_TAKE_T, x1, g, x0));
+		return;
+	case OP_TAKE_T: /* linear in g */
+		if (w1) acc(a, adj, x1, E(a, OP_TAKE, g, x0));
+		return;
 	case OP_TRANSPOSE:
 		acc(a, adj, x0, E1(a, OP_TRANSPOSE, g));
 		return;
@@ -404,6 +412,7 @@ static void vjp(AD *a, const Ins *in, int g, Adj *adj)
 		}
 		return;
 	}
+	case OP_SPMM_TC: /* optimizer-internal compact gradient */
 	case OP_THINK:
 	case OP_COUNT:
 		break;
@@ -620,6 +629,12 @@ int ir_op(Module *m, Block *b, Op op, int p, int q, const char *file, int line)
 {
 	AD a = { m, b, file, line, -1, NULL, 0, 0, 0, -1, -1, 1, 1 };
 	return E(&a, op, p, q);
+}
+
+int ir_op3(Module *m, Block *b, Op op, int p, int q, int r, const char *file, int line)
+{
+	AD a = { m, b, file, line, -1, NULL, 0, 0, 0, -1, -1, 1, 1 };
+	return E3(&a, op, p, q, r);
 }
 
 int ir_k(Module *m, Block *b, float k)
