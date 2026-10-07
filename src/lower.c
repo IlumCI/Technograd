@@ -85,7 +85,7 @@ static int lookup(L *l, Env *e, Sx *name)
 
 static int emit_op(L *l, Block *b, Op op, const int *args, int na, int line)
 {
-	Shape in[2], out;
+	Shape in[TG_MAXARGS], out;
 	char err[256];
 	if (na != tg_ops[op].arity)
 		die(l->file, line, "'%s' takes %d operand(s), got %d", tg_ops[op].name, tg_ops[op].arity, na);

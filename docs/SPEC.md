@@ -89,6 +89,7 @@ and parentheses. All binary operators are left associative.
 | `transpose(x)` | rank 2 only |
 | `outer(a, b)` | `(m),(n)->(m,n)`, `a b^T`; the rank-1 write of delta-rule and Hebbian updates |
 | `step(x)` | elementwise `x > 0 ? 1 : 0`; the derivative of relu, max and min |
+| `spmm(s, w)` | sparse rows times a matrix: `s` is `(K, 2)` or `(B, K, 2)`, each row K `(index, value)` pairs (ELLPACK form), `w` is `(D, H)`; returns `(H)` or `(B, H)`, `sum_k value_k * w[index_k]`. Cost O(B K H), independent of D. Indices round to the nearest integer; padding has value 0; an index outside `[0, D)` is skipped, so no input can address out of bounds. With one pair `(token, 1)` per row it is an embedding gather |
 | `grad(y, x)` | `y` scalar, `x` a name; returns dy/dx with the shape of `x` (section 16) |
 | `mse(p, t)`, `bce(p, t)`, `xent(logits, onehot)` | scalar losses (section 17) |
 
@@ -137,7 +138,7 @@ TGIR is the canonical, machine-facing form. `tgc ir` prints it, and every
   (output VALUE))
 
 TYPE  := (f32 d...)
-INSTR := (NAME TYPE (OP VALUE...))        ; OP from the builtin table, by name
+INSTR := (NAME TYPE (OP VALUE...))        ; OP from the builtin table, by name; 1 to 3 operands
        | (NAME TYPE (const NUMBER))
        | (NAME TYPE (think INIT MAX EPS|none INSTR... (yield VALUE)))
 ```
@@ -153,6 +154,11 @@ Rules enforced by the reader:
 
 Writing the reader's output back with `tgc ir` gives the same text again
 (this is tested).
+
+Two operations appear only in TGIR, as derivatives of `spmm` written by
+autodiff: `(spmm_t S G W)`, the scatter-add `S^T G` with the shape of `W`
+(gradient for the matrix), and `(spmm_dx S W G)`, with the shape of `S`
+(0 for each index, `W[index] . G[row]` for each value).
 
 ## 9. Compiled unit ABI
 
@@ -416,7 +422,11 @@ model compiles to freestanding C like any other.
 - `max`/`min`/`relu` send the gradient through the selected operand, with ties
   going to the second;
 - `softmax` and `rmsnorm` are supported on rank 1 and 2;
-- all four `matmul` shape cases and `outer` are covered.
+- all four `matmul` shape cases and `outer` are covered;
+- `spmm` sends gradients to the matrix (a scatter-add over the active rows)
+  and to the values of the sparse rows; indices are piecewise constant and
+  get zero. Its two derivative operations are themselves differentiable, so
+  second-order gradients through `spmm` work.
 
 ### Through `think` loops
 
@@ -455,8 +465,8 @@ model itself also compiles to C (about 11.5 KB for the XOR MLP, using only
 ### Verification
 
 `tests/gradcheck.pl` compares every derivative rule, including both
-implicit-differentiation cases, against central finite differences (22 cases,
-worst relative error 2.6e-4). A planted bug in one rule makes 9 cases fail.
+implicit-differentiation cases and both second-order `spmm` cases, against
+central finite differences (29 cases, worst relative error 3.4e-4). A planted bug in one rule makes 9 cases fail.
 
 ## 17. Training statement and optimizers
 
@@ -515,7 +525,7 @@ A step's cost is paid once per mini-batch: a model whose input is a batch
   | iris (accuracy) | 96.67% | similar |
   | regression (RMSE) | 0.48 | similar |
   | 3-class blobs | 100% | 100% |
-  | SST-2 (accuracy, time) | 69.73%, 5 s | 69.94%, 24 s |
+  | SST-2, 1024 buckets, dense input (accuracy, time) | 69.73%, 5 s | 69.94%, 24 s |
 
 - **Decision.** AdamW at lr 0.01 is the default. Muon is fully supported and
   marginally more accurate on text at about 5× the time.
@@ -536,7 +546,7 @@ The format is detected from the extension, falling back to the content.
 
 | SOURCE | Read as |
 |--------|---------|
-| `*.csv`, `*.tsv`, other text | delimited text: delimiter sniffed among `,` tab `;` `\|`; header detected; RFC 4180 quoting; CRLF |
+| `*.csv`, `*.tsv`, other text | delimited text: delimiter sniffed among `,` tab `;` `\|`; header detected (a non-numeric field above a numeric one, or, for all-string columns, short name-like fields that never recur below); RFC 4180 quoting; CRLF |
 | `*.jsonl`, `*.ndjson` | one JSON object per line |
 | `*.json` | an array of objects or arrays, or an object holding one (`rows`, `data`, `records`, ...); Hugging Face API pages are recognized |
 | `*.npy` | NumPy arrays: f4/f8, signed and unsigned integers, 1-D or 2-D, C order |
@@ -562,7 +572,7 @@ Each column is classified:
 |------|------|----------|
 | numeric | every value parses as a number | standardized; plus a 0/1 missing-value indicator if the column has missing values |
 | categorical | strings with few distinct values (≤ 64, or ≤ 5% of rows and short) | one-hot over the 32 most frequent values |
-| text | longer strings with many distinct values | 1024 signed hashed word-unigram buckets (feature hashing; `--text-dim N`), L2-normalized |
+| text | longer strings with many distinct values | 8192 signed hashed word-unigram buckets (feature hashing; `--text-dim N`), L2-normalized; enters the model as sparse rows |
 | vector | fixed-length numeric lists | each component standardized |
 | dropped | identifiers (`id`, `*_id`, ...; or unique increasing integers), nested objects (images, audio), lists of varying length, empty columns | none, and the reason is printed |
 
@@ -583,8 +593,16 @@ Two further rules:
    featurization (means, standard deviations, vocabularies) is fitted on the
    training rows only.
 2. **Model.** The generated model is `D -> H (gelu) -> C` over a batch:
-   `h = gelu(x @ w1 + b1); return h @ w2 + b2` with `x : f32[B, D]`, weights
-   stored `(in, out)` and Glorot-uniform initial weights. `H` is 16 for at
+   `h = gelu(x @ w1 + spmm(s, wt) + b1); return h @ w2 + b2`, weights stored
+   `(in, out)`, Glorot-uniform initial weights.
+   - Dense features (numeric, categorical, vector) form `x : f32[B, Dd]`.
+   - Text features form `s : f32[B, K, 2]`: each row's nonzero hashed
+     buckets as `(bucket, weight)` pairs, `K` the most any training row
+     has. The first layer then costs O(K H) per row instead of O(D H). The
+     inference model allows `max(2K, 64)` pairs (at most the bucket count);
+     a longer row at `predict` keeps its largest weights and is reported.
+   - Either part is left out when there are no such features.
+   ` `H` is 16 for at
    most 8 inputs, 32 for 9 to 64 inputs, 64 for 65 to 512 inputs, and 32
    above that, since wide sparse inputs overfit a wide layer. The model trains with
    `train ... with adamw(lr=0.01)`. `B` is 32 by default (`--batch`), capped
@@ -619,8 +637,8 @@ present.
 | Dataset (no configuration given) | Result |
 |----------------------------------|--------|
 | `hf:scikit-learn/iris` (150 rows) | 96.67% validation accuracy (mean of 3 seeds); `Id` dropped as an identifier |
-| `hf:SetFit/sst2` (6920 sentences) | 69.73% validation accuracy in 5 s (36 s with one step per sample); `label_text` caught as a leak |
-| SST-2 with `--text-dim 4096`, one step per sample | 72.4% (465 s); a linear bag-of-words model on the same features reaches 75.7% |
+| `hf:SetFit/sst2` (6920 sentences) | 76.16% validation accuracy in 11 s; `label_text` caught as a leak |
+| synthetic reviews: text + a numeric column, `--target mood` | 100% (regression-tested, including `predict` and compiling `infer.c`) |
 | synthetic `y = 3 x1 - 2 x2 + [red] 1.5 + noise`, 3% missing `x2` | predictions 2.99 and -0.52 for true 3.0 and -0.5 |
 | synthetic 3-class blobs | 100% (regression-tested) |
 
@@ -628,20 +646,39 @@ On text, unigrams outperformed unigrams+bigrams at every bucket count tried
 (256 to 4096). With a few thousand sentences, bigram collisions add more
 noise than signal.
 
+Sparse rows, SST-2, batch 32, AdamW lr 0.01 (end-to-end time, same machine):
+
+| Buckets | Dense input (previous) | Sparse rows (`spmm`) | Validation accuracy |
+|---------|------------------------|----------------------|---------------------|
+| 1024 | 7.2 s | 2.2 s | 69.4–69.7% |
+| 4096 | 26.4 s | 6.4 s | 72.4–72.8% |
+| 8192 (default) | | 11.0 s | 76.16% |
+| 16384 | | 22.6 s | 76.88% |
+| 32768 | | 49.9 s | 78.40% |
+| 65536 | | 105.9 s | 77.67% |
+
+More buckets mean fewer hash collisions, and accuracy rises past the 75.7%
+that a linear bag-of-words model reached on 4096 buckets. The remaining cost
+grows with the bucket count because the optimizer still updates every row of
+`wt` on every step (roadmap). The default of 8192 balances accuracy against
+time and the size of `infer.c`; `--text-dim` changes it.
+
 ## 19. Roadmap
 
 Ordered by importance for latent-reasoning models on embedded targets:
 
 1. int8/int4 weights with per-channel scales, and fixed-point kernels for
    targets without an FPU.
-2. `embed(table, token)` gather and causal attention over a fixed-size KV
-   ring. These are needed for token-level Coconut models, where continuous
-   thoughts are mixed with token embeddings.
+2. Causal attention over a fixed-size KV ring, for token-level Coconut
+   models, where continuous thoughts are mixed with token embeddings. Token
+   embedding itself is already available as `spmm` with one `(token, 1)`
+   pair per row.
 3. Autodiff through fixed-budget and nested think loops: unrolled
    backpropagation through time with a statically planned activation store.
 4. Learned halting heads (`until` driven by a predicate value) in addition to
    convergence halting.
-5. Sparse tensors for hashed text features (about 30 active of 1024+ buckets
-   per row), making wide text models proportionally cheaper.
+5. Row-sparse optimizer steps: update only the rows of a `spmm` table that
+   the batch touched (lazy moments, as in sparse embedding training), so a
+   step costs O(active rows) instead of O(table).
 6. Native backends from the planned IR: ARMv7-M/ARMv8-M assembly with
    CMSIS-NN style kernels, and RISC-V with the vector extension.

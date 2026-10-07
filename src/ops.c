@@ -30,6 +30,9 @@ const OpInfo tg_ops[OP_COUNT] = {
 	[OP_TRANSPOSE] = { "transpose", 1, CLS_TRANS },
 	[OP_OUTER]     = { "outer",     2, CLS_OUTER },
 	[OP_STEP]      = { "step",      1, CLS_UN },
+	[OP_SPMM]      = { "spmm",      2, CLS_SPMM },
+	[OP_SPMM_T]    = { "spmm_t",    3, CLS_SPMM },
+	[OP_SPMM_DX]   = { "spmm_dx",   3, CLS_SPMM },
 	[OP_THINK]     = { "think",     0, CLS_THINK },
 };
 
@@ -45,6 +48,14 @@ void matmul_dims(const Shape *a, const Shape *b, int *m, int *k, int *n)
 	*m = a->rank == 2 ? a->dim[0] : 1;
 	*k = a->rank == 2 ? a->dim[1] : a->dim[0];
 	*n = b->rank == 2 ? b->dim[1] : 1;
+}
+
+void spmm_dims(const Shape *x, const Shape *w, int *rows, int *k, int *d, int *h)
+{
+	*rows = x->rank == 3 ? x->dim[0] : 1;
+	*k = x->dim[x->rank - 2];
+	*d = w->dim[0];
+	*h = w->dim[1];
 }
 
 void row_dims(const Shape *s, int *rows, int *cols)
@@ -118,6 +129,30 @@ int op_infer(Op op, const Shape *a, int na, Shape *out, char *err, size_t errn)
 		out->dim[0] = a[0].dim[0];
 		out->dim[1] = a[1].dim[0];
 		return 1;
+	case CLS_SPMM: {
+		/* spmm(x, w); spmm_t(x, g, w) -> shape of w; spmm_dx(x, w, g) -> shape of x */
+		const Shape *x = &a[0], *w = &a[op == OP_SPMM_T ? 2 : 1];
+		if ((x->rank != 2 && x->rank != 3) || x->dim[x->rank - 1] != 2 || w->rank != 2) {
+			shape_str(x, s0, sizeof s0);
+			shape_str(w, s1, sizeof s1);
+			snprintf(err, errn, "'%s' needs sparse rows (K, 2) or (B, K, 2) of (index, value) pairs and a matrix (D, H), got %s and %s",
+				 oi->name, s0, s1);
+			return 0;
+		}
+		Shape y = { 0 };
+		if (x->rank == 3) y.dim[y.rank++] = x->dim[0];
+		y.dim[y.rank++] = w->dim[1];
+		if (op == OP_SPMM) { *out = y; return 1; }
+		const Shape *g = &a[op == OP_SPMM_T ? 1 : 2];
+		if (!shape_eq(g, &y)) {
+			shape_str(g, s0, sizeof s0);
+			shape_str(&y, s1, sizeof s1);
+			snprintf(err, errn, "'%s' gradient %s does not match the product shape %s", oi->name, s0, s1);
+			return 0;
+		}
+		*out = op == OP_SPMM_T ? *w : *x;
+		return 1;
+	}
 	case CLS_THINK:
 		break;
 	}

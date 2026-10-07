@@ -8,6 +8,7 @@
 
 #define TG_MAXRANK 4
 #define TG_ALIGN   4 /* arena alignment in floats (16 bytes) */
+#define TG_MAXARGS 3 /* operands per instruction */
 
 /* ---- utilities ---------------------------------------------------------- */
 void *xmalloc(size_t n);
@@ -73,11 +74,12 @@ typedef enum {
 	OP_TRANSPOSE,
 	OP_OUTER,
 	OP_STEP,
+	OP_SPMM, OP_SPMM_T, OP_SPMM_DX,
 	OP_THINK,
 	OP_COUNT
 } Op;
 
-typedef enum { CLS_CONST, CLS_BIN, CLS_UN, CLS_MATMUL, CLS_ROW, CLS_RED, CLS_TRANS, CLS_OUTER, CLS_THINK } OpClass;
+typedef enum { CLS_CONST, CLS_BIN, CLS_UN, CLS_MATMUL, CLS_ROW, CLS_RED, CLS_TRANS, CLS_OUTER, CLS_SPMM, CLS_THINK } OpClass;
 
 typedef struct {
 	const char *name;
@@ -92,6 +94,8 @@ int op_infer(Op op, const Shape *a, int na, Shape *out, char *err, size_t errn);
 /* matmul operand geometry: o[m,n] = a[m,k] @ b[k,n] */
 void matmul_dims(const Shape *a, const Shape *b, int *m, int *k, int *n);
 void row_dims(const Shape *s, int *rows, int *cols);
+/* sparse rows in ELLPACK form: x[rows, K, 2] of (index, value) pairs against w[D, H] */
+void spmm_dims(const Shape *x, const Shape *w, int *rows, int *k, int *d, int *h);
 
 /* ---- IR ----------------------------------------------------------------- */
 /* V_STATE: like a param, but mutable; changed only by `update`, committed after a run. */
@@ -118,7 +122,7 @@ typedef struct GradCache {
 typedef struct {
 	Op op;
 	int out;
-	int a[2];
+	int a[TG_MAXARGS];
 	int na;
 	float k;      /* OP_CONST */
 	int init;     /* OP_THINK: initial state value */

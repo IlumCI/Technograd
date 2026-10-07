@@ -90,6 +90,7 @@ static void exec(VM *vm, const Block *b)
 		int n = shape_numel(os);
 		const float *a = in->na > 0 ? ptr(vm, in->a[0]) : NULL;
 		const float *c = in->na > 1 ? ptr(vm, in->a[1]) : NULL;
+		const float *e = in->na > 2 ? ptr(vm, in->a[2]) : NULL;
 		switch (tg_ops[in->op].cls) {
 		case CLS_CONST:
 			o[0] = in->k;
@@ -152,6 +153,14 @@ static void exec(VM *vm, const Block *b)
 		case CLS_OUTER:
 			tg_outer(o, a, c, shape_numel(&m->val[in->a[0]].sh), shape_numel(&m->val[in->a[1]].sh));
 			break;
+		case CLS_SPMM: {
+			int r, k, d, h;
+			spmm_dims(&m->val[in->a[0]].sh, &m->val[in->a[in->op == OP_SPMM_T ? 2 : 1]].sh, &r, &k, &d, &h);
+			if (in->op == OP_SPMM) tg_spmm(o, a, c, r, k, d, h);
+			else if (in->op == OP_SPMM_T) tg_spmm_t(o, a, c, r, k, d, h);
+			else tg_spmm_dx(o, a, c, e, r, k, d, h);
+			break;
+		}
 		case CLS_TRANS: {
 			const Shape *s = &m->val[in->a[0]].sh;
 			tg_transpose(o, a, s->dim[0], s->dim[1]);

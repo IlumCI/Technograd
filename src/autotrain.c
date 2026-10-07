@@ -4,10 +4,12 @@
  *      target (or --target)
  *   2. seeded train/validation split; fit the featurization on training rows
  *   3. generate an editable Technograd training model that uses
- *      `train <loss> with <optimizer>`, and a frozen inference model
- *   4. train online for several epochs, evaluate each epoch on a forward-only
- *      copy (updates and backward pass removed), keep the best weights by
- *      validation loss, stop early
+ *      `train <loss> with <optimizer>`, and a frozen inference model; text
+ *      features enter as sparse ELLPACK rows through `spmm`, so their cost
+ *      scales with the words in a row, not with the hash dimension
+ *   4. train in mini-batches for several epochs, evaluate each epoch on a
+ *      single-row forward-only model, keep the best weights by validation
+ *      loss, stop early
  *   5. write OUTDIR/{model.tg, infer.tg, infer.c, weights.*.bin,
  *      features.tgf, report.txt}
  *
@@ -113,12 +115,66 @@ static void write_text(const char *path, const char *text)
 
 enum { GEN_TRAIN, GEN_INFER, GEN_EVAL };
 
+/* Feature layout: spec_apply writes one dense row of s->dim floats. Text
+ * blocks (hashed, mostly zero) are moved into a sparse ELLPACK row of K
+ * (index, value) pairs over a text space of ds buckets; everything else stays
+ * in a dense row of dd floats. */
+typedef struct {
+	int dd, ds, k;
+} Layout;
+
+static Layout layout_of(const Spec *s)
+{
+	Layout l = { 0, 0, 0 };
+	for (int i = 0; i < s->nf; i++) {
+		if (s->f[i].kind == COL_TEXT) l.ds += s->f[i].dim;
+		else l.dd += s->f[i].dim;
+	}
+	return l;
+}
+
+/* Split a featurized row. Writes up to l->k pairs (the largest |value|s when
+ * the row has more), pads with (0, 0); returns the row's nonzero count. With
+ * xd NULL and l->k 0 it only counts. */
+static int split_row(const Spec *s, const Layout *l, const float *x, float *xd, float *ell)
+{
+	int o = 0, od = 0, ot = 0, nnz = 0;
+	for (int i = 0; i < l->k; i++) ell[2 * i] = ell[2 * i + 1] = 0;
+	for (int i = 0; i < s->nf; i++) {
+		const Feat *f = &s->f[i];
+		if (f->kind != COL_TEXT) {
+			if (xd) memcpy(xd + od, x + o, (size_t)f->dim * sizeof *xd);
+			od += f->dim;
+		} else {
+			for (int d = 0; d < f->dim; d++) {
+				float v = x[o + d];
+				if (v == 0) continue;
+				nnz++;
+				if (!l->k) continue;
+				int at = nnz <= l->k ? nnz - 1 : -1;
+				if (at < 0) { /* full: replace the smallest kept entry if this one is larger */
+					for (int j = 0; j < l->k; j++)
+						if (at < 0 || fabsf(ell[2 * j + 1]) < fabsf(ell[2 * at + 1])) at = j;
+					if (fabsf(ell[2 * at + 1]) >= fabsf(v)) continue;
+				}
+				ell[2 * at] = (float)(ot + d);
+				ell[2 * at + 1] = v;
+			}
+			ot += f->dim;
+		}
+		o += f->dim;
+	}
+	return nnz;
+}
+
 /* The generated models. Plain Technograd: the user can read and edit them.
  * Weights are stored (in, out), so `x @ w1` serves a (B, D) batch in training
  * and a single (D) row in inference with the same weight files. */
-static char *gen_model(const char *name, const Spec *s, int H, int B, const char *opt, double lr, const char *src, int mode)
+static char *gen_model(const char *name, const Spec *s, const Layout *l, int H, int B, const char *opt, double lr, const char *src,
+			int mode)
 {
-	int D = s->dim, C = s->classify ? s->nclass : 1;
+	int D = s->dim, C = s->classify ? s->nclass : 1, Dd = l->dd, Ds = l->ds, K = l->k;
+	double g1 = sqrt(6.0 / (D + H));
 	size_t cap = 8192;
 	char *b = xmalloc(cap);
 	size_t o = 0;
@@ -130,28 +186,49 @@ static char *gen_model(const char *name, const Spec *s, int H, int B, const char
 		P("# Training model: weights are state; every run takes one optimizer step on a\n"
 		  "# mini-batch of %d rows. Edit it freely; `tgc batch` with %d rows packed per\n"
 		  "# line trains it further.\n", B, B);
+	if (Ds)
+		P("# Text enters as sparse rows: s holds %d (bucket, weight) pairs per row over\n"
+		  "# %d hashed buckets; spmm(s, wt) costs O(%d x %d) instead of O(%d x %d).\n",
+		  K, Ds, K, H, Ds, H);
 	P("model %s%s\n\n", name, mode == GEN_INFER ? "_infer" : mode == GEN_EVAL ? "_eval" : "");
-	if (mode == GEN_INFER) {
-		P("param w1 : f32[%d, %d] = file(\"weights.w1.bin\")\nparam b1 : f32[%d] = file(\"weights.b1.bin\")\n", D, H, H);
-		P("param w2 : f32[%d, %d] = file(\"weights.w2.bin\")\nparam b2 : f32[%d] = file(\"weights.b2.bin\")\n\n", H, C, C);
-	} else if (mode == GEN_EVAL) { /* data pointers are swapped to the training weights */
-		P("param w1 : f32[%d, %d] = zeros\nparam b1 : f32[%d] = zeros\n", D, H, H);
-		P("param w2 : f32[%d, %d] = zeros\nparam b2 : f32[%d] = zeros\n\n", H, C, C);
-	} else {
-		P("state w1 : f32[%d, %d] = rand(11, %.6g)\nstate b1 : f32[%d] = zeros\n", D, H, sqrt(6.0 / (D + H)), H);
-		P("state w2 : f32[%d, %d] = rand(12, %.6g)\nstate b2 : f32[%d] = zeros\n\n", H, C, sqrt(6.0 / (H + C)), C);
+	const char *wn[4] = { "w1", "wt", "b1", "w2" };
+	int rows[4] = { Dd, Ds, 0, H }, cols[4] = { H, H, H, C };
+	for (int i = 0; i < 5; i++) {
+		const char *n = i < 4 ? wn[i] : "b2";
+		int r = i < 4 ? rows[i] : 0, c = i < 4 ? cols[i] : C;
+		if ((i == 0 && !Dd) || (i == 1 && !Ds)) continue;
+		char shape[48];
+		if (r) snprintf(shape, sizeof shape, "f32[%d, %d]", r, c);
+		else snprintf(shape, sizeof shape, "f32[%d]", c);
+		if (mode == GEN_INFER) P("param %s : %s = file(\"weights.%s.bin\")\n", n, shape, n);
+		else if (mode == GEN_EVAL) P("param %s : %s = zeros\n", n, shape); /* data pointers are swapped to the training weights */
+		else if (!r) P("state %s : %s = zeros\n", n, shape);
+		else P("state %s : %s = rand(%d, %.6g)\n", n, shape, 11 + i, i == 3 ? sqrt(6.0 / (H + C)) : g1);
 	}
-	if (mode == GEN_TRAIN) {
-		P("def net(x: f32[%d, %d]) -> f32[%d, %d]:\n    h = gelu(x @ w1 + b1)\n    return h @ w2 + b2\n\n", B, D, B, C);
+	P("\n");
+	/* argument lists and the first layer, for a batch (train) or one row */
+	char args[160] = "", call[32] = "", pre[96] = "";
+	size_t ao = 0;
+	int bt = mode == GEN_TRAIN;
+	char bp[16] = "";
+	if (bt) snprintf(bp, sizeof bp, "%d, ", B);
+	if (Dd) ao += (size_t)snprintf(args + ao, sizeof args - ao, "x: f32[%s%d]", bp, Dd);
+	if (Ds) ao += (size_t)snprintf(args + ao, sizeof args - ao, "%ss: f32[%s%d, 2]", Dd ? ", " : "", bp, K);
+	snprintf(call, sizeof call, "%s%s%s", Dd ? "x" : "", Dd && Ds ? ", " : "", Ds ? "s" : "");
+	snprintf(pre, sizeof pre, "%s%s%s", Dd ? "x @ w1" : "", Dd && Ds ? " + " : "", Ds ? "spmm(s, wt)" : "");
+	char outs[32];
+	if (bt) snprintf(outs, sizeof outs, "f32[%d, %d]", B, C);
+	else snprintf(outs, sizeof outs, "f32[%d]", C);
+	P("def net(%s) -> %s:\n    h = gelu(%s + b1)\n    return h @ w2 + b2\n\n", args, outs, pre);
+	if (bt) {
 		if (s->classify)
-			P("def forward(x: f32[%d, %d], target: f32[%d, %d]) -> f32[%d, %d]:\n    logits = net(x)\n"
-			  "    train xent(logits, target) with %s(lr=%g)\n    return softmax(logits)\n", B, D, B, C, B, C, opt, lr);
+			P("def forward(%s, target: f32[%d, %d]) -> %s:\n    logits = net(%s)\n"
+			  "    train xent(logits, target) with %s(lr=%g)\n    return softmax(logits)\n", args, B, C, outs, call, opt, lr);
 		else
-			P("def forward(x: f32[%d, %d], target: f32[%d, 1]) -> f32[%d, 1]:\n    y = net(x)\n"
-			  "    train mse(y, target) with %s(lr=%g)\n    return y\n", B, D, B, B, opt, lr);
+			P("def forward(%s, target: f32[%d, 1]) -> %s:\n    y = net(%s)\n"
+			  "    train mse(y, target) with %s(lr=%g)\n    return y\n", args, B, outs, call, opt, lr);
 	} else {
-		P("def net(x: f32[%d]) -> f32[%d]:\n    h = gelu(x @ w1 + b1)\n    return h @ w2 + b2\n\n", D, C);
-		P("def forward(x: f32[%d]) -> f32[%d]:\n    return %s\n", D, C, s->classify ? "softmax(net(x))" : "net(x)");
+		P("def forward(%s) -> %s:\n    return %snet(%s)%s\n", args, outs, s->classify ? "softmax(" : "", call, s->classify ? ")" : "");
 	}
 #undef P
 	return b;
@@ -162,14 +239,29 @@ typedef struct {
 } Score;
 
 /* Score rows one at a time with the single-row evaluation model. */
-static Score eval_rows(Module *em, const Spec *s, const float *X, const float *Y, const int *lab, const int *rows, int n,
+/* Featurized rows: dense part Xd[r, dd] and sparse part E[r, k, 2]. */
+typedef struct {
+	const Layout *l;
+	float *Xd, *E;
+} Rows;
+
+static int row_inputs(const Rows *R, int r, const float **in)
+{
+	int n = 0;
+	if (R->l->dd) in[n++] = R->Xd + (size_t)r * (size_t)R->l->dd;
+	if (R->l->ds) in[n++] = R->E + (size_t)r * (size_t)R->l->k * 2;
+	return n;
+}
+
+static Score eval_rows(Module *em, const Spec *s, const Rows *R, const float *Y, const int *lab, const int *rows, int n,
 		       float *arena, float *out, int *steps)
 {
-	int D = s->dim, C = s->classify ? s->nclass : 1;
+	int C = s->classify ? s->nclass : 1;
 	Score sc = { 0, 0 };
 	for (int i = 0; i < n; i++) {
 		int r = rows[i];
-		const float *in[1] = { X + (size_t)r * (size_t)D };
+		const float *in[2];
+		row_inputs(R, r, in);
 		vm_run_into(em, in, out, steps, arena, NULL);
 		if (s->classify) {
 			int best = 0;
@@ -191,18 +283,23 @@ static Score eval_rows(Module *em, const Spec *s, const float *X, const float *Y
  * model, which takes one optimizer step. The last partial batch is dropped;
  * rows are reshuffled every epoch, so every row is used. Returns the mean
  * training loss, measured on the start-of-step predictions. */
-static double train_epoch(Module *m, const Spec *s, int B, const float *X, const float *Y, const int *lab, const int *rows,
-			  int n, float *xb, float *yb, float *outb, float *arena, int *steps)
+static double train_epoch(Module *m, const Spec *s, int B, const Rows *R, const float *Y, const int *lab, const int *rows,
+			  int n, float *xb, float *sb, float *yb, float *outb, float *arena, int *steps)
 {
-	int D = s->dim, C = s->classify ? s->nclass : 1, seen = 0;
+	int C = s->classify ? s->nclass : 1, seen = 0, dd = R->l->dd, ke = R->l->k * 2;
 	double loss = 0;
 	for (int b0 = 0; b0 + B <= n; b0 += B) {
 		for (int i = 0; i < B; i++) {
 			int r = rows[b0 + i];
-			memcpy(xb + (size_t)i * (size_t)D, X + (size_t)r * (size_t)D, (size_t)D * sizeof *xb);
+			if (dd) memcpy(xb + (size_t)i * (size_t)dd, R->Xd + (size_t)r * (size_t)dd, (size_t)dd * sizeof *xb);
+			if (R->l->ds) memcpy(sb + (size_t)i * (size_t)ke, R->E + (size_t)r * (size_t)ke, (size_t)ke * sizeof *sb);
 			memcpy(yb + (size_t)i * (size_t)C, Y + (size_t)r * (size_t)C, (size_t)C * sizeof *yb);
 		}
-		const float *in[2] = { xb, yb };
+		const float *in[3];
+		int ni = 0;
+		if (dd) in[ni++] = xb;
+		if (R->l->ds) in[ni++] = sb;
+		in[ni] = yb;
 		vm_run_into(m, in, outb, steps, arena, NULL);
 		for (int i = 0; i < B; i++) {
 			int r = rows[b0 + i];
@@ -246,14 +343,29 @@ static int cmd_train(Opts *o)
 	Spec *s = spec_fit(t, target, rows, ntr, o->text_dim);
 
 	int D = s->dim, C = s->classify ? s->nclass : 1;
-	float *X = xmalloc((size_t)t->nrows * (size_t)D * sizeof *X), *Y = xmalloc((size_t)t->nrows * (size_t)C * sizeof *Y);
-	int *lab = xmalloc((size_t)t->nrows * sizeof *lab);
+	float *X = xmalloc((size_t)D * sizeof *X), *Y = xmalloc((size_t)t->nrows * (size_t)C * sizeof *Y);
+	int *lab = xmalloc((size_t)t->nrows * sizeof *lab), *keep = xmalloc((size_t)t->nrows * sizeof *keep);
+	Layout L = layout_of(s);
+	/* pass 1: targets, and the widest sparse row (K) */
 	int k = 0, split = ntr; /* drop rows whose target class was unseen in training */
+	Layout probe = L;
 	for (int i = 0; i < n; i++) {
 		int r = rows[i];
-		if (spec_apply(s, t, r, X + (size_t)r * (size_t)D, Y + (size_t)r * (size_t)C, &lab[r])) rows[k++] = r;
-		else if (i < split) ntr--;
+		keep[r] = spec_apply(s, t, r, X, Y + (size_t)r * (size_t)C, &lab[r]);
+		if (keep[r]) {
+			rows[k++] = r;
+			if (L.ds) { int nz = split_row(s, &probe, X, NULL, NULL); if (nz > L.k) L.k = nz; }
+		} else if (i < split) ntr--;
 		else nval--;
+	}
+	if (L.ds && !L.k) L.k = 1;
+	/* pass 2: dense and sparse parts */
+	Rows R = { &L, xmalloc((size_t)t->nrows * (size_t)(L.dd ? L.dd : 1) * sizeof(float)),
+		   xmalloc((size_t)t->nrows * (size_t)(L.k ? L.k : 1) * 2 * sizeof(float)) };
+	for (int i = 0; i < k; i++) {
+		int r = rows[i];
+		spec_apply(s, t, r, X, NULL, NULL);
+		split_row(s, &L, X, R.Xd + (size_t)r * (size_t)L.dd, R.E + (size_t)r * (size_t)L.k * 2);
 	}
 	int *tr = rows, *va = rows + ntr;
 	if (!nval) va = tr, nval = ntr; /* tiny data: report training fit */
@@ -271,13 +383,13 @@ static int cmd_train(Opts *o)
 	const char *dir = o->out ? o->out : dflt;
 	mkdir(dir, 0755);
 
-	char *src = gen_model(name, s, H, B, opt, lr, o->source, GEN_TRAIN);
+	char *src = gen_model(name, s, &L, H, B, opt, lr, o->source, GEN_TRAIN);
 	char *mpath = join(dir, "model.tg");
 	write_text(mpath, src);
 	Module *m = lower(surface_parse(src, mpath), mpath);
 	plan(m);
 	/* evaluation: the single-row network reading the training weights in place */
-	char *esrc = gen_model(name, s, H, B, opt, lr, o->source, GEN_EVAL);
+	char *esrc = gen_model(name, s, &L, H, B, opt, lr, o->source, GEN_EVAL);
 	Module *em = lower(surface_parse(esrc, "<eval>"), "<eval>");
 	for (int v = 0; v < em->nval; v++)
 		if (em->val[v].kind == V_PARAM)
@@ -292,7 +404,8 @@ static int cmd_train(Opts *o)
 	float *arena = xmalloc((size_t)(m->arena ? m->arena : 1) * sizeof(float));
 	float *earena = xmalloc((size_t)(em->arena ? em->arena : 1) * sizeof(float));
 	float *out = xmalloc((size_t)C * sizeof(float));
-	float *xb = xmalloc((size_t)B * (size_t)D * sizeof(float)), *yb = xmalloc((size_t)B * (size_t)C * sizeof(float));
+	float *xb = xmalloc((size_t)B * (size_t)(L.dd ? L.dd : 1) * sizeof(float)), *sb = xmalloc((size_t)B * (size_t)(L.k ? L.k : 1) * 2 * sizeof(float));
+	float *yb = xmalloc((size_t)B * (size_t)C * sizeof(float));
 	float *outb = xmalloc((size_t)B * (size_t)C * sizeof(float));
 	int *steps = xmalloc((size_t)(m->nthink ? m->nthink : 1) * sizeof(int));
 	/* best-weights snapshot over the user states */
@@ -307,8 +420,8 @@ static int cmd_train(Opts *o)
 	double t0 = tr_now_ms();
 	for (int ep = 1; ep <= epochs; ep++) {
 		shuffle(tr, ntr);
-		double st = train_epoch(m, s, B, X, Y, lab, tr, ntr, xb, yb, outb, arena, steps);
-		Score sv = eval_rows(em, s, X, Y, lab, va, nval, earena, out, steps);
+		double st = train_epoch(m, s, B, &R, Y, lab, tr, ntr, xb, sb, yb, outb, arena, steps);
+		Score sv = eval_rows(em, s, &R, Y, lab, va, nval, earena, out, steps);
 		int improved = sv.loss < best - 1e-9;
 		if (improved) {
 			best = sv.loss;
@@ -342,7 +455,9 @@ static int cmd_train(Opts *o)
 	}
 	char *spath = join(dir, "features.tgf");
 	spec_save(s, spath);
-	char *isrc = gen_model(name, s, H, B, opt, lr, o->source, GEN_INFER);
+	Layout Li = L; /* inference: headroom for rows longer than any seen in training */
+	if (Li.ds) Li.k = (int)fmin(Li.ds, fmax(2 * L.k, 64));
+	char *isrc = gen_model(name, s, &Li, H, B, opt, lr, o->source, GEN_INFER);
 	char *ipath = join(dir, "infer.tg");
 	write_text(ipath, isrc);
 	Module *im = load_module(ipath);
@@ -356,9 +471,9 @@ static int cmd_train(Opts *o)
 	char rep[2048];
 	double metric = s->classify ? bv.acc * 100 : sqrt(bv.loss) * s->tstd;
 	snprintf(rep, sizeof rep,
-		 "source      %s (%s, %d rows)\ntask        %s of '%s'%s\nfeatures    %d\nmodel       %d -> %d -> %d, %s(lr=%g)\n"
+		 "source      %s (%s, %d rows)\ntask        %s of '%s'%s\nfeatures    %d (%d dense, %d sparse text buckets, <= %d active per row)\nmodel       %d -> %d -> %d, %s(lr=%g)\n"
 		 "best epoch  %d (validation loss %.5f, %s %.2f%s)\ntime        %.1f s\n",
-		 o->source, t->format, t->nrows, s->classify ? "classification" : "regression", s->target, "", D, D, H, C, opt, lr,
+		 o->source, t->format, t->nrows, s->classify ? "classification" : "regression", s->target, "", D, L.dd, L.ds, L.k, D, H, C, opt, lr,
 		 best_ep, bv.loss, s->classify ? "accuracy" : "rmse", metric, s->classify ? "%" : "", (tr_now_ms() - t0) / 1e3);
 	char *rpath = join(dir, "report.txt");
 	write_text(rpath, rep);
@@ -380,8 +495,13 @@ static int cmd_predict(int argc, char **argv)
 	Module *m = load_module(join(dir, "infer.tg"));
 	plan(m);
 	Table *t = data_load(src, 1 << 30);
-	int D = s->dim, C = s->classify ? s->nclass : 1;
+	int D = s->dim, C = s->classify ? s->nclass : 1, cut = 0;
+	Layout L = layout_of(s);
+	for (int i = 0; i < m->ninputs; i++)
+		if (!strcmp(m->val[m->inputs[i]].name, "s")) L.k = m->val[m->inputs[i]].sh.dim[0];
+	if (L.ds && !L.k) die(NULL, 0, "infer.tg has no sparse input 's' for the text features in features.tgf");
 	float *x = xmalloc((size_t)D * sizeof *x), *out = xmalloc((size_t)C * sizeof *out);
+	float *xd = xmalloc((size_t)(L.dd ? L.dd : 1) * sizeof *xd), *ell = xmalloc((size_t)(L.k ? L.k : 1) * 2 * sizeof *ell);
 	int *steps = xmalloc((size_t)(m->nthink ? m->nthink : 1) * sizeof *steps);
 	FILE *f = outp ? fopen(outp, "w") : stdout;
 	if (!f) die(NULL, 0, "cannot write '%s'", outp);
@@ -392,7 +512,11 @@ static int cmd_predict(int argc, char **argv)
 		int lab = -1;
 		float y = 0;
 		int has = spec_apply(s, t, r, x, s->classify ? NULL : &y, s->classify ? &lab : NULL);
-		const float *in[1] = { x };
+		cut += split_row(s, &L, x, xd, ell) > L.k;
+		const float *in[2];
+		int ni = 0;
+		if (L.dd) in[ni++] = xd;
+		if (L.ds) in[ni++] = ell;
 		vm_run(m, in, out, steps);
 		if (s->classify) {
 			int b = 0;
@@ -412,6 +536,7 @@ static int cmd_predict(int argc, char **argv)
 		}
 	}
 	if (outp && fclose(f)) die(NULL, 0, "write failed '%s'", outp);
+	if (cut) fprintf(stderr, "predict: %d row(s) had more than %d active text buckets; the largest %d were kept\n", cut, L.k, L.k);
 	if (known && s->classify) fprintf(stderr, "predict: %d rows, accuracy %.2f%% on the %d rows that carry '%s'\n", t->nrows, 100.0 * correct / known, known, s->target);
 	else if (known) fprintf(stderr, "predict: %d rows, rmse %.6g on the %d rows that carry '%s'\n", t->nrows, sqrt(se / known) * s->tstd, known, s->target);
 	else fprintf(stderr, "predict: %d rows\n", t->nrows);
@@ -423,7 +548,7 @@ int autotrain_main(int argc, char **argv)
 	Opts o = { 0 };
 	o.val = 0.2;
 	o.max_rows = 20000;
-	o.text_dim = 1024;
+	o.text_dim = 8192;
 	const char *cmd = argv[1];
 	if (!strcmp(cmd, "predict")) return cmd_predict(argc, argv);
 	if (!strcmp(cmd, "train")) {

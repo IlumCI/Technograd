@@ -1,0 +1,16 @@
+# Sparse rows in ELLPACK form: each row is K (index, value) pairs into the
+# rows of a weight matrix. Padding has value 0; indices are rounded to the
+# nearest integer, and out-of-range ones are skipped. The model also takes a
+# gradient through spmm and self-updates the table, so the scatter (spmm_t)
+# and value-gradient (spmm_dx) kernels run in the VM and the C unit.
+model sparse
+
+state table : f32[6, 3] = rand(3, 0.5)
+param w2 : f32[3] = [1, -0.5, 0.25]
+
+def forward(s: f32[2, 4, 2], t: f32[2]) -> f32[2]:
+    h = tanh(spmm(s, table))
+    y = h @ w2
+    loss = mean((y - t) * (y - t))
+    update table = table - 0.1 * grad(loss, table)
+    return y + sum(grad(loss, s)) * 0

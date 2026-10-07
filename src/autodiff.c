@@ -75,11 +75,11 @@ static const Ins *def_of(const Module *m, int v)
 
 /* ---- emission ----------------------------------------------------------- */
 
-static int E(AD *a, Op op, int p, int q)
+static int E3(AD *a, Op op, int p, int q, int r)
 {
 	Module *m = a->m;
-	int na = tg_ops[op].arity, args[2] = { p, q };
-	Shape in[2] = { { 0 } }, out;
+	int na = tg_ops[op].arity, args[TG_MAXARGS] = { p, q, r };
+	Shape in[TG_MAXARGS] = { { 0 } }, out;
 	char err[256];
 	for (int i = 0; i < na; i++) in[i] = m->val[args[i]].sh;
 	if (!op_infer(op, in, na, &out, err, sizeof err)) die(a->file, a->line, "autodiff: %s", err);
@@ -88,11 +88,12 @@ static int E(AD *a, Op op, int p, int q)
 	ins->op = op;
 	ins->out = o;
 	ins->na = na;
-	ins->a[0] = p;
-	ins->a[1] = na > 1 ? q : -1;
+	for (int i = 0; i < na; i++) ins->a[i] = args[i];
 	mod_note_def(m, o, a->b, a->b->len - 1);
 	return o;
 }
+
+static int E(AD *a, Op op, int p, int q) { return E3(a, op, p, q, -1); }
 
 #define E1(a, op, p) E(a, op, p, -1)
 
@@ -123,6 +124,21 @@ static int ONES(AD *a, const Shape *s)
 	return v;
 }
 
+/* A constant selecting one slot of ELLPACK pairs: 1 at slot (0 index, 1 value), 0 elsewhere. */
+static int ELL_SLOT(AD *a, const Shape *s, int slot)
+{
+	char name[64];
+	size_t o = (size_t)snprintf(name, sizeof name, "__ell%d", slot);
+	for (int i = 0; i < s->rank; i++) o += (size_t)snprintf(name + o, sizeof name - o, "_%d", s->dim[i]);
+	for (int v = 0; v < a->m->nval; v++)
+		if (a->m->val[v].kind == V_PARAM && a->m->val[v].name && strcmp(a->m->val[v].name, name) == 0) return v;
+	int v = mod_value(a->m, V_PARAM, s, name);
+	int n = shape_numel(s);
+	a->m->val[v].data = xmalloc((size_t)n * sizeof(float));
+	for (int i = 0; i < n; i++) a->m->val[v].data[i] = i % 2 == slot ? 1.0f : 0.0f;
+	return v;
+}
+
 static const Shape *SH(AD *a, int v) { return &a->m->val[v].sh; }
 
 /* ---- dependence --------------------------------------------------------- */
@@ -140,7 +156,7 @@ static void outer_reads_rec(const Block *b, const char *in, int state, void (*f)
 {
 	for (int i = 0; i < b->len; i++) {
 		const Ins *ins = &b->v[i];
-		int r[3] = { -1, -1, -1 };
+		int r[TG_MAXARGS + 1] = { -1, -1, -1, -1 };
 		if (ins->op == OP_THINK) {
 			r[0] = ins->init;
 			r[1] = ins->yield;
@@ -148,7 +164,7 @@ static void outer_reads_rec(const Block *b, const char *in, int state, void (*f)
 		} else {
 			for (int j = 0; j < ins->na; j++) r[j] = ins->a[j];
 		}
-		for (int j = 0; j < 3; j++)
+		for (int j = 0; j < TG_MAXARGS + 1; j++)
 			if (r[j] >= 0 && r[j] != state && !in[r[j]]) f(ctx, r[j]);
 	}
 }
@@ -247,9 +263,9 @@ static void think_vjp(AD *a, Ins t, int g, Adj *adj);
 
 static void vjp(AD *a, const Ins *in, int g, Adj *adj)
 {
-	int x0 = in->na > 0 ? in->a[0] : -1, x1 = in->na > 1 ? in->a[1] : -1, y = in->out;
-	int w0 = x0 >= 0 && want(a, x0), w1 = x1 >= 0 && want(a, x1);
-	if (!w0 && !w1) return;
+	int x0 = in->na > 0 ? in->a[0] : -1, x1 = in->na > 1 ? in->a[1] : -1, x2 = in->na > 2 ? in->a[2] : -1, y = in->out;
+	int w0 = x0 >= 0 && want(a, x0), w1 = x1 >= 0 && want(a, x1), w2 = x2 >= 0 && want(a, x2);
+	if (!w0 && !w1 && !w2) return;
 	switch (in->op) {
 	case OP_CONST:
 	case OP_STEP:
@@ -342,6 +358,20 @@ static void vjp(AD *a, const Ins *in, int g, Adj *adj)
 		if (w0) acc(a, adj, x0, E(a, OP_MATMUL, g, x1));
 		if (w1) acc(a, adj, x1, E(a, OP_MATMUL, x0, g));
 		return;
+	case OP_SPMM: /* indices are piecewise constant: only values and weights get gradients */
+		if (w0) acc(a, adj, x0, E3(a, OP_SPMM_DX, x0, x1, g));
+		if (w1) acc(a, adj, x1, E3(a, OP_SPMM_T, x0, g, x1));
+		return;
+	case OP_SPMM_T: /* o = x^T g, linear in g and in the values of x; x2 gives only the shape */
+		if (w0) acc(a, adj, x0, E3(a, OP_SPMM_DX, x0, g, x1));
+		if (w1) acc(a, adj, x1, E(a, OP_SPMM, x0, g));
+		return;
+	case OP_SPMM_DX: { /* o.value = w[index] . g; independent of the values of x */
+		int z = E(a, OP_ADD, E(a, OP_MUL, x0, ELL_SLOT(a, SH(a, x0), 0)), E(a, OP_MUL, g, ELL_SLOT(a, SH(a, x0), 1)));
+		if (w1) acc(a, adj, x1, E3(a, OP_SPMM_T, z, x2, x1));
+		if (w2) acc(a, adj, x2, E(a, OP_SPMM, z, x1));
+		return;
+	}
 	case OP_TRANSPOSE:
 		acc(a, adj, x0, E1(a, OP_TRANSPOSE, g));
 		return;
@@ -412,7 +442,8 @@ static int clone_body(AD *a, const Ins *t, int h)
 #define MAP(v) ((v) == t->out ? h : (v) < n && map[v] >= 0 ? map[v] : (v))
 	for (int i = 0; i < t->body->len; i++) {
 		Ins in = t->body->v[i];
-		map[in.out] = in.op == OP_CONST ? K(a, in.k) : E(a, in.op, MAP(in.a[0]), in.na > 1 ? MAP(in.a[1]) : -1);
+		map[in.out] = in.op == OP_CONST ? K(a, in.k)
+			    : E3(a, in.op, MAP(in.a[0]), in.na > 1 ? MAP(in.a[1]) : -1, in.na > 2 ? MAP(in.a[2]) : -1);
 	}
 	int y = MAP(t->yield);
 #undef MAP

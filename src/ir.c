@@ -205,8 +205,8 @@ static void r_block(R *r, Block *b, const Sx *forms, int from, int to)
 			if (op < 0) die(r->file, head->line, "unknown op '%s'", head->s);
 			tmp.op = (Op)op;
 			tmp.na = e->len - 1;
-			if (tmp.na > 2) die(r->file, e->line, "too many operands");
-			Shape in[2];
+			if (tmp.na > TG_MAXARGS) die(r->file, e->line, "too many operands");
+			Shape in[TG_MAXARGS];
 			for (int j = 0; j < tmp.na; j++) {
 				tmp.a[j] = r_get(r, e->v[j + 1]);
 				in[j] = r->m->val[tmp.a[j]].sh;
@@ -234,13 +234,9 @@ static void r_block(R *r, Block *b, const Sx *forms, int from, int to)
 		}
 		r_def(r, x->v[0], out);
 		Ins *in = block_push(b);
-		int a0 = tmp.a[0], a1 = tmp.a[1];
 		*in = tmp;
 		in->out = out;
-		if (tmp.na < 1) a0 = -1;
-		if (tmp.na < 2) a1 = -1;
-		in->a[0] = a0;
-		in->a[1] = a1;
+		for (int j = tmp.op == OP_THINK ? 0 : tmp.na; j < TG_MAXARGS; j++) in->a[j] = -1;
 		if (tmp.op != OP_THINK) in->init = in->yield = -1;
 	}
 }

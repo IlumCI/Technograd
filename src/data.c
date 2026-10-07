@@ -342,6 +342,22 @@ static void load_delimited(Table *t, char *text, const char *name)
 	for (int i = 0; i < nh && i < ng; i++)
 		if (!is_number(f[i], NULL) && *f[i] && is_number(g[i], NULL)) header = 1;
 	if (ng <= 0) for (int i = 0; i < nh; i++) header |= !is_number(f[i], NULL) && *f[i]; /* single-row file */
+	if (!header && ng > 0) { /* all-string columns: every first-row field is name-like and never recurs below it */
+		int names = 1;
+		for (int i = 0; i < nh && names; i++) {
+			int words = 1, len = (int)strlen(f[i]);
+			for (const char *c = f[i]; *c; c++) words += *c == ' ' && c[1] && c[1] != ' ';
+			names = *f[i] && len <= 32 && words <= 3 && !is_number(f[i], NULL);
+		}
+		char *r = xstrdup(p), *rp = r;
+		for (int line = 0; line < 200 && names; line++) {
+			int n = split_record(&rp, d, g, 4096);
+			if (n < 0) break;
+			for (int i = 0; i < n && i < nh && names; i++) names = strcmp(f[i], g[i]) != 0;
+		}
+		xfree(r);
+		header = names;
+	}
 	int *ci = xmalloc((size_t)nh * sizeof *ci);
 	for (int i = 0; i < nh; i++) {
 		char nm[300];

@@ -36,6 +36,7 @@ CASES="examples/xor.tg:1,0 examples/newton.tg:2,9,16 examples/latent_reasoner.tg
 examples/latent_reasoner.tg:0.1,0.2,-0.3,0.5,0.9,-1,0.3,0 tests/cases/ops.tg:1,-2,3,0.5
 tests/cases/nested.tg:0.3,-0.7 tests/cases/multi_input.tg:1,2,3:0.5 tests/cases/file_param.tg:1,2
 examples/use_import.tg:1,-1,2,-2 examples/delta_memory.tg:1,0,0,0:1,2,3,4 tests/bcast/broadcast.tg:0.1,-0.2,0.3,1,2,-1,0,0,0,-3,0.5,0.25
+tests/sparse/spmm.tg:0,1,2,0.5,5,-1,0,0,1,1,1,1,9,3,-1,2:0.5,-0.5
 examples/drift_calibration.tg:10,20,30"
 for c in $CASES; do
 	f=${c%%:*}
@@ -135,7 +136,7 @@ $TGC ir examples/delta_memory.tg | grep -q "(update mem %" && ok || bad "TGIR lo
 #     on-device training in generated C matching the VM bit for bit
 mkdir -p "$TMP/gc"
 if perl tests/gradcheck.pl "$TGC" "$TMP/gc" > "$TMP/gc.out"; then ok; else bad "gradcheck: $(grep FAIL "$TMP/gc.out")"; fi
-[ "$(grep -c "^ok" "$TMP/gc.out")" -ge 25 ] && ok || bad "gradcheck ran too few cases"
+[ "$(grep -c "^ok" "$TMP/gc.out")" -ge 29 ] && ok || bad "gradcheck ran too few cases"
 perl -e 'srand(3); my @d=([0,0,0],[0,1,1],[1,0,1],[1,1,0]); for (1..1500) { for my $r (sort { rand() <=> 0.5 } @d) { print join(",", @$r), "\n" } }' > "$TMP/xt.csv"
 $TGC batch examples/train_xor.tg "$TMP/xt.csv" --save-state "$TMP/xor" -o "$TMP/xp.csv"
 paste -d, "$TMP/xt.csv" "$TMP/xp.csv" | tail -8 | awk -F, '{ if ($3 == 1 && $4 < 0.9 || $3 == 0 && $4 > 0.1) bad = 1 } END { exit bad }' && ok || bad "XOR not learned"
@@ -166,6 +167,15 @@ for f in model.tg infer.tg infer.c features.tgf report.txt weights.w1.bin; do [ 
 printf 'b,a\n0.1,0.2\n3.1,0.1\n0.2,2.9\n' > "$TMP/new.csv"   # columns reordered, no target
 [ "$($TGC predict "$TMP/blobs_model" "$TMP/new.csv" 2>/dev/null | cut -d, -f1 | tr '\n' ' ')" = 'prediction "k0" "k2" "k1" ' ] && ok || bad "predict on reordered columns"
 $CC -std=c99 -Wall -Werror -c -o "$TMP/infer.o" "$TMP/blobs_model/infer.c" && ok || bad "generated infer.c does not compile"
+# text + numeric: hashed words enter as sparse ELLPACK rows through spmm
+perl -e 'srand(5); my @p=qw(great superb lovely fun moving); my @n=qw(awful dull boring weak bland); my @f=qw(the a film plot actor story it was and); print "review,score,mood\n"; for (1..600) { my $k=$_%2; my @w=map { $f[int rand @f] } 1..(3+int rand 6); push @w, ($k ? $p[int rand @p] : $n[int rand @n]) for 1..2; @w = sort { rand() <=> 0.5 } @w; printf "\"%s\",%.2f,%s\n", join(" ",@w), rand(), $k ? "pos" : "neg" }' > "$TMP/rev.csv"
+$TGC train "$TMP/rev.csv" --target mood --epochs 40 -o "$TMP/rev_model" > "$TMP/rev.log" 2>&1 || bad "text train failed: $(tail -3 "$TMP/rev.log")"
+grep -q "1 dense, 8192 sparse text buckets, <= 10 active per row" "$TMP/rev.log" && ok || bad "text not sparse: $(grep features "$TMP/rev.log")"
+grep -q "accuracy 100.00%" "$TMP/rev.log" && ok || bad "text not learned: $(grep 'best epoch' "$TMP/rev.log")"
+grep -q "spmm(s, wt)" "$TMP/rev_model/infer.tg" && ok || bad "infer.tg without spmm"
+printf 'review\nwhat a lovely and moving story\nthe plot was dull\n' > "$TMP/rnew.csv"   # one string column: header still detected
+[ "$($TGC predict "$TMP/rev_model" "$TMP/rnew.csv" 2>/dev/null | cut -d, -f1 | tr '\n' ' ')" = 'prediction "pos" "neg" ' ] && ok || bad "text predict"
+$CC -std=c99 -Wall -Werror -c -o "$TMP/rinfer.o" "$TMP/rev_model/infer.c" && ok || bad "sparse infer.c does not compile"
 # shared backward pass: four grad() of one loss -> one pass; DCE keeps IR small
 [ "$($TGC check examples/train_xor.tg -vv 2>&1 | grep -c '\[grad\] backward pass')" -eq 1 ] && ok || bad "grad passes not shared"
 printf 'model d\ndef forward(x: f32[2]) -> f32[2]:\n    unused = exp(x) * 3\n    return x + 1\n' > "$TMP/dce.tg"

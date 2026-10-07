@@ -43,13 +43,14 @@ static void flt(G *g, float v)
 static void block(G *g, const Block *b, int d)
 {
 	const Module *m = g->m;
-	char o[64], a[64], c[64];
+	char o[64], a[64], c[64], e[64];
 	for (int i = 0; i < b->len; i++) {
 		const Ins *in = &b->v[i];
 		int n = shape_numel(&m->val[in->out].sh);
 		ref(g, in->out, o, sizeof o);
 		if (in->na > 0) ref(g, in->a[0], a, sizeof a);
 		if (in->na > 1) ref(g, in->a[1], c, sizeof c);
+		if (in->na > 2) ref(g, in->a[2], e, sizeof e);
 		ind(g, d);
 		switch (tg_ops[in->op].cls) {
 		case CLS_CONST:
@@ -91,6 +92,13 @@ static void block(G *g, const Block *b, int d)
 		case CLS_OUTER:
 			fprintf(g->f, "tg_outer(%s, %s, %s, %d, %d);\n", o, a, c, shape_numel(&m->val[in->a[0]].sh), shape_numel(&m->val[in->a[1]].sh));
 			break;
+		case CLS_SPMM: {
+			int r, k, dd, h;
+			spmm_dims(&m->val[in->a[0]].sh, &m->val[in->a[in->op == OP_SPMM_T ? 2 : 1]].sh, &r, &k, &dd, &h);
+			if (in->op == OP_SPMM_DX) fprintf(g->f, "tg_spmm_dx(%s, %s, %s, %s, %d, %d, %d, %d);\n", o, a, c, e, r, k, dd, h);
+			else fprintf(g->f, "tg_%s(%s, %s, %s, %d, %d, %d, %d);\n", tg_ops[in->op].name, o, a, c, r, k, dd, h);
+			break;
+		}
 		case CLS_TRANS: {
 			const Shape *s = &m->val[in->a[0]].sh;
 			fprintf(g->f, "tg_transpose(%s, %s, %d, %d);\n", o, a, s->dim[0], s->dim[1]);

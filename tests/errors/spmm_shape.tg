@@ -1,0 +1,5 @@
+# expect: 'spmm' needs sparse rows (K, 2) or (B, K, 2) of (index, value) pairs and a matrix (D, H), got (f32 4 3) and (f32 6 2)
+model e
+param w : f32[6, 2] = ones
+def forward(s: f32[4, 3]) -> f32[2]:
+    return spmm(s, w)

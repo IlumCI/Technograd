@@ -120,6 +120,60 @@ TG_FN void tg_outer(float *o, const float *a, const float *b, int m, int n)
 		for (int j = 0; j < n; j++) o[i * n + j] = a[i] * b[j];
 }
 
+/* Sparse rows in ELLPACK form: x[r, K, 2] holds K (index, value) pairs per
+ * row; padding has value 0. An index is rounded to the nearest integer and
+ * entries outside [0, d) are skipped, so a malformed row cannot address out
+ * of bounds. Cost is O(r K h), independent of d (embedding bag, DLRM-style). */
+TG_FN int tg_ell_idx(float v, int d)
+{
+	float r = floorf(v + 0.5f);
+	return r >= 0.0f && r < (float)d ? (int)r : -1;
+}
+
+/* o[r, h] = sum_k x[r,k].value * w[x[r,k].index, :] */
+TG_FN void tg_spmm(float *o, const float *x, const float *w, int r, int k, int d, int h)
+{
+	for (int i = 0; i < r; i++) {
+		float *y = o + i * h;
+		for (int j = 0; j < h; j++) y[j] = 0.0f;
+		for (int p = 0; p < k; p++) {
+			const float *e = x + (i * k + p) * 2;
+			int t = tg_ell_idx(e[0], d);
+			if (t < 0 || e[1] == 0.0f) continue;
+			for (int j = 0; j < h; j++) y[j] += e[1] * w[t * h + j];
+		}
+	}
+}
+
+/* Gradient with respect to w: o[d, h] = x^T g, a scatter-add of value * g row. */
+TG_FN void tg_spmm_t(float *o, const float *x, const float *g, int r, int k, int d, int h)
+{
+	for (int i = 0; i < d * h; i++) o[i] = 0.0f;
+	for (int i = 0; i < r; i++)
+		for (int p = 0; p < k; p++) {
+			const float *e = x + (i * k + p) * 2;
+			int t = tg_ell_idx(e[0], d);
+			if (t < 0 || e[1] == 0.0f) continue;
+			for (int j = 0; j < h; j++) o[t * h + j] += e[1] * g[i * h + j];
+		}
+}
+
+/* Gradient with respect to x: 0 for indices, w[index] . g[row] for values. */
+TG_FN void tg_spmm_dx(float *o, const float *x, const float *w, const float *g, int r, int k, int d, int h)
+{
+	for (int i = 0; i < r; i++)
+		for (int p = 0; p < k; p++) {
+			const float *e = x + (i * k + p) * 2;
+			float *q = o + (i * k + p) * 2;
+			int t = tg_ell_idx(e[0], d);
+			float s = 0.0f;
+			if (t >= 0)
+				for (int j = 0; j < h; j++) s += w[t * h + j] * g[i * h + j];
+			q[0] = 0.0f;
+			q[1] = s;
+		}
+}
+
 /* Halting criterion for latent loops: max |a - b|. */
 TG_FN float tg_delta(const float *a, const float *b, int n)
 {
