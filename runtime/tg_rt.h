@@ -110,6 +110,13 @@ TG_FN void tg_transpose(float *o, const float *a, int r, int c)
 		for (int j = 0; j < c; j++) o[j * r + i] = a[i * c + j];
 }
 
+/* o[m,n] = a[m] b[n]^T, the rank-1 write of delta-rule and Hebbian updates. */
+TG_FN void tg_outer(float *o, const float *a, const float *b, int m, int n)
+{
+	for (int i = 0; i < m; i++)
+		for (int j = 0; j < n; j++) o[i * n + j] = a[i] * b[j];
+}
+
 /* Halting criterion for latent loops: max |a - b|. */
 TG_FN float tg_delta(const float *a, const float *b, int n)
 {

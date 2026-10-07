@@ -28,6 +28,7 @@ const OpInfo tg_ops[OP_COUNT] = {
 	[OP_SUM]       = { "sum",       1, CLS_RED },
 	[OP_MEAN]      = { "mean",      1, CLS_RED },
 	[OP_TRANSPOSE] = { "transpose", 1, CLS_TRANS },
+	[OP_OUTER]     = { "outer",     2, CLS_OUTER },
 	[OP_THINK]     = { "think",     0, CLS_THINK },
 };
 
@@ -104,6 +105,17 @@ int op_infer(Op op, const Shape *a, int na, Shape *out, char *err, size_t errn)
 		out->rank = 2;
 		out->dim[0] = a[0].dim[1];
 		out->dim[1] = a[0].dim[0];
+		return 1;
+	case CLS_OUTER:
+		if (a[0].rank != 1 || a[1].rank != 1) {
+			shape_str(&a[0], s0, sizeof s0);
+			shape_str(&a[1], s1, sizeof s1);
+			snprintf(err, errn, "'outer' needs two vectors, got %s and %s", s0, s1);
+			return 0;
+		}
+		out->rank = 2;
+		out->dim[0] = a[0].dim[0];
+		out->dim[1] = a[1].dim[0];
 		return 1;
 	case CLS_THINK:
 		break;

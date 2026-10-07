@@ -1,0 +1,9 @@
+; expect: 'w' is not a state
+(tgir 1
+  (model e)
+  (param w (f32 2) (data 0 0))
+  (input x (f32 2))
+  (block
+    (%2 (f32 2) (tanh x)))
+  (output %2)
+  (update w %2))

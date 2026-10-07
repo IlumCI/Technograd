@@ -1,0 +1,6 @@
+# expect: 'w' is a read-only param; declare it with 'state' to update it
+model e
+param w : f32[2] = zeros
+def forward(x: f32[2]) -> f32[2]:
+    update w = x
+    return x

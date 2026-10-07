@@ -1,0 +1,8 @@
+# expect: 'update' is only allowed in the body of 'forward', not in a def
+model e
+state m : f32[2] = zeros
+def f(x: f32[2]) -> f32[2]:
+    update m = x
+    return x
+def forward(x: f32[2]) -> f32[2]:
+    return f(x)

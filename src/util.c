@@ -188,6 +188,15 @@ int mod_value(Module *m, VKind k, const Shape *sh, const char *name)
 	return m->nval++;
 }
 
+void mod_update(Module *m, int state, int src)
+{
+	m->upd_state = xrealloc(m->upd_state, (size_t)(m->nupd + 1) * sizeof *m->upd_state);
+	m->upd_src = xrealloc(m->upd_src, (size_t)(m->nupd + 1) * sizeof *m->upd_src);
+	m->upd_state[m->nupd] = state;
+	m->upd_src[m->nupd] = src;
+	m->nupd++;
+}
+
 Ins *block_push(Block *b)
 {
 	if (b->len == b->cap) {

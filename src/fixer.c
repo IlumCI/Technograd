@@ -55,7 +55,7 @@ static const char *rname[R_N] = {
 	"delete-token", "make-return", "delete-line", "fix-character",
 };
 
-static const char *keywords[] = { "model", "param", "def", "return", "think", "for", "until", "f32",
+static const char *keywords[] = { "model", "param", "def", "return", "think", "for", "until", "f32", "import", "state", "update",
 				  "zeros", "ones", "fill", "rand", "file", NULL };
 
 /* ---- small helpers ------------------------------------------------------ */
@@ -859,7 +859,7 @@ static int generate(Cands *C, const Lines *L, const Diag *d)
 	case E_EXPECT:
 		gen_expect(C, L, el, d->msg);
 		gen_balance(C, L, el);
-		if (strstr(d->msg, "'model', 'param' or 'def'")) gen_indent(C, L, el);
+		if (strstr(d->msg, "'model', 'param'")) gen_indent(C, L, el); /* top-level declaration expected */
 		if (strstr(d->msg, "indented block")) gen_indent(C, L, el);
 		break;
 	case E_RETURN:

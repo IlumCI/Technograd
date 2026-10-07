@@ -35,7 +35,8 @@ expect_run tests/cases/ops.tg "$(cat tests/cases/ops.expected)" 1,-2,3,0.5
 CASES="examples/xor.tg:1,0 examples/newton.tg:2,9,16 examples/latent_reasoner.tg:1,0,0,1,0,1,1,0
 examples/latent_reasoner.tg:0.1,0.2,-0.3,0.5,0.9,-1,0.3,0 tests/cases/ops.tg:1,-2,3,0.5
 tests/cases/nested.tg:0.3,-0.7 tests/cases/multi_input.tg:1,2,3:0.5 tests/cases/file_param.tg:1,2
-examples/use_import.tg:1,-1,2,-2"
+examples/use_import.tg:1,-1,2,-2 examples/delta_memory.tg:1,0,0,0:1,2,3,4
+examples/drift_calibration.tg:10,20,30"
 for c in $CASES; do
 	f=${c%%:*}
 	args=$(echo "${c#*:}" | tr ':' ' ')
@@ -116,6 +117,18 @@ W=1,0,-1,0.5,0,0,1,0,0,2,0,0,-1,0,0,1
 printf "%s\n%s\n%s\n" $W $W $W > "$TMP/w.csv"
 [ "$($TGC batch tests/par/wide.tg "$TMP/w.csv" -j 4)" = "$($TGC batch tests/par/wide.tg "$TMP/w.csv" -j 1)" ] && ok || bad "nested parallelism changed the result"
 $TGC run examples/xor.tg 1,0 -j abc >/dev/null 2>&1 && bad "-j abc must be rejected" || ok
+
+# 4e. self-updating state: exact delta-rule recall, drift convergence, C unit
+#     == VM across calls, order kept under -j, and the firmware reset/save API
+[ "$($TGC batch examples/delta_memory.tg tests/state/mem.csv)" = "$(cat tests/state/mem.expected)" ] && ok || bad "delta memory recall"
+for i in $(seq 40); do echo 10,20,30; done > "$TMP/drift.csv"
+[ "$($TGC batch examples/drift_calibration.tg "$TMP/drift.csv" | tail -1)" = "0.164232254,0.328464508,0.492694855" ] && ok || bad "drift calibration"
+$TGC c examples/delta_memory.tg -o "$TMP/unit.c" && $CC -std=c99 -O2 -Wall -Wextra -Werror -pedantic -DTG_MAIN -o "$TMP/dm" "$TMP/unit.c" -lm && ok || bad "stateful unit compile"
+c=$("$TMP/dm" 1,0,0,0 1,2,3,4 0,1,0,0 5,6,7,8 1,0,0,0 0,0,0,0 0,1,0,0 0,0,0,0 1,0,0,0 9,9,9,9)
+[ "$c" = "$(tr , " " < tests/state/mem.expected)" ] && ok || bad "C unit adaptation differs from VM: [$c]"
+[ "$($TGC batch examples/delta_memory.tg tests/state/mem.csv -j 4)" = "$(cat tests/state/mem.expected)" ] && ok || bad "stateful batch reordered under -j"
+$CC -std=c99 -Wall -Wextra -Werror -I"$TMP" -o "$TMP/harness" tests/state/harness.c -lm && "$TMP/harness" >/dev/null && ok || bad "reset/save/restore harness"
+$TGC ir examples/delta_memory.tg | grep -q "(update mem %" && ok || bad "TGIR lost the update"
 
 # 4a. cross-file imports: diamond dedup and cycle termination
 expect_run tests/imports/diamond.tg "23 43" 10,20

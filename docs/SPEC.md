@@ -6,6 +6,8 @@ A program defines one model. Its parts:
 
 - `model NAME`: required, exactly once.
 - `param NAME : TYPE = INIT`: constant tensors (weights). They are global and read-only.
+- `state NAME : TYPE = INIT`: mutable tensors. They are global, readable like
+  params, and change only through `update` (section 15).
 - `def NAME(args) -> TYPE:`: pure functions. Each one is inlined at every call site.
 - `def forward(...)`: the entry point. Its arguments are the model inputs, in
   order, and its return value is the single output.
@@ -66,6 +68,7 @@ themselves.
 ```
 NAME = expr                      bind (SSA rename; rebinding allowed; params cannot be assigned)
 return expr                      last statement of a def; not allowed inside think
+update NAME = expr               set a state for the next run (section 15)
 think S for N [until EPS]:       latent loop, see section 7
     block
 ```
@@ -84,6 +87,7 @@ and parentheses. All binary operators are left associative.
 | `softmax(x)`, `rmsnorm(x)` | over the last axis, shape preserved, rank >= 1; rmsnorm eps = 1e-6, no gain |
 | `sum(x)`, `mean(x)` | reduce to scalar |
 | `transpose(x)` | rank 2 only |
+| `outer(a, b)` | `(m),(n)->(m,n)`, `a b^T`; the rank-1 write of delta-rule and Hebbian updates |
 
 ## 7. `think`: continuous latent loops
 
@@ -307,7 +311,72 @@ Measured on 4 cores:
 
 The text batch is limited by serial parsing and formatting of numbers.
 
-## 15. Roadmap
+## 15. Self-updating state
+
+A model can rewrite its own weights while it runs, for test-time training, fast
+weights and on-device adaptation.
+
+```python
+state mem : f32[4, 4] = zeros            # mutable, starts from its initializer
+
+def forward(k: f32[4], v: f32[4]) -> f32[4]:
+    y = mem @ k                          # reads see the start-of-run value
+    update mem = mem + outer(v - y, k)   # delta rule: one regression step
+    return y
+```
+
+### Semantics
+
+- **Declaration.** `state` declares a tensor like `param` does, with the same
+  initializers. It can be read anywhere a param can be.
+- **When updates apply.** `update NAME = expr` computes the next value. All
+  updates of a run are committed after the output is computed, in two phases:
+  every source is copied to a staging area, then into its state. Every read
+  during a run, including reads inside other update expressions, therefore
+  sees the start-of-run value. The graph stays static and single-assignment,
+  and the order of updates does not matter.
+- **Restrictions**, each a compile error:
+  - `update` only in the body of `forward` (not in a `def`, not in a `think`);
+  - each state updated at most once per run;
+  - the value must have the state's shape;
+  - a `param` cannot be updated;
+  - a state cannot be assigned with `=`.
+- **Persistence across runs:**
+  - **VM:** state persists for the process. `batch` carries it from row to row
+    and keeps rows in input order for such models; `-j` threads then only
+    split large matmuls inside each row. Results are identical at any `-j`.
+  - **Generated C:** each state is an exported RAM array
+    `float tg_<m>_state_<name>[TG_<m>_STATE_<name>]` that firmware can read,
+    save to flash and write back. `void tg_<m>_reset(void)` restores the
+    initial values from a `const` copy. The `-DTG_MAIN` driver accepts several
+    samples in one process, so adaptation across calls can be checked against
+    the VM.
+- **TGIR.** `(state NAME TYPE (data ...))` declares a state, and
+  `(update NAME VALUE)` forms follow `(output ...)`. The reader re-checks every
+  rule above.
+- **Tracing.** Under `-v`, `run` reports each committed update as
+  `[update] state NAME updated, max |change| ...` (log fields `state`,
+  `max_change`).
+
+### Update rules expressible today
+
+These are written directly in the language with existing builtins:
+
+| Rule | `update` expression |
+|------|---------------------|
+| Delta rule (DeltaNet, arXiv:2406.06484) | `mem + beta * outer(v - mem @ k, k)` |
+| Gated delta rule (Gated DeltaNet, arXiv:2412.06464) | `alpha * mem + beta * outer(v - mem @ k, k)` |
+| Hebbian / linear-attention write | `mem + outer(v, k)` |
+| Exponential moving average (calibration) | `s + rate * (x - s)` |
+| TTT-Linear inner step (arXiv:2407.04620), fixed rate | `W - lr * outer(W @ k - v, k)` |
+
+All of these are steps of online regression on a key-value objective, the
+unifying view of arXiv:2501.12352. Rules whose step size or gate is computed
+from the input, such as Titans' surprise-based momentum and forgetting
+(arXiv:2501.00663), can be written the same way: compute the gate as a value,
+then use it in the `update` expression. A second `state` holds momentum.
+
+## 16. Roadmap
 
 Ordered by importance for latent-reasoning models on embedded targets:
 

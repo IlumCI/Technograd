@@ -25,6 +25,7 @@ static void ref(G *g, int v, char *buf, size_t n)
 	case V_PARAM: snprintf(buf, n, "tgp_%s", x->name); break;
 	case V_INPUT: snprintf(buf, n, "tgi_%s", x->name); break;
 	case V_TMP: snprintf(buf, n, "(A + %d)", x->off); break;
+	case V_STATE: snprintf(buf, n, "tg_%s_state_%s", g->m->name, x->name); break;
 	}
 }
 
@@ -80,6 +81,9 @@ static void block(G *g, const Block *b, int d)
 		case CLS_RED:
 			fprintf(g->f, "tg_%s(%s, %s, %d);\n", tg_ops[in->op].name, o, a, shape_numel(&m->val[in->a[0]].sh));
 			break;
+		case CLS_OUTER:
+			fprintf(g->f, "tg_outer(%s, %s, %s, %d, %d);\n", o, a, c, shape_numel(&m->val[in->a[0]].sh), shape_numel(&m->val[in->a[1]].sh));
+			break;
 		case CLS_TRANS: {
 			const Shape *s = &m->val[in->a[0]].sh;
 			fprintf(g->f, "tg_transpose(%s, %s, %d, %d);\n", o, a, s->dim[0], s->dim[1]);
@@ -133,15 +137,22 @@ void cgen(const Module *m, FILE *f)
 {
 	G g = { m, f };
 	const char *nm = m->name;
-	int params = 0;
-	for (int v = 0; v < m->nval; v++)
+	int params = 0, states = 0;
+	for (int v = 0; v < m->nval; v++) {
 		if (m->val[v].kind == V_PARAM) params += shape_numel(&m->val[v].sh);
+		if (m->val[v].kind == V_STATE) states += shape_numel(&m->val[v].sh);
+	}
 	int outn = shape_numel(&m->val[m->output].sh);
 
 	fprintf(f, "/* Technograd generated unit: model '%s'. Do not edit.\n", nm);
 	fprintf(f, " * arena %d bytes, parameters %d bytes, %d think loop(s).\n", m->arena * 4, params * 4, m->nthink);
 	fputs(" * Entry: ", f);
 	signature(&g);
+	if (m->nupd)
+		fprintf(f, "\n * Self-updating: %d byte(s) of state in RAM, rewritten at the end of every run.\n"
+			   " * State arrays tg_%s_state_<name> are exported so firmware can save and restore\n"
+			   " * what the model learned; tg_%s_reset() restores the initial values.",
+			states * 4, nm, nm);
 	fputs("\n */\n", f);
 	for (int i = 0; tg_rt_lines[i]; i++) fputs(tg_rt_lines[i], f);
 	fputc('\n', f);
@@ -165,7 +176,29 @@ void cgen(const Module *m, FILE *f)
 		}
 		fputs("};\n", f);
 	}
+	for (int v = 0; v < m->nval; v++) {
+		const Value *x = &m->val[v];
+		if (x->kind != V_STATE) continue;
+		int n = shape_numel(&x->sh);
+		for (int pass = 0; pass < 2; pass++) { /* pristine const copy, then the RAM state */
+			if (pass == 0) fprintf(f, "static const float tgs0_%s[%d] = {", x->name, n);
+			else fprintf(f, "#define TG_%s_STATE_%s %d\nfloat tg_%s_state_%s[%d] = {", nm, x->name, n, nm, x->name, n);
+			for (int i = 0; i < n; i++) {
+				if (i % 6 == 0) fputs("\n\t", f);
+				flt(&g, x->data[i]);
+				fputs(i + 1 < n ? ", " : "\n", f);
+			}
+			fputs("};\n", f);
+		}
+	}
 	fprintf(f, "\nstatic float tg_%s_arena[%d];\nint tg_%s_steps[%d];\n\n", nm, m->arena ? m->arena : 1, nm, m->nthink ? m->nthink : 1);
+	if (m->nupd || states) {
+		fprintf(f, "void tg_%s_reset(void);\nvoid tg_%s_reset(void)\n{\n", nm, nm);
+		for (int v = 0; v < m->nval; v++)
+			if (m->val[v].kind == V_STATE)
+				fprintf(f, "\ttg_copy(tg_%s_state_%s, tgs0_%s, %d);\n", nm, m->val[v].name, m->val[v].name, shape_numel(&m->val[v].sh));
+		fputs("}\n\n", f);
+	}
 
 	signature(&g);
 	fprintf(f, ";\n");
@@ -176,7 +209,27 @@ void cgen(const Module *m, FILE *f)
 	block(&g, &m->top, 1);
 	char o[64];
 	ref(&g, m->output, o, sizeof o);
-	fprintf(f, "\ttg_copy(tg_out, %s, %d);\n}\n", o, outn);
+	fprintf(f, "\ttg_copy(tg_out, %s, %d);\n", o, outn);
+	if (m->nupd) {
+		fputs("\t/* commit updates: stage all sources first, then write the states */\n", f);
+		int off = m->stage;
+		for (int i = 0; i < m->nupd; i++) {
+			char s[64];
+			int n = shape_numel(&m->val[m->upd_state[i]].sh);
+			ref(&g, m->upd_src[i], s, sizeof s);
+			fprintf(f, "\ttg_copy(A + %d, %s, %d);\n", off, s, n);
+			off += (n + TG_ALIGN - 1) / TG_ALIGN * TG_ALIGN;
+		}
+		off = m->stage;
+		for (int i = 0; i < m->nupd; i++) {
+			char s[64];
+			int n = shape_numel(&m->val[m->upd_state[i]].sh);
+			ref(&g, m->upd_state[i], s, sizeof s);
+			fprintf(f, "\ttg_copy(%s, A + %d, %d);\n", s, off, n);
+			off += (n + TG_ALIGN - 1) / TG_ALIGN * TG_ALIGN;
+		}
+	}
+	fputs("}\n", f);
 
 	/* Optional test driver; output format matches `tgc run`. */
 	fprintf(f, "\n#ifdef TG_MAIN\n#include <stdio.h>\n#include <stdlib.h>\n\n"
@@ -191,19 +244,22 @@ void cgen(const Module *m, FILE *f)
 		fprintf(f, "\tstatic float in%d[%d];\n", i, shape_numel(&x->sh));
 	}
 	fprintf(f, "\tstatic float out[%d];\n", outn);
-	fprintf(f, "\tif (argc != %d) { fprintf(stderr, \"usage: %%s", m->ninputs + 1);
+	/* Each group of NIN arguments is one sample; samples run in order in one
+	 * process, so a self-updating unit carries its state across them. */
+	fprintf(f, "\tif (argc < 2 || (argc - 1) %% %d) { fprintf(stderr, \"usage: %%s", m->ninputs);
 	for (int i = 0; i < m->ninputs; i++) fprintf(f, " %s", m->val[m->inputs[i]].name);
-	fputs("\\n\", argv[0]); return 2; }\n", f);
+	fputs(" [more samples...]\\n\", argv[0]); return 2; }\n", f);
+	fprintf(f, "\tfor (int s = 1; s < argc; s += %d) {\n", m->ninputs);
 	for (int i = 0; i < m->ninputs; i++) {
 		const Value *x = &m->val[m->inputs[i]];
-		fprintf(f, "\tif (!tg_parse(argv[%d], in%d, %d)) { fprintf(stderr, \"input '%s' needs %d comma-separated values\\n\"); return 2; }\n",
-			i + 1, i, shape_numel(&x->sh), x->name, shape_numel(&x->sh));
+		fprintf(f, "\t\tif (!tg_parse(argv[s + %d], in%d, %d)) { fprintf(stderr, \"input '%s' needs %d comma-separated values\\n\"); return 2; }\n",
+			i, i, shape_numel(&x->sh), x->name, shape_numel(&x->sh));
 	}
-	fprintf(f, "\ttg_%s_run(", nm);
+	fprintf(f, "\t\ttg_%s_run(", nm);
 	for (int i = 0; i < m->ninputs; i++) fprintf(f, "in%d, ", i);
 	fputs("out);\n", f);
-	fprintf(f, "\tfor (int i = 0; i < %d; i++) printf(\"%%s%%.9g\", i ? \" \" : \"\", (double)out[i]);\n\tputchar('\\n');\n", outn);
+	fprintf(f, "\t\tfor (int i = 0; i < %d; i++) printf(\"%%s%%.9g\", i ? \" \" : \"\", (double)out[i]);\n\t\tputchar('\\n');\n", outn);
 	if (m->nthink)
-		fprintf(f, "\tfor (int i = 0; i < %d; i++) printf(\"steps %%d %%d\\n\", i, tg_%s_steps[i]);\n", m->nthink, nm);
-	fputs("\treturn 0;\n}\n#endif\n", f);
+		fprintf(f, "\t\tfor (int i = 0; i < %d; i++) printf(\"steps %%d %%d\\n\", i, tg_%s_steps[i]);\n", m->nthink, nm);
+	fputs("\t}\n\treturn 0;\n}\n#endif\n", f);
 }

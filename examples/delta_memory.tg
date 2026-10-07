@@ -1,0 +1,18 @@
+# Self-updating associative memory with the gated delta rule.
+#
+# Each run reads the memory with a key and then performs one online regression
+# step on ||mem @ k - v||^2, written back for the next run:
+#     mem <- alpha * mem + beta * (v - mem @ k) k^T
+# This is the update of DeltaNet / Gated DeltaNet (arXiv:2406.06484,
+# arXiv:2412.06464), read as test-time regression (arXiv:2501.12352).
+# Keys are expected to be unit vectors.
+model delta_memory
+
+state mem : f32[4, 4] = zeros
+param alpha : f32 = 1      # retention: 1 keeps everything, < 1 forgets
+param beta : f32 = 1       # write strength: 1 overwrites exactly
+
+def forward(k: f32[4], v: f32[4]) -> f32[4]:
+    y = mem @ k                                   # recall, from the start-of-run memory
+    update mem = alpha * mem + beta * outer(v - y, k)
+    return y

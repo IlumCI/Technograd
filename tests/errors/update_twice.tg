@@ -1,0 +1,7 @@
+# expect: state 'm' updated twice in one run
+model e
+state m : f32[2] = zeros
+def forward(x: f32[2]) -> f32[2]:
+    update m = x
+    update m = x * 2
+    return x

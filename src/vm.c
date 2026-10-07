@@ -73,6 +73,7 @@ static float *ptr(VM *vm, int v)
 	const Value *x = &vm->m->val[v];
 	switch (x->kind) {
 	case V_PARAM: return x->data;
+	case V_STATE: return x->data;
 	case V_INPUT: return (float *)vm->in[x->index];
 	case V_TMP: break;
 	}
@@ -147,6 +148,9 @@ static void exec(VM *vm, const Block *b)
 			else tg_mean(o, a, k);
 			break;
 		}
+		case CLS_OUTER:
+			tg_outer(o, a, c, shape_numel(&m->val[in->a[0]].sh), shape_numel(&m->val[in->a[1]].sh));
+			break;
 		case CLS_TRANS: {
 			const Shape *s = &m->val[in->a[0]].sh;
 			tg_transpose(o, a, s->dim[0], s->dim[1]);
@@ -180,6 +184,34 @@ static void exec(VM *vm, const Block *b)
 	}
 }
 
+/* Apply `update`s after the run: copy every source into the staging area,
+ * then into its state. Two phases, so a source that reads another state sees
+ * the start-of-run value whatever the update order. */
+static void commit(VM *vm, int trace)
+{
+	const Module *m = vm->m;
+	int off = m->stage;
+	for (int i = 0; i < m->nupd; i++) {
+		int n = shape_numel(&m->val[m->upd_state[i]].sh);
+		tg_copy(vm->arena + off, ptr(vm, m->upd_src[i]), n);
+		off += (n + TG_ALIGN - 1) / TG_ALIGN * TG_ALIGN;
+	}
+	off = m->stage;
+	for (int i = 0; i < m->nupd; i++) {
+		const Value *s = &m->val[m->upd_state[i]];
+		int n = shape_numel(&s->sh);
+		if (trace) {
+			float d = tg_delta(vm->arena + off, s->data, n);
+			tr_begin(1, "update");
+			tr_str("state", s->name);
+			tr_num("max_change", d);
+			tr_end("state %s updated, max |change| %.4g", s->name, (double)d);
+		}
+		tg_copy(s->data, vm->arena + off, n);
+		off += (n + TG_ALIGN - 1) / TG_ALIGN * TG_ALIGN;
+	}
+}
+
 /* Thread-safe entry: no allocation, no tracing, no shared state. `arena` must
  * hold m->arena floats and be private to the caller; `delta` may be NULL. */
 void vm_run_into(const Module *m, const float **in, float *out, int *steps, float *arena, float *delta)
@@ -187,6 +219,7 @@ void vm_run_into(const Module *m, const float **in, float *out, int *steps, floa
 	VM vm = { m, arena, in, steps, 0, delta };
 	exec(&vm, &m->top);
 	tg_copy(out, ptr(&vm, m->output), shape_numel(&m->val[m->output].sh));
+	commit(&vm, 0);
 }
 
 void vm_run(const Module *m, const float **in, float *out, int *steps)
@@ -199,5 +232,6 @@ void vm_run(const Module *m, const float **in, float *out, int *steps)
 	vm.arena = xmalloc((size_t)(m->arena ? m->arena : 1) * sizeof(float));
 	exec(&vm, &m->top);
 	tg_copy(out, ptr(&vm, m->output), shape_numel(&m->val[m->output].sh));
+	commit(&vm, m->trace && tr_on(1));
 	xfree(vm.arena);
 }

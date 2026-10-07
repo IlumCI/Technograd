@@ -26,7 +26,8 @@ typedef struct {
 	Sx **defs;
 	int ndefs;
 	Env globals;
-	int depth;
+	int depth;    /* def-inlining depth; 0 = the body of forward */
+	int in_think; /* nesting of think bodies being lowered */
 	int ntmp;
 } L;
 
@@ -172,9 +173,31 @@ static int lower_block(L *l, Block *b, Env *e, Sx *stmts, int is_fn)
 		if (strcmp(h, "set") == 0) {
 			int v = lower_expr(l, b, e, s->v[2]);
 			const char *n = s->v[1]->s;
-			if (env_get(&l->globals, n) >= 0)
-				die(l->file, s->line, "cannot assign to parameter '%s'", n);
+			int g = env_get(&l->globals, n);
+			if (g >= 0 && l->m->val[g].kind == V_STATE)
+				die(l->file, s->line, "cannot assign to state '%s'; use 'update %s = ...'", n, n);
+			if (g >= 0) die(l->file, s->line, "cannot assign to parameter '%s'", n);
 			env_set(e, n, v);
+			continue;
+		}
+		if (strcmp(h, "update") == 0) {
+			const char *n = s->v[1]->s;
+			if (l->depth > 0) die(l->file, s->line, "'update' is only allowed in the body of 'forward', not in a def");
+			if (l->in_think) die(l->file, s->line, "'update' inside think block (a state changes once per run)");
+			int sv = env_get(&l->globals, n);
+			if (sv >= 0 && l->m->val[sv].kind == V_PARAM)
+				die(l->file, s->line, "'%s' is a read-only param; declare it with 'state' to update it", n);
+			if (sv < 0 || l->m->val[sv].kind != V_STATE) die(l->file, s->line, "'%s' is not a state", n);
+			for (int k = 0; k < l->m->nupd; k++)
+				if (l->m->upd_state[k] == sv) die(l->file, s->line, "state '%s' updated twice in one run", n);
+			int v = lower_expr(l, b, e, s->v[2]);
+			if (!shape_eq(&l->m->val[v].sh, &l->m->val[sv].sh)) {
+				char s0[64], s1[64];
+				shape_str(&l->m->val[sv].sh, s0, sizeof s0);
+				shape_str(&l->m->val[v].sh, s1, sizeof s1);
+				die(l->file, s->line, "update of state '%s' %s with a value of shape %s", n, s0, s1);
+			}
+			mod_update(l->m, sv, v);
 			continue;
 		}
 		if (strcmp(h, "think") == 0) {
@@ -199,7 +222,9 @@ static int lower_block(L *l, Block *b, Env *e, Sx *stmts, int is_fn)
 			Env inner = env_copy(e);
 			env_set(&inner, st->s, state);
 			int outer_n = e->n;
+			l->in_think++;
 			lower_block(l, body, &inner, s->v[4], 0);
+			l->in_think--;
 			/* Only the state may be carried: reject assignments to other outer names. */
 			for (int j = 0; j < outer_n; j++) {
 				const char *n = e->b[j].name;
@@ -298,7 +323,7 @@ static void load_into(Sx *out, const char *path, Seen *seen, int depth, int root
 			xfree(full);
 		} else if (root) {
 			sx_push(out, d);
-		} else if (strcmp(h, "param") == 0 || (strcmp(h, "def") == 0 && strcmp(d->v[1]->s, "forward") != 0)) {
+		} else if (strcmp(h, "param") == 0 || strcmp(h, "state") == 0 || (strcmp(h, "def") == 0 && strcmp(d->v[1]->s, "forward") != 0)) {
 			sx_push(out, d); /* library: skip the imported file's model and its forward */
 		}
 	}
@@ -387,11 +412,11 @@ Module *lower(Sx *ast, const char *file)
 
 	for (int i = 0; i < ast->len; i++) {
 		Sx *d = ast->v[i];
-		if (sx_issym(d->v[0], "param")) {
+		if (sx_issym(d->v[0], "param") || sx_issym(d->v[0], "state")) {
 			const char *pn = d->v[1]->s;
-			if (env_get(&l.globals, pn) >= 0) die(file, d->line, "duplicate param '%s'", pn);
+			if (env_get(&l.globals, pn) >= 0) die(file, d->line, "duplicate param or state '%s'", pn);
 			Shape sh = to_shape(d->v[2]);
-			int v = mod_value(l.m, V_PARAM, &sh, pn);
+			int v = mod_value(l.m, sx_issym(d->v[0], "state") ? V_STATE : V_PARAM, &sh, pn);
 			l.m->val[v].data = materialize(&l, d->v[3], &sh, pn);
 			env_set(&l.globals, pn, v);
 		} else if (sx_issym(d->v[0], "def")) {

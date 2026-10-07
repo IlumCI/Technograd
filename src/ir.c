@@ -64,9 +64,9 @@ void ir_write(const Module *m, FILE *f)
 	fprintf(f, "(tgir 1\n  (model %s)\n", m->name);
 	for (int v = 0; v < m->nval; v++) {
 		const Value *x = &m->val[v];
-		if (x->kind != V_PARAM) continue;
+		if (x->kind != V_PARAM && x->kind != V_STATE) continue;
 		shape_str(&x->sh, sh, sizeof sh);
-		fprintf(f, "  (param %s %s\n    (data", x->name, sh);
+		fprintf(f, "  (%s %s %s\n    (data", x->kind == V_STATE ? "state" : "param", x->name, sh);
 		int k = shape_numel(&x->sh);
 		for (int i = 0; i < k; i++) {
 			if (i && i % 8 == 0) fputs("\n         ", f);
@@ -82,7 +82,13 @@ void ir_write(const Module *m, FILE *f)
 	fputs("  (block\n", f);
 	write_block(m, &m->top, f, 2);
 	value_name(m, m->output, n, sizeof n);
-	fprintf(f, "  )\n  (output %s))\n", n);
+	fprintf(f, "  )\n  (output %s)", n);
+	for (int i = 0; i < m->nupd; i++) {
+		char s[64];
+		value_name(m, m->upd_src[i], s, sizeof s);
+		fprintf(f, "\n  (update %s %s)", m->val[m->upd_state[i]].name, s);
+	}
+	fputs(")\n", f);
 }
 
 /* ---- reader / verifier -------------------------------------------------- */
@@ -232,13 +238,13 @@ Module *ir_read(Sx *forms, const char *file)
 			continue;
 		}
 		if (!r.m) die(file, f->line, "(model ...) must come first");
-		if (strcmp(h, "param") == 0) {
-			need(&r, f, !seen_block && f->len == 4 && f->v[3]->k == SX_LIST && f->v[3]->len >= 1 && sx_issym(f->v[3]->v[0], "data"), "param");
+		if (strcmp(h, "param") == 0 || strcmp(h, "state") == 0) {
+			need(&r, f, !seen_block && f->len == 4 && f->v[3]->k == SX_LIST && f->v[3]->len >= 1 && sx_issym(f->v[3]->v[0], "data"), h);
 			Shape sh = r_shape(&r, f->v[2]);
 			int n = shape_numel(&sh);
 			Sx *d = f->v[3];
 			if (d->len - 1 != n) die(file, d->line, "param '%s' needs %d values, has %d", f->v[1]->s, n, d->len - 1);
-			int v = mod_value(r.m, V_PARAM, &sh, f->v[1]->s);
+			int v = mod_value(r.m, strcmp(h, "state") == 0 ? V_STATE : V_PARAM, &sh, f->v[1]->s);
 			r.m->val[v].data = xmalloc((size_t)n * sizeof(float));
 			for (int j = 0; j < n; j++) {
 				need(&r, d, d->v[j + 1]->k == SX_NUM, "data");
@@ -253,6 +259,14 @@ Module *ir_read(Sx *forms, const char *file)
 			need(&r, f, !seen_block, "block (duplicate)");
 			seen_block = 1;
 			r_block(&r, &r.m->top, f, 1, f->len);
+		} else if (strcmp(h, "update") == 0) {
+			need(&r, f, seen_block && f->len == 3, "update");
+			int sv = r_get(&r, f->v[1]), src = r_get(&r, f->v[2]);
+			if (r.m->val[sv].kind != V_STATE) die(file, f->line, "'%s' is not a state", f->v[1]->s);
+			for (int k = 0; k < r.m->nupd; k++)
+				if (r.m->upd_state[k] == sv) die(file, f->line, "state '%s' updated twice", f->v[1]->s);
+			if (!shape_eq(&r.m->val[sv].sh, &r.m->val[src].sh)) die(file, f->line, "update value shape differs from state '%s'", f->v[1]->s);
+			mod_update(r.m, sv, src);
 		} else if (strcmp(h, "output") == 0) {
 			need(&r, f, seen_block && !seen_out && f->len == 2, "output");
 			seen_out = 1;

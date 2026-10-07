@@ -1,0 +1,6 @@
+# expect: update of state 'm' (f32 2) with a value of shape (f32 3)
+model e
+state m : f32[2] = zeros
+def forward(x: f32[3]) -> f32[3]:
+    update m = x
+    return x

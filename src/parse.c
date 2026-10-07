@@ -161,7 +161,7 @@ static Tok *expect(P *p, TokKind k, const char *what)
 	return t;
 }
 
-static const char *kw[] = { "model", "param", "def", "return", "think", "for", "until", "f32", "import", NULL };
+static const char *kw[] = { "model", "param", "def", "return", "think", "for", "until", "f32", "import", "state", "update", NULL };
 
 static Tok *expect_name(P *p)
 {
@@ -339,6 +339,14 @@ static Sx *stmt(P *p)
 		expect(p, T_NL, "end of line");
 		return sx_list(line, 2, sx_sym("return", line), e);
 	}
+	if (iskw(t, "update")) {
+		next(p);
+		Tok *n = expect_name(p);
+		expect_op(p, "=");
+		Sx *e = expr(p);
+		expect(p, T_NL, "end of line");
+		return sx_list(line, 3, sx_sym("update", line), sx_sym(n->s, line), e);
+	}
 	if (iskw(t, "think")) {
 		next(p);
 		Tok *n = expect_name(p);
@@ -386,14 +394,14 @@ static Sx *decl(P *p)
 		expect(p, T_NL, "end of line");
 		return sx_list(line, 2, sx_sym("model", line), sx_sym(n->s, line));
 	}
-	if (iskw(t, "param")) {
+	if (iskw(t, "param") || iskw(t, "state")) {
 		Tok *n = expect_name(p);
 		expect_op(p, ":");
 		Sx *ty = type(p);
 		expect_op(p, "=");
 		Sx *in = init(p);
 		expect(p, T_NL, "end of line");
-		return sx_list(line, 4, sx_sym("param", line), sx_sym(n->s, line), ty, in);
+		return sx_list(line, 4, sx_sym(t->s, line), sx_sym(n->s, line), ty, in);
 	}
 	if (iskw(t, "def")) {
 		Tok *n = expect_name(p);
@@ -415,7 +423,7 @@ static Sx *decl(P *p)
 		Sx *b = block(p);
 		return sx_list(line, 5, sx_sym("def", line), sx_sym(n->s, line), args, rt, b);
 	}
-	die(p->file, line, "expected 'import', 'model', 'param' or 'def', got '%s'", tokdesc(t));
+	die(p->file, line, "expected 'import', 'model', 'param', 'state' or 'def', got '%s'", tokdesc(t));
 	return NULL;
 }
 

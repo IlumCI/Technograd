@@ -1,0 +1,6 @@
+# expect: cannot assign to state 'm'; use 'update m = ...'
+model e
+state m : f32[2] = zeros
+def forward(x: f32[2]) -> f32[2]:
+    m = x
+    return m

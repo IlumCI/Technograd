@@ -146,9 +146,11 @@ static void trace_batch(const Module *m, const Acc *a, double ms)
 	tr_begin(1, "batch");
 	tr_num("rows", a->rows);
 	tr_num("threads", par_threads());
+	tr_num("sequential_rows", m->nupd > 0);
 	tr_num("ms", ms);
 	tr_num("us_per_row", a->rows ? 1e3 * ms / a->rows : 0);
-	tr_end("%d row(s) in %.2f ms (%.1f us/row) on %d thread(s)", a->rows, ms, a->rows ? 1e3 * ms / a->rows : 0.0, par_threads());
+	tr_end("%d row(s) in %.2f ms (%.1f us/row) on %d thread(s)%s", a->rows, ms, a->rows ? 1e3 * ms / a->rows : 0.0, par_threads(),
+	       m->nupd ? ", rows in order (model updates its state)" : "");
 	for (int t = 0; t < m->nthink && a->rows; t++) {
 		tr_begin(1, "think");
 		tr_num("loop", t);
@@ -360,7 +362,8 @@ int main(int argc, char **argv)
 			int cnt = rows - b0 < block ? rows - b0 : block;
 			j.base = b0;
 			int grain = cnt / (16 * threads);
-			par_for(cnt, grain > 0 ? grain : 1, batch_rows, &j);
+			if (m->nupd) batch_rows(&j, 0, cnt, 0); /* each row sees the state left by the previous one */
+			else par_for(cnt, grain > 0 ? grain : 1, batch_rows, &j);
 			for (int r = 0; r < cnt; r++) {
 				acc_add(&acc, j.steps + (size_t)r * (size_t)nt, m->nthink);
 				io_write_row(f, obin, j.out + (size_t)r * (size_t)n, n, j.steps + (size_t)r * (size_t)nt, obin ? 0 : m->nthink);

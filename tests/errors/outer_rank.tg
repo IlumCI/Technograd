@@ -1,0 +1,5 @@
+# expect: 'outer' needs two vectors, got (f32 2 2) and (f32 2)
+model e
+param w : f32[2, 2] = ones
+def forward(x: f32[2]) -> f32[2]:
+    return outer(w, x) @ x

@@ -95,6 +95,7 @@ void plan(Module *m)
 	Ins **loops = xmalloc((size_t)(depth(&m->top) + 1) * sizeof *loops);
 	live(m, &m->top, loops, 0);
 	use(m, m->output, end, loops, 0);
+	for (int i = 0; i < m->nupd; i++) use(m, m->upd_src[i], end, loops, 0); /* read by the commit */
 	xfree(loops);
 
 	int *order = xmalloc((size_t)m->nval * sizeof *order), n = 0;
@@ -125,6 +126,10 @@ void plan(Module *m)
 		if (off + sz > m->arena) m->arena = off + sz;
 		placed[np++] = order[i];
 	}
+	/* Commit staging: every update source is copied here first, then into its
+	 * state, so an update reading another state sees the start-of-run value. */
+	m->stage = m->arena;
+	for (int i = 0; i < m->nupd; i++) m->arena += asize(&m->val[m->upd_state[i]]);
 	xfree(order);
 	xfree(placed);
 	xfree(ov);
@@ -133,12 +138,13 @@ void plan(Module *m)
 
 void plan_dump(const Module *m, FILE *f)
 {
-	int naive = 0, params = 0;
+	int naive = 0, params = 0, states = 0;
 	char n[64], sh[64];
 	fprintf(f, "; memory plan for model %s\n; value        shape            live         offset  floats\n", m->name);
 	for (int v = 0; v < m->nval; v++) {
 		const Value *x = &m->val[v];
 		if (x->kind == V_PARAM) params += shape_numel(&x->sh);
+		if (x->kind == V_STATE) states += shape_numel(&x->sh);
 		if (x->kind != V_TMP || x->def < 0) continue;
 		naive += asize(x);
 		value_name(m, v, n, sizeof n);
@@ -147,4 +153,5 @@ void plan_dump(const Module *m, FILE *f)
 	}
 	fprintf(f, "; arena: %d floats (%d bytes); unshared: %d floats; params: %d floats (%d bytes)\n",
 		m->arena, m->arena * 4, naive, params, params * 4);
+	if (states) fprintf(f, "; state: %d floats (%d bytes, mutable, updated after each run; commit staging at arena offset %d)\n", states, states * 4, m->stage);
 }

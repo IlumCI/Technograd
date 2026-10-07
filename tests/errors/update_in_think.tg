@@ -1,0 +1,9 @@
+# expect: 'update' inside think block
+model e
+state m : f32[2] = zeros
+def forward(x: f32[2]) -> f32[2]:
+    h = x
+    think h for 2:
+        update m = h
+        h = h * 0.5
+    return h

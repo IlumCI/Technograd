@@ -1,0 +1,14 @@
+# A sensor channel that recalibrates itself in the field.
+#
+# `offset` tracks an exponential moving average of the raw reading and is
+# subtracted from it, so slow drift (temperature, ageing) is removed while fast
+# changes pass through. The estimate lives in RAM and keeps adapting after
+# deployment; firmware can save tg_drift_calibration_state_offset to flash.
+model drift_calibration
+
+state offset : f32[3] = zeros
+param rate : f32 = 0.1
+
+def forward(raw: f32[3]) -> f32[3]:
+    update offset = offset + rate * (raw - offset)
+    return raw - offset

@@ -70,11 +70,12 @@ typedef enum {
 	OP_SOFTMAX, OP_RMSNORM,
 	OP_SUM, OP_MEAN,
 	OP_TRANSPOSE,
+	OP_OUTER,
 	OP_THINK,
 	OP_COUNT
 } Op;
 
-typedef enum { CLS_CONST, CLS_BIN, CLS_UN, CLS_MATMUL, CLS_ROW, CLS_RED, CLS_TRANS, CLS_THINK } OpClass;
+typedef enum { CLS_CONST, CLS_BIN, CLS_UN, CLS_MATMUL, CLS_ROW, CLS_RED, CLS_TRANS, CLS_OUTER, CLS_THINK } OpClass;
 
 typedef struct {
 	const char *name;
@@ -91,7 +92,8 @@ void matmul_dims(const Shape *a, const Shape *b, int *m, int *k, int *n);
 void row_dims(const Shape *s, int *rows, int *cols);
 
 /* ---- IR ----------------------------------------------------------------- */
-typedef enum { V_PARAM, V_INPUT, V_TMP } VKind;
+/* V_STATE: like a param, but mutable; changed only by `update`, committed after a run. */
+typedef enum { V_PARAM, V_INPUT, V_TMP, V_STATE } VKind;
 
 typedef struct {
 	VKind kind;
@@ -133,6 +135,9 @@ typedef struct {
 	int output;
 	Block top;
 	int nthink;
+	int *upd_state, *upd_src; /* update i: upd_state[i] <- upd_src[i] after the run */
+	int nupd;
+	int stage;       /* arena offset of the commit staging area (floats) */
 	int arena; /* floats */
 	int planned;
 	int trace; /* VM tracing enabled (the user's model only) */
@@ -141,6 +146,7 @@ typedef struct {
 Module *mod_new(const char *name);
 int mod_value(Module *m, VKind k, const Shape *sh, const char *name);
 Ins *block_push(Block *b);
+void mod_update(Module *m, int state, int src); /* record `update state = src` */
 void value_name(const Module *m, int v, char *buf, size_t n);
 
 /* frontends */
