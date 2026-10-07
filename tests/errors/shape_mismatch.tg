@@ -1,0 +1,4 @@
+# expect: shape mismatch (f32 3) vs (f32 2)
+model e
+def forward(x: f32[3], y: f32[2]) -> f32[3]:
+    return x + y

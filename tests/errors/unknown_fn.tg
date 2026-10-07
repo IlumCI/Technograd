@@ -1,0 +1,4 @@
+# expect: unknown function 'conv'
+model e
+def forward(x: f32[2]) -> f32[2]:
+    return conv(x)

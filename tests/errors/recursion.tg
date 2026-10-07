@@ -1,0 +1,6 @@
+# expect: inlining depth exceeded
+model e
+def f(a: f32[2]) -> f32[2]:
+    return f(a)
+def forward(x: f32[2]) -> f32[2]:
+    return f(x)

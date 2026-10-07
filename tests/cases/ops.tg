@@ -1,0 +1,25 @@
+# Exercises every builtin. Each output lane isolates a group of ops; lanes are
+# assembled with one-hot params (scalar * vector broadcast).
+model ops
+
+param m  : f32[2, 4] = [[1, 0, -1, 2], [0.5, 0.5, 0.5, 0.5]]
+param q  : f32[4, 2] = [[1, 2], [3, 4], [5, 6], [7, 8]]
+param s2 : f32[2, 3] = [[1, 2, 3], [0, 0, 0]]
+param e0 : f32[4] = [1, 0, 0, 0]
+param e1 : f32[4] = [0, 1, 0, 0]
+param e2 : f32[4] = [0, 0, 1, 0]
+param e3 : f32[4] = [0, 0, 0, 1]
+
+def forward(x: f32[4]) -> f32[4]:
+    # lane 0: binary elementwise, scalar broadcast on both sides, unary minus
+    a = (x + 1) * 2 - x / 4
+    b = max(a, 0.5) + min(0.5, a) - 2 * a
+    l0 = sum(b) + sum(-x)
+    # lane 1: unary activations
+    l1 = sum(tanh(x) + relu(x) + sigmoid(x) + exp(x * 0.1) + sqrt(x * x + 1) + gelu(x) + silu(x))
+    # lane 2: every matmul form and transpose
+    mv = m @ x
+    l2 = dot(x, x) + sum(x @ q) + sum(m @ q) + sum(transpose(m) @ mv)
+    # lane 3: row-wise ops and mean
+    l3 = mean(rmsnorm(x)) + sum(transpose(softmax(s2)) @ mv)
+    return l0 * e0 + l1 * e1 + l2 * e2 + l3 * e3

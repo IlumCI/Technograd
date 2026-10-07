@@ -1,0 +1,4 @@
+# expect: missing entry point 'def forward(...)'
+model e
+def f(x: f32[2]) -> f32[2]:
+    return x

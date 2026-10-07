@@ -1,0 +1,5 @@
+# expect: inconsistent dedent
+model e
+def forward(x: f32[2]) -> f32[2]:
+        h = x
+    return h

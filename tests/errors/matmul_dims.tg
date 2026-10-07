@@ -1,0 +1,5 @@
+# expect: 'matmul' incompatible operands (f32 2 3) @ (f32 2)
+model e
+param w : f32[2, 3] = zeros
+def forward(x: f32[2]) -> f32[2]:
+    return w @ x

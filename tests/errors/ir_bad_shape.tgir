@@ -1,0 +1,7 @@
+; expect: declared (f32 3) but operation yields (f32 2)
+(tgir 1
+  (model e)
+  (input x (f32 2))
+  (block
+    (%1 (f32 3) (tanh x)))
+  (output %1))

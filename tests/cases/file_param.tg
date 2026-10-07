@@ -1,0 +1,7 @@
+# Weights loaded from a raw little-endian f32 file.
+model file_param
+
+param w : f32[2, 2] = file("w.bin")
+
+def forward(x: f32[2]) -> f32[2]:
+    return w @ x

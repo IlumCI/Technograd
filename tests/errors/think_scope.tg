@@ -1,0 +1,8 @@
+# expect: undefined name 't'
+model e
+def forward(x: f32[2]) -> f32[2]:
+    h = x
+    think h for 4:
+        t = h * 0.5
+        h = t
+    return t

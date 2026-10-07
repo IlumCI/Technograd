@@ -1,0 +1,4 @@
+# expect: undefined name 'z'
+model e
+def forward(x: f32[2]) -> f32[2]:
+    return x + z

@@ -1,0 +1,6 @@
+# expect: cannot assign to parameter 'w'
+model e
+param w : f32[2] = ones
+def forward(x: f32[2]) -> f32[2]:
+    w = x
+    return w

@@ -1,0 +1,18 @@
+# Nested think loops: a fixed-budget outer loop (no halting) around an
+# adaptive inner loop, plus an outer value read inside both bodies.
+model nested
+
+param w : f32[2, 2] = [[0.5, -0.25], [0.25, 0.5]]
+
+def inner(z: f32[2], c: f32[2]) -> f32[2]:
+    g = z
+    think g for 50 until 0.00001:
+        g = tanh(w @ g + c)
+    return g
+
+def forward(x: f32[2]) -> f32[2]:
+    c = x * 0.5
+    h = x
+    think h for 3:
+        h = inner(h, c) + 0.1 * h
+    return h

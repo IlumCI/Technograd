@@ -1,0 +1,10 @@
+; expect: undefined value '%2'
+(tgir 1
+  (model e)
+  (input x (f32 2))
+  (block
+    (%1 (f32 2) (think x 3 none
+      (%2 (f32 2) (tanh %1))
+      (yield %2)))
+    (%3 (f32 2) (add %2 %1)))
+  (output %3))

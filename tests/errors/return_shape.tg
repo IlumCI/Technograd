@@ -1,0 +1,6 @@
+# expect: 'f' declared to return (f32 2), returns (f32)
+model e
+def f(x: f32[2]) -> f32[2]:
+    return sum(x)
+def forward(x: f32[2]) -> f32[2]:
+    return f(x)

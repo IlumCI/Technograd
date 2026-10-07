@@ -1,0 +1,6 @@
+# expect: think state 'h' must be assigned before the loop
+model e
+def forward(x: f32[2]) -> f32[2]:
+    think h for 4:
+        h = x
+    return x

@@ -1,0 +1,5 @@
+# expect: param 'w' needs 4 values, literal has 3
+model e
+param w : f32[2, 2] = [1, 2, 3]
+def forward(x: f32[2]) -> f32[2]:
+    return w @ x

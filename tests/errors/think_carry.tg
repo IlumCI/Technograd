@@ -1,0 +1,9 @@
+# expect: think block assigns outer variable 'c'
+model e
+def forward(x: f32[2]) -> f32[2]:
+    c = x
+    h = x
+    think h for 4:
+        c = c + h
+        h = h * 0.5
+    return h

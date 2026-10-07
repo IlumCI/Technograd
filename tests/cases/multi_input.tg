@@ -1,0 +1,5 @@
+# Several inputs, including a rank-0 scalar.
+model multi_input
+
+def forward(v: f32[3], k: f32) -> f32[3]:
+    return softmax(v * k)
