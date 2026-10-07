@@ -57,6 +57,12 @@ TG_FN void tg_gelu(float *o, const float *a, int n)
 TG_FN void tg_silu(float *o, const float *a, int n)
 { for (int i = 0; i < n; i++) o[i] = a[i] / (1.0f + expf(-a[i])); }
 
+/* Overflow-free softplus: log(1 + e^x) = max(x, 0) + log1p(e^-|x|). */
+TG_FN void tg_softplus(float *o, const float *a, int n)
+{ for (int i = 0; i < n; i++) o[i] = (a[i] > 0.0f ? a[i] : 0.0f) + log1pf(expf(-fabsf(a[i]))); }
+TG_FN void tg_log(float *o, const float *a, int n)
+{ for (int i = 0; i < n; i++) o[i] = logf(a[i]); }
+
 /* o[m,n] = a[m,k] @ b[k,n]. o must not alias a or b. */
 TG_FN void tg_matmul(float *o, const float *a, const float *b, int m, int k, int n)
 {

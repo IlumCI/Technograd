@@ -95,7 +95,7 @@ void plan(Module *m)
 	Ins **loops = xmalloc((size_t)(depth(&m->top) + 1) * sizeof *loops);
 	live(m, &m->top, loops, 0);
 	use(m, m->output, end, loops, 0);
-	free(loops);
+	xfree(loops);
 
 	int *order = xmalloc((size_t)m->nval * sizeof *order), n = 0;
 	for (int v = 0; v < m->nval; v++)
@@ -125,9 +125,9 @@ void plan(Module *m)
 		if (off + sz > m->arena) m->arena = off + sz;
 		placed[np++] = order[i];
 	}
-	free(order);
-	free(placed);
-	free(ov);
+	xfree(order);
+	xfree(placed);
+	xfree(ov);
 	m->planned = 1;
 }
 

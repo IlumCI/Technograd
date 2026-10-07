@@ -1,0 +1,11 @@
+# Exact XOR with hand-set weights. Smallest complete Technograd program.
+model xor
+
+param w1 : f32[2, 2] = [[1, 1],
+                        [1, 1]]
+param b1 : f32[2]    = [0, -1]
+param w2 : f32[1, 2] = [[1, -2]]
+
+def forward(x: f32[2]) -> f32[1]:
+    h = rlu(w1 @ x + b1)
+    return w2 @ h

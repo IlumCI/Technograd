@@ -1,0 +1,12 @@
+# Attention pooling over 6 slots with a learned query.
+model attention_pool
+
+param wk : f32[4, 4] = rand(41, 0.5)
+param wv : f32[4, 4] = rand(43, 0.5)
+param query : f32[4] = rand(47, 1)
+
+def forward(slots: f32[6, 4]) -> f32[4]:
+    keys = slots @ wk
+    vals = slots @ wv
+    att = softmax(keys @ query / 2)
+    return att @ vals

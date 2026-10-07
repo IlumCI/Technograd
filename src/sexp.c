@@ -118,7 +118,7 @@ static Sx *read_form(Reader *r)
 	char *end;
 	double d = strtod(buf, &end);
 	if (*end == 0 && (isdigit((unsigned char)buf[0]) || ((buf[0] == '-' || buf[0] == '+' || buf[0] == '.') && n > 1))) {
-		free(buf);
+		xfree(buf);
 		return sx_num(d, line);
 	}
 	Sx *x = sx_new(SX_SYM, line);

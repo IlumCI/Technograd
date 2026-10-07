@@ -1,0 +1,35 @@
+# Coconut-style latent reasoner (arXiv:2412.06769) with recurrent-depth
+# adaptive halting (arXiv:2502.05171, arXiv:2603.15051).
+#
+#   encode     input -> latent "thought" h0
+#   think      h_{t+1} = core(h_t, e): the last hidden state is fed back as
+#              the next input embedding, never decoded to a token; the input
+#              embedding e is re-injected every step (recurrent-depth prelude)
+#   halt       stop when max|h_{t+1} - h_t| <= 1e-4 or after 32 steps
+#   decode     softmax readout of the final latent
+#
+# Weights are random here; replace each initializer with file("...") to load
+# trained raw little-endian f32 tensors.
+model latent_reasoner
+
+param w_emb  : f32[16, 8]  = rand(11, 0.35)
+param b_emb  : f32[16]     = zeros
+param w_core : f32[16, 16] = rand(23, 0.12)
+param w_inj  : f32[16, 16] = rand(37, 0.10)
+param b_core : f32[16]     = fill(0.01)
+param w_out  : f32[4, 16]  = rand(41, 0.5)
+param b_out  : f32[4]      = zeros
+
+def embed(x: f32[8]) -> f32[16]:
+    return rmsnorm(w_emb @ x + b_emb)
+
+def core(h: f32[16], e: f32[16]) -> f32[16]:
+    u = w_core @ h + w_inj @ e + b_core
+    return tanh(u)
+
+def forward(x: f32[8]) -> f32[4]:
+    e = embed(x)
+    h = e
+    think h for 32 until 0.0001:
+        h = core(h, e)
+    return softmax(w_out @ h + b_out)

@@ -1,0 +1,4 @@
+# expect: 'tanh' takes 1 operand(s), got 3
+model e
+def forward(x: f32[2]) -> f32[2]:
+    return tanh(x, x, x)

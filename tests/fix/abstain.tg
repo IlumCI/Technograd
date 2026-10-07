@@ -1,0 +1,4 @@
+# Unrepairable: a genuine shape error. The fixer must abstain.
+model e
+def forward(x: f32[3], y: f32[2]) -> f32[3]:
+    return x + y

@@ -1,0 +1,15 @@
+# Two-layer classifier.
+model mlp
+
+param w1 : f32[12, 6] = rand(3, 0.4)
+param b1 : f32[12] = zeros
+param w2 : f32[3, 12] = rand(5, 0.3)
+param b2 : f32[3] = fill(0.1)
+
+def layer(x: f32[6]) -> f32[12]:
+    return gelu(w1 @ x + b1)
+
+def forward(x: f32[6]) -> f32[3]:
+    h = layer(x)
+    logits = w2 @ h + b2
+    return softmax(logits)

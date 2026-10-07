@@ -29,7 +29,8 @@ file is the black box you ship to the target.
 
 ```sh
 make            # builds build/tgc (C11, no dependencies beyond libm; perl at build time)
-make test       # 56 checks: known answers, IR round trip, VM == compiled C, diagnostics
+make test       # 66 checks: known answers, IR round trip, VM == compiled C, diagnostics, auto-fix
+make fixer      # retrain the auto-fix forest (deterministic, ~15 s) and evaluate it on held-out programs
 
 build/tgc run  examples/latent_reasoner.tg 1,0,0,1,0,1,1,0
 # 0.225605994 0.24476327 0.162138939 0.367491812
@@ -96,6 +97,83 @@ The full `examples/latent_reasoner.tg` (which also has biases) in TGIR, param da
 
 The full reference is in [docs/SPEC.md](docs/SPEC.md).
 
+## Auto-fix: a neural decision forest that repairs compile errors
+
+When compilation fails, `tgc fix` (or `--autofix` on any command) runs a
+repair loop instead of stopping at the first error:
+
+```
+$ build/tgc fix tests/fix/def_typo.tg -o fixed.tg
+tests/fix/def_typo.tg:32: error: undefined name 'e'
+  autofix: rename at line 31 (confidence 1.00)
+  -     ee = embed(x)
+  +     e = embed(x)
+autofix: 1 repair(s)
+
+$ build/tgc run tests/fix/colon.tg 2,9,16 --autofix   # repairs in memory, source untouched
+```
+
+Each round of the loop does the following:
+
+1. The diagnostic is classified, and repair operators chosen for that class
+   propose candidate edits: rename (to similar names, or back to a name that
+   is defined but never used), re-indent, swap or transpose matmul operands,
+   insert or delete a token, close a bracket at every token boundary,
+   make-return, delete a line, fix a character.
+2. Every candidate is trial-compiled. The compiler's errors are trapped
+   (`setjmp`/`longjmp`) and their allocations are released through a scoped
+   allocator.
+3. Each candidate, together with its diagnostic and trial outcome, becomes 35
+   features. These include whether it compiles, whether the error moved, edit
+   locality and size, name similarity (optimal string alignment) and usage,
+   natural indentation, the number of candidates that compile (ambiguity), and
+   the similarity margin over the other compiling candidates.
+4. A forest of 16 soft decision trees of depth 3 scores each candidate. These
+   are deep neural decision forests (Kontschieder et al., ICCV 2015) with
+   sigmoid routing, trained end to end; each tree gets a bootstrap sample and
+   a random feature subspace. The output is Platt-calibrated on out-of-bag
+   predictions.
+5. The best candidate is applied only if its calibrated probability is at
+   least 0.95 and it makes progress. Otherwise the fixer abstains and the
+   original error is reported.
+
+The forest is a Technograd program: [`fixer/forest.tg`](fixer/forest.tg). The
+compiler compiles it and runs it on its own VM. `tgc c fixer/forest.tg` turns
+it into standalone C like any other model.
+
+Training is self-supervised, as in DrRepair and Break-It-Fix-It. Breakers
+corrupt valid programs with identifier typos, function-name typos,
+indentation changes, dropped `:` and `)`, swapped matmul operands, removed
+`return`, stray characters, and tabs. A candidate is labelled correct iff it
+compiles to IR identical to the original program's, up to param and input
+names. No labelled data is used. Training is deterministic: rerunning
+`make fixer` reproduces `forest.tg` byte for byte, and the trainer checks
+that the VM output matches its own to within 3e-7.
+
+The acceptance threshold was chosen as the lowest one with zero wrong
+repairs on fresh corruptions of the training programs. Results on programs
+the forest never saw (`tests/cases`, 640 corruptions, `make fixer`):
+
+| breaker | exact repair | wrong repair | abstained |
+|---------|-------------:|-------------:|----------:|
+| identifier typo | 81.8% | 0.0% | 18.2% |
+| function-name typo | 100.0% | 0.0% | 0.0% |
+| indentation | 87.8% | 0.0% | 12.2% |
+| missing `:` | 100.0% | 0.0% | 0.0% |
+| missing `)` | 53.5% | 0.0% | 46.5% |
+| swapped matmul operands | 100.0% | 0.0% | 0.0% |
+| missing `return` | 100.0% | 0.0% | 0.0% |
+| stray character | 98.6% | 0.0% | 1.4% |
+| tab indentation | 96.2% | 0.0% | 3.8% |
+| **total** | **89.5%** | **0.0%** | **10.5%** |
+
+Abstentions are mostly genuinely ambiguous cases. For example, with
+`f(a, b + c` the closing parenthesis could go in more than one place and
+still compile. The ambiguity feature makes the fixer decline these rather
+than guess. You can trade safety for coverage with
+`TG_FIXER_THRESHOLD=<p>`. Set `TG_FIXER_DEBUG` to have `fixer-eval` list
+every failure.
+
 ## Why this shape
 
 - **Low level enough for machines.** All shapes are static. Every user
@@ -127,6 +205,8 @@ The full reference is in [docs/SPEC.md](docs/SPEC.md).
 - Convergence-based adaptive halting: AdaAnchor, [arXiv:2603.15051](https://arxiv.org/abs/2603.15051). It reports 48-60% fewer latent steps at equal budget. This is the basis for `until eps`.
 - Survey: *A Survey on Latent Reasoning*, [arXiv:2507.06203](https://arxiv.org/abs/2507.06203).
 - Static arena planning, greedy by size: Pisarchyk & Lee, [arXiv:2001.03288](https://arxiv.org/abs/2001.03288).
+- Neural decision forests: Kontschieder et al., *Deep Neural Decision Forests*, ICCV 2015. This is the ranker architecture used by the auto-fixer.
+- Learning repair from compiler diagnostics with self-supervised corruption: Yasunaga & Liang, *DrRepair*, [arXiv:2005.10636](https://arxiv.org/abs/2005.10636), and *Break-It-Fix-It*, [arXiv:2106.06600](https://arxiv.org/abs/2106.06600). Repair as classification over diagnostics: SynShine, [arXiv:2104.14671](https://arxiv.org/abs/2104.14671).
 - Embedded deployment baselines: TFLite Micro [arXiv:2010.08678](https://arxiv.org/abs/2010.08678), MicroFlow [arXiv:2409.19432](https://arxiv.org/abs/2409.19432).
 
 ## Layout
@@ -134,8 +214,10 @@ The full reference is in [docs/SPEC.md](docs/SPEC.md).
 ```
 src/        compiler: parse.c (surface), lower.c (inline/SSA), ir.c (TGIR read/write/verify),
             ops.c (op table + shape inference), plan.c (memory planner), vm.c, cgen.c, main.c
+            fixer.c (repair operators, features, forest training and fix loop)
+fixer/      forest.tg (trained ranker, a Technograd program), corpus/ (training programs)
 runtime/    tg_rt.h: kernels shared by the VM and the generated code
 examples/   xor.tg, newton.tg, latent_reasoner.tg
-tests/      run.sh, positive cases, diagnostic cases
+tests/      run.sh, positive cases, diagnostic cases, fix/ (auto-fix regressions)
 docs/       SPEC.md
 ```

@@ -11,7 +11,12 @@ static void usage(void)
 	      "  ir    <file>              print canonical TGIR (S-expressions)\n"
 	      "  plan  <file>              print the static memory plan\n"
 	      "  run   <file> <in>...      interpret; each input is comma-separated f32 values\n"
-	      "  c     <file> [-o out.c]   emit a freestanding C unit\n",
+	      "  c     <file> [-o out.c]   emit a freestanding C unit\n"
+	      "  fix   <file> [-o out.tg]  repair compile errors with the neural-forest fixer\n"
+	      "  fixer-train -o forest.tg <corpus.tg>...   train the fixer (self-supervised)\n"
+	      "  fixer-eval <corpus.tg>...                 measure repair rates on corrupted programs\n"
+	      "options:\n"
+	      "  --autofix   on a compile error, repair in memory and continue (source is not modified)\n",
 	      stderr);
 	exit(2);
 }
@@ -31,11 +36,55 @@ static void parse_input(const char *s, float *v, int n, const char *name)
 	if (k != n) die(NULL, 0, "input '%s' needs %d values, got %d", name, n, k);
 }
 
+static int is_ir(const char *src)
+{
+	while (*src == ' ' || *src == '\t' || *src == '\n' || *src == '\r') src++;
+	return *src == '(' || *src == ';';
+}
+
+static Module *load_fixed(const char *path)
+{
+	char *src = read_file(path, NULL);
+	if (is_ir(src)) return load_module(path);
+	int n;
+	char *fixed = autofix(src, path, 1, &n);
+	if (!fixed) return load_module(path); /* reports the original error */
+	if (n) fprintf(stderr, "autofix: applied %d repair(s) in memory; run `tgc fix %s -o <out>` to keep them\n", n, path);
+	return lower(surface_parse(fixed, path), path);
+}
+
 int main(int argc, char **argv)
 {
+	int fix = 0, k = 1;
+	for (int i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "--autofix") == 0) fix = 1;
+		else argv[k++] = argv[i];
+	}
+	argc = k;
 	if (argc < 3) usage();
 	const char *cmd = argv[1];
-	Module *m = load_module(argv[2]);
+
+	if (strcmp(cmd, "fixer-train") == 0) {
+		if (argc < 5 || strcmp(argv[2], "-o") != 0) usage();
+		return fixer_train(argv[3], argv + 4, argc - 4);
+	}
+	if (strcmp(cmd, "fixer-eval") == 0) return fixer_eval(argv + 2, argc - 2);
+	if (strcmp(cmd, "fix") == 0) {
+		if (argc != 3 && !(argc == 5 && strcmp(argv[3], "-o") == 0)) usage();
+		char *src = read_file(argv[2], NULL);
+		if (is_ir(src)) die(NULL, 0, "fix works on surface (.tg) programs");
+		int n;
+		char *fixed = autofix(src, argv[2], 1, &n);
+		if (!fixed) return 1;
+		FILE *f = argc == 5 ? fopen(argv[4], "w") : stdout;
+		if (!f) die(NULL, 0, "cannot write '%s'", argv[4]);
+		fputs(fixed, f);
+		if (f != stdout && fclose(f) != 0) die(NULL, 0, "write failed '%s'", argv[4]);
+		fprintf(stderr, "autofix: %d repair(s)\n", n);
+		return 0;
+	}
+
+	Module *m = fix ? load_fixed(argv[2]) : load_module(argv[2]);
 	plan(m);
 
 	if (strcmp(cmd, "check") == 0) {

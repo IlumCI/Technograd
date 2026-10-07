@@ -58,6 +58,7 @@ and parentheses. All binary operators are left associative.
 | `a + b`, `a - b`, `a * b`, `a / b`, `max(a,b)`, `min(a,b)` | equal shapes, or either operand scalar (broadcast) |
 | `-a`, `neg tanh relu sigmoid exp sqrt gelu silu` | elementwise, shape preserved; `gelu` uses the tanh approximation |
 | `a @ b` (`matmul`, `dot`) | `(m,k)@(k)->(m)`, `(m,k)@(k,n)->(m,n)`, `(k)@(k,n)->(n)`, `(k)@(k)->()` |
+| `softplus(x)`, `log(x)` | elementwise; softplus is overflow-free: `max(x,0) + log1p(exp(-|x|))` |
 | `softmax(x)`, `rmsnorm(x)` | over the last axis, shape preserved, rank >= 1; rmsnorm eps = 1e-6, no gain |
 | `sum(x)`, `mean(x)` | reduce to scalar |
 | `transpose(x)` | rank 2 only |
@@ -136,7 +137,7 @@ extern int tg_<m>_steps[];          /* per think loop, filled by each run */
 ```
 
 - Not reentrant: there is one static arena per unit.
-- Depends only on `expf tanhf sqrtf fabsf`.
+- Depends only on libm: `expf tanhf sqrtf fabsf`, plus `log1pf logf` when `softplus` or `log` is used.
 - `-DTG_MAIN` adds a command-line driver whose output format matches `tgc run`.
 
 ## 10. Memory planning
@@ -148,7 +149,27 @@ always distinct from each other and from the body's temporaries. Placement is
 greedy by size (arXiv:2001.03288), aligned to 16 bytes. `tgc plan` prints the
 plan.
 
-## 11. Roadmap
+## 11. Auto-fixer
+
+`tgc fix <file> [-o out]` and `--autofix` repair surface programs that fail
+to compile. The loop, its features and its evaluation are described in the
+README. These properties are part of the contract:
+
+- The fixer never writes to the source file. `fix` prints the repaired
+  source to stdout or to `-o`, and `--autofix` repairs in memory only.
+- Every applied edit is reported, with the diagnostic it answers and its
+  calibrated confidence.
+- An edit is applied only if (a) its trial compilation succeeds, or moves or
+  changes the error, (b) it does not revisit a program state the loop has
+  already seen, and (c) its confidence is at least the threshold (default
+  0.95, environment variable `TG_FIXER_THRESHOLD`). There are at most 8
+  rounds.
+- If no edit qualifies, the original diagnostic is reported unchanged and the
+  exit status is non-zero.
+- Genuine semantic errors, such as shape mismatches between existing values,
+  produce no candidates.
+
+## 12. Roadmap
 
 Ordered by importance for latent-reasoning models on embedded targets:
 

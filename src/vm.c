@@ -61,6 +61,8 @@ static void exec(VM *vm, const Block *b)
 			case OP_SQRT: tg_sqrt(o, a, n); break;
 			case OP_GELU: tg_gelu(o, a, n); break;
 			case OP_SILU: tg_silu(o, a, n); break;
+			case OP_SOFTPLUS: tg_softplus(o, a, n); break;
+			case OP_LOG: tg_log(o, a, n); break;
 			default: abort();
 			}
 			break;
@@ -113,5 +115,5 @@ void vm_run(const Module *m, const float **in, float *out, int *steps)
 	vm.arena = xmalloc((size_t)(m->arena ? m->arena : 1) * sizeof(float));
 	exec(&vm, &m->top);
 	tg_copy(out, ptr(&vm, m->output), shape_numel(&m->val[m->output].sh));
-	free(vm.arena);
+	xfree(vm.arena);
 }

@@ -1,0 +1,14 @@
+# Residual stack with a scalar readout.
+model residual
+
+param w : f32[10, 10] = rand(31, 0.15)
+param v : f32[10] = rand(37, 0.5)
+
+def block(h: f32[10]) -> f32[10]:
+    a = rmsnorm(h)
+    return h + relu(w @ a)
+
+def forward(x: f32[10]) -> f32:
+    h = block(block(block(x)))
+    s = dot(v, h)
+    return sigmoid(s)

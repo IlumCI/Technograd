@@ -2,6 +2,7 @@
 #ifndef TG_H
 #define TG_H
 
+#include <setjmp.h>
 #include <stddef.h>
 #include <stdio.h>
 
@@ -12,8 +13,22 @@
 void *xmalloc(size_t n);
 void *xrealloc(void *p, size_t n);
 char *xstrdup(const char *s);
+void xfree(void *p);
+size_t alloc_mark(void);
+void alloc_release(size_t mark); /* free everything allocated since the mark */
+void *alloc_keep(void *p);        /* exempt one block from release */
 char *read_file(const char *path, size_t *len);
 void die(const char *file, int line, const char *fmt, ...);
+
+/* When tg_trap is set, die() records the diagnostic in tg_diag and longjmps
+ * instead of exiting. Used by the auto-fixer for trial compilation. */
+typedef struct {
+	char file[256];
+	int line;
+	char msg[512];
+} Diag;
+extern jmp_buf *tg_trap;
+extern Diag tg_diag;
 
 /* ---- shapes ------------------------------------------------------------- */
 typedef struct {
@@ -50,7 +65,7 @@ Sx *sx_read(const char *src, const char *file); /* list of top-level forms */
 typedef enum {
 	OP_CONST,
 	OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MAX, OP_MIN,
-	OP_NEG, OP_TANH, OP_RELU, OP_SIGMOID, OP_EXP, OP_SQRT, OP_GELU, OP_SILU,
+	OP_NEG, OP_TANH, OP_RELU, OP_SIGMOID, OP_EXP, OP_SQRT, OP_GELU, OP_SILU, OP_SOFTPLUS, OP_LOG,
 	OP_MATMUL,
 	OP_SOFTMAX, OP_RMSNORM,
 	OP_SUM, OP_MEAN,
@@ -139,5 +154,10 @@ void plan(Module *m);
 void plan_dump(const Module *m, FILE *f);
 void vm_run(const Module *m, const float **in, float *out, int *steps);
 void cgen(const Module *m, FILE *f);
+
+/* auto-fixer (fixer.c) */
+char *autofix(const char *src, const char *path, int verbose, int *nfixed); /* NULL if unrepaired */
+int fixer_train(const char *out, char **corpus, int n);
+int fixer_eval(char **corpus, int n);
 
 #endif

@@ -58,7 +58,7 @@ done
 # Generated units must also build without the test driver and without libc beyond libm.
 $TGC c examples/latent_reasoner.tg -o "$TMP/lr.c" && $CC -std=c99 -Wall -Werror -ffreestanding -c -o "$TMP/lr.o" "$TMP/lr.c" \
 	&& ok || bad "freestanding compile"
-if nm "$TMP/lr.o" 2>/dev/null | grep ' U ' | grep -qv -e expf -e tanhf -e sqrtf -e fabsf; then
+if nm "$TMP/lr.o" 2>/dev/null | grep ' U ' | grep -qv -e expf -e tanhf -e sqrtf -e fabsf -e log1pf -e logf; then
 	bad "unit has unexpected external symbols: $(nm "$TMP/lr.o" | grep ' U ')"
 else
 	ok
@@ -73,6 +73,26 @@ for f in tests/errors/*.tg tests/errors/*.tgir; do
 	*) bad "diagnostic $f: got [$got] want [*$want*]" ;;
 	esac
 done
+
+# 5. auto-fixer: each broken program must be repaired to its .expected text;
+#    a program without .expected must be left unrepaired (the fixer abstains).
+for f in tests/fix/*.tg; do
+	exp=${f%.tg}.expected
+	out=$($TGC fix "$f" 2>/dev/null); st=$?
+	if [ -f "$exp" ]; then
+		[ $st -eq 0 ] && [ "$out" = "$(cat "$exp")" ] && ok || bad "fix $f (status $st)"
+	else
+		[ $st -ne 0 ] && ok || bad "fix $f should abstain"
+	fi
+done
+# --autofix repairs in memory and continues with the requested command.
+got=$($TGC run tests/fix/colon.tg 2,9,16 --autofix 2>/dev/null)
+[ "$got" = "$($TGC run examples/newton.tg 2,9,16)" ] && ok || bad "--autofix run: [$got]"
+$TGC run tests/fix/colon.tg 2,9,16 >/dev/null 2>&1 && bad "without --autofix the error must stand" || ok
+# Held-out repair quality (deterministic): programs never seen in training.
+ev=$($TGC fixer-eval tests/cases/*.tg | awk '/^total/ { gsub("%", ""); print $3, $4 }')
+set -- $ev
+awk -v e="$1" -v w="$2" 'BEGIN { exit !(e >= 85 && w <= 1) }' && ok || bad "fixer-eval exact $1% wrong $2%"
 
 echo "passed $pass, failed $fail"
 [ "$fail" -eq 0 ]

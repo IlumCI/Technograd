@@ -1,0 +1,10 @@
+# Fixed-point iteration as a think loop: elementwise sqrt by Newton's method.
+# The loop halts as soon as the state stops moving (max |delta| <= 1e-6),
+# so the steps counter reports how much compute the input actually needed.
+model newton
+
+def forward(a: f32[3]) -> f32[3]:
+    h = a * 0.5 + 0.5
+    think h for 64 until 0.000001
+        h = 0.5 * (h + a / h)
+    return h

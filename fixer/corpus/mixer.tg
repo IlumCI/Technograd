@@ -1,0 +1,19 @@
+# Token mixer over a 4x8 patch matrix: mix across tokens, then channels.
+model mixer
+
+param wt : f32[4, 4] = rand(19, 0.5)
+param wc : f32[8, 8] = rand(29, 0.3)
+param gain : f32[4, 8] = ones
+param probe : f32[8] = rand(53, 0.5)
+
+def mix_tokens(x: f32[4, 8]) -> f32[4, 8]:
+    return x + wt @ rmsnorm(x)
+
+def mix_channels(x: f32[4, 8]) -> f32[4, 8]:
+    y = silu(rmsnorm(x) @ wc)
+    return x + y * gain
+
+def forward(x: f32[4, 8]) -> f32[8]:
+    h = mix_channels(mix_tokens(x))
+    pooled = transpose(h) @ softmax(mean(h) + h @ probe)
+    return pooled

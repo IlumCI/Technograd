@@ -264,7 +264,7 @@ Module *ir_read(Sx *forms, const char *file)
 	if (!r.m) die(file, 1, "missing (model ...)");
 	if (!r.m->ninputs) die(file, 1, "module has no inputs");
 	if (!seen_out) die(file, 1, "missing (output ...)");
-	free(r.names);
-	free(r.vals);
+	xfree(r.names);
+	xfree(r.vals);
 	return r.m;
 }

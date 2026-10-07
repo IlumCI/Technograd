@@ -1,20 +1,95 @@
 #include "tg.h"
 
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
+/* Every allocation carries a header linking it into one list in allocation
+ * order. alloc_release(mark) frees everything allocated since alloc_mark(),
+ * which lets the auto-fixer run thousands of trial compilations without
+ * leaking their ASTs and modules. */
+typedef union Hdr {
+	struct {
+		union Hdr *prev, *next;
+		size_t seq;
+		int linked;
+	} h;
+	max_align_t align;
+} Hdr;
+
+static Hdr alloc_head = { { &alloc_head, &alloc_head, 0, 1 } };
+static size_t alloc_seq;
+
+static void link_tail(Hdr *b)
+{
+	b->h.prev = alloc_head.h.prev;
+	b->h.next = &alloc_head;
+	alloc_head.h.prev->h.next = b;
+	alloc_head.h.prev = b;
+	b->h.linked = 1;
+}
+
+static void unlink_hdr(Hdr *b)
+{
+	if (!b->h.linked) return;
+	b->h.prev->h.next = b->h.next;
+	b->h.next->h.prev = b->h.prev;
+	b->h.linked = 0;
+}
+
 void *xmalloc(size_t n)
 {
-	void *p = calloc(1, n ? n : 1);
-	if (!p) die(NULL, 0, "out of memory");
-	return p;
+	Hdr *b = calloc(1, sizeof(Hdr) + n);
+	if (!b) die(NULL, 0, "out of memory");
+	b->h.seq = ++alloc_seq;
+	link_tail(b);
+	return b + 1;
 }
 
 void *xrealloc(void *p, size_t n)
 {
-	p = realloc(p, n ? n : 1);
-	if (!p) die(NULL, 0, "out of memory");
+	if (!p) return xmalloc(n);
+	Hdr *b = (Hdr *)p - 1;
+	int linked = b->h.linked;
+	unlink_hdr(b);
+	Hdr *nb = realloc(b, sizeof(Hdr) + n);
+	if (!nb) die(NULL, 0, "out of memory");
+	if (linked) {
+		/* re-insert in seq order so release-from-tail stays correct */
+		Hdr *at = alloc_head.h.prev;
+		while (at != &alloc_head && at->h.seq > nb->h.seq) at = at->h.prev;
+		nb->h.prev = at;
+		nb->h.next = at->h.next;
+		at->h.next->h.prev = nb;
+		at->h.next = nb;
+		nb->h.linked = 1;
+	}
+	return nb + 1;
+}
+
+void xfree(void *p)
+{
+	if (!p) return;
+	Hdr *b = (Hdr *)p - 1;
+	unlink_hdr(b);
+	free(b);
+}
+
+size_t alloc_mark(void) { return alloc_seq + 1; }
+
+void alloc_release(size_t mark)
+{
+	while (alloc_head.h.prev != &alloc_head && alloc_head.h.prev->h.seq >= mark) {
+		Hdr *b = alloc_head.h.prev;
+		unlink_hdr(b);
+		free(b);
+	}
+}
+
+void *alloc_keep(void *p)
+{
+	if (p) unlink_hdr((Hdr *)p - 1);
 	return p;
 }
 
@@ -42,15 +117,20 @@ char *read_file(const char *path, size_t *len)
 	return buf;
 }
 
+jmp_buf *tg_trap;
+Diag tg_diag;
+
 void die(const char *file, int line, const char *fmt, ...)
 {
 	va_list ap;
-	if (file) fprintf(stderr, "%s:%d: ", file, line);
-	fputs("error: ", stderr);
+	snprintf(tg_diag.file, sizeof tg_diag.file, "%s", file ? file : "");
+	tg_diag.line = file ? line : 0;
 	va_start(ap, fmt);
-	vfprintf(stderr, fmt, ap);
+	vsnprintf(tg_diag.msg, sizeof tg_diag.msg, fmt, ap);
 	va_end(ap);
-	fputc('\n', stderr);
+	if (tg_trap) longjmp(*tg_trap, 1);
+	if (file) fprintf(stderr, "%s:%d: ", file, line);
+	fprintf(stderr, "error: %s\n", tg_diag.msg);
 	exit(1);
 }
 
@@ -134,6 +214,6 @@ Module *load_module(const char *path)
 	Module *m;
 	if (*p == '(' || *p == ';') m = ir_read(sx_read(src, path), path);
 	else m = lower(surface_parse(src, path), path);
-	free(src);
+	xfree(src);
 	return m;
 }

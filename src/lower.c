@@ -86,6 +86,8 @@ static int emit_op(L *l, Block *b, Op op, const int *args, int na, int line)
 {
 	Shape in[2], out;
 	char err[256];
+	if (na != tg_ops[op].arity)
+		die(l->file, line, "'%s' takes %d operand(s), got %d", tg_ops[op].name, tg_ops[op].arity, na);
 	for (int i = 0; i < na; i++) in[i] = l->m->val[args[i]].sh;
 	if (!op_infer(op, in, na, &out, err, sizeof err)) die(l->file, line, "%s", err);
 	int o = mod_value(l->m, V_TMP, &out, NULL);
@@ -145,7 +147,7 @@ static int lower_expr(L *l, Block *b, Env *e, Sx *x)
 			shape_str(&l->m->val[r].sh, s1, sizeof s1);
 			die(l->file, def->line, "'%s' declared to return %s, returns %s", fn->s, s0, s1);
 		}
-		free(fe.b);
+		xfree(fe.b);
 		l->depth--;
 		return r;
 	}
@@ -205,7 +207,7 @@ static int lower_block(L *l, Block *b, Env *e, Sx *stmts, int is_fn)
 					die(l->file, s->line, "think block assigns outer variable '%s'; only the state '%s' is carried", n, st->s);
 			}
 			int y = env_get(&inner, st->s);
-			free(inner.b);
+			xfree(inner.b);
 			ins = &b->v[idx]; /* block may have been reallocated */
 			ins->body = body;
 			ins->yield = y;
@@ -272,7 +274,7 @@ static float *materialize(L *l, Sx *init, const Shape *sh, const char *pname)
 			char *dir = dirname_of(l->file);
 			full = xmalloc(strlen(dir) + strlen(p) + 2);
 			sprintf(full, "%s/%s", dir, p);
-			free(dir);
+			xfree(dir);
 		}
 		size_t len;
 		char *raw = read_file(full, &len);
@@ -283,8 +285,8 @@ static float *materialize(L *l, Sx *init, const Shape *sh, const char *pname)
 			uint32_t w = (uint32_t)b[4 * i] | (uint32_t)b[4 * i + 1] << 8 | (uint32_t)b[4 * i + 2] << 16 | (uint32_t)b[4 * i + 3] << 24;
 			memcpy(&d[i], &w, 4);
 		}
-		free(raw);
-		free(full);
+		xfree(raw);
+		xfree(full);
 		return d;
 	}
 	die(l->file, init->line, "bad initializer '%s'", k);
@@ -347,6 +349,6 @@ Module *lower(Sx *ast, const char *file)
 	Shape rt = to_shape(entry->v[3]);
 	if (!shape_eq(&rt, &l.m->val[r].sh)) die(file, entry->line, "'forward' return shape does not match its declaration");
 	l.m->output = r;
-	free(e.b);
+	xfree(e.b);
 	return l.m;
 }

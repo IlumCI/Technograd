@@ -1,0 +1,20 @@
+# Gated recurrent cell iterated in latent space.
+model gated_cell
+
+param wz : f32[8, 8] = rand(7, 0.2)
+param wr : f32[8, 8] = rand(9, 0.2)
+param wh : f32[8, 8] = rand(13, 0.2)
+param ux : f32[8, 4] = rand(17, 0.3)
+
+def gate(w: f32[8, 8], h: f32[8], u: f32[8]) -> f32[8]:
+    return sigmoid(w @ h + u)
+
+def forward(x: f32[4]) -> f32[8]:
+    u = ux @ x
+    h = tanh(u)
+    think h for 12 until 0.00001:
+        z = gate(wz, h, u)
+        r = gate(wr, h, u)
+        c = tanh(wh @ (r * h) + u)
+        h = z * h + (1 - z) * c
+    return h

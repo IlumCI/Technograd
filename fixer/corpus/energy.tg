@@ -1,0 +1,18 @@
+# Gradient descent on a quadratic energy, unrolled as a think loop.
+model energy
+
+param q : f32[5, 5] = [[2, 0.1, 0, 0, 0],
+                       [0.1, 2, 0.1, 0, 0],
+                       [0, 0.1, 2, 0.1, 0],
+                       [0, 0, 0.1, 2, 0.1],
+                       [0, 0, 0, 0.1, 2]]
+
+def grad(y: f32[5], t: f32[5]) -> f32[5]:
+    return q @ y - t
+
+def forward(t: f32[5], lr: f32) -> f32[5]:
+    y = t * 0
+    think y for 200 until 0.000001:
+        g = grad(y, t)
+        y = y - lr * g
+    return y
