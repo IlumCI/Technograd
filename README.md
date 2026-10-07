@@ -29,7 +29,7 @@ file is the black box you ship to the target.
 
 ```sh
 make            # builds build/tgc (C11, no dependencies beyond libm; perl at build time)
-make test       # 89 checks: known answers, IR round trip, VM == compiled C, diagnostics, auto-fix, imports, file I/O, tracing
+make test       # 94 checks: known answers, IR round trip, VM == compiled C, diagnostics, auto-fix, imports, file I/O, tracing, threads
 make fixer      # retrain the auto-fix forest (deterministic, ~15 s) and evaluate it on held-out programs
 
 build/tgc run  examples/latent_reasoner.tg 1,0,0,1,0,1,1,0
@@ -39,6 +39,7 @@ build/tgc run  examples/latent_reasoner.tg 1,0,0,1,0,1,1,0
 build/tgc ir   examples/newton.tg            # canonical TGIR
 build/tgc batch examples/xor.tg tests/io/xor.csv   # one sample per row; .bin/.f32 for raw f32 streams
 build/tgc run examples/newton.tg 2,9,16 -vv --log run.jsonl   # stage/value/iteration trace + JSONL log
+build/tgc batch examples/latent_reasoner.tg data.bin -j auto -o out.bin   # rows across all cores, bit-identical to -j 1
 build/tgc plan examples/latent_reasoner.tg   # arena layout: 320 B instead of 624 B unshared
 build/tgc c    examples/latent_reasoner.tg -o reasoner.c
 cc -O2 -DTG_MAIN reasoner.c -lm -o reasoner && ./reasoner 1,0,0,1,0,1,1,0

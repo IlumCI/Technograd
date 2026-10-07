@@ -1,0 +1,14 @@
+# Large enough that matmuls take the parallel path (1024x1024 matvec,
+# 1M multiply-adds each), iterated in a think loop.
+model wide
+
+param w : f32[1024, 1024] = rand(5, 0.03)
+param u : f32[1024, 16] = rand(9, 0.2)
+param r : f32[4, 1024] = rand(13, 0.05)
+
+def forward(x: f32[16]) -> f32[4]:
+    e = u @ x
+    h = tanh(e)
+    think h for 24 until 0.00001:
+        h = tanh(w @ h + e)
+    return softmax(r @ h)

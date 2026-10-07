@@ -10,8 +10,27 @@ typedef struct {
 	float *arena;
 	const float **in;
 	int *steps;
-	int dbg; /* per-instruction and per-iteration debug events */
+	int dbg;     /* per-instruction and per-iteration debug events */
+	float *delta; /* final halting delta per think loop, or NULL */
 } VM;
+
+/* Row-split matmul for large products. Each output element is computed by the
+ * same sequence of operations as the serial kernel, so results are
+ * bit-identical at any thread count. */
+#define PAR_MATMUL_MIN (1L << 16) /* multiply-adds below which threading costs more than it saves */
+
+typedef struct {
+	float *o;
+	const float *a, *b;
+	int k, n;
+} MMJob;
+
+static void mm_rows(void *ctx, int lo, int hi, int tid)
+{
+	(void)tid;
+	MMJob *j = ctx;
+	tg_matmul(j->o + (size_t)lo * (size_t)j->n, j->a + (size_t)lo * (size_t)j->k, j->b, hi - lo, j->k, j->n);
+}
 
 /* Final halting delta of each think loop in the last vm_run (single run at a time). */
 static float *g_delta;
@@ -106,7 +125,13 @@ static void exec(VM *vm, const Block *b)
 		case CLS_MATMUL: {
 			int mm, kk, nn;
 			matmul_dims(&m->val[in->a[0]].sh, &m->val[in->a[1]].sh, &mm, &kk, &nn);
-			tg_matmul(o, a, c, mm, kk, nn);
+			if (par_threads() > 1 && mm >= 2 && (long)mm * kk * nn >= PAR_MATMUL_MIN) {
+				MMJob j = { o, a, c, kk, nn };
+				int grain = mm / (4 * par_threads());
+				par_for(mm, grain > 0 ? grain : 1, mm_rows, &j);
+			} else {
+				tg_matmul(o, a, c, mm, kk, nn);
+			}
 			break;
 		}
 		case CLS_ROW: {
@@ -143,7 +168,7 @@ static void exec(VM *vm, const Block *b)
 					tr_num("delta", d);
 					tr_end("think[%d] iteration %d delta %.6g", in->tid, it, (double)d);
 				}
-				if (in->tid < g_ndelta) g_delta[in->tid] = d;
+				if (vm->delta) vm->delta[in->tid] = d;
 				tg_copy(o, y, n);
 				if (in->eps >= 0 && d <= in->eps) break;
 			}
@@ -155,13 +180,22 @@ static void exec(VM *vm, const Block *b)
 	}
 }
 
+/* Thread-safe entry: no allocation, no tracing, no shared state. `arena` must
+ * hold m->arena floats and be private to the caller; `delta` may be NULL. */
+void vm_run_into(const Module *m, const float **in, float *out, int *steps, float *arena, float *delta)
+{
+	VM vm = { m, arena, in, steps, 0, delta };
+	exec(&vm, &m->top);
+	tg_copy(out, ptr(&vm, m->output), shape_numel(&m->val[m->output].sh));
+}
+
 void vm_run(const Module *m, const float **in, float *out, int *steps)
 {
-	VM vm = { m, NULL, in, steps, m->trace && tr_on(2) && tg_verbose >= 2 };
 	if (g_ndelta < m->nthink) {
 		g_delta = alloc_keep(xrealloc(g_delta, (size_t)m->nthink * sizeof *g_delta)); /* outlives scoped releases */
 		g_ndelta = m->nthink;
 	}
+	VM vm = { m, NULL, in, steps, m->trace && tr_on(2) && tg_verbose >= 2, g_delta };
 	vm.arena = xmalloc((size_t)(m->arena ? m->arena : 1) * sizeof(float));
 	exec(&vm, &m->top);
 	tg_copy(out, ptr(&vm, m->output), shape_numel(&m->val[m->output].sh));

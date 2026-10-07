@@ -156,6 +156,13 @@ void plan(Module *m);
 void plan_dump(const Module *m, FILE *f);
 void vm_run(const Module *m, const float **in, float *out, int *steps);
 float vm_last_delta(int tid); /* halting delta of think loop tid in the last run */
+void vm_run_into(const Module *m, const float **in, float *out, int *steps, float *arena, float *delta); /* thread-safe */
+
+/* thread pool (par.c) */
+int par_cpus(void);
+void par_init(int threads); /* 0 = one per online CPU */
+int par_threads(void);
+void par_for(int n, int grain, void (*fn)(void *ctx, int lo, int hi, int tid), void *ctx);
 void cgen(const Module *m, FILE *f);
 
 /* tracing and structured logs (trace.c): levels 0 error, 1 info (-v), 2 debug (-vv) */

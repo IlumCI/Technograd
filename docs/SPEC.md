@@ -261,7 +261,53 @@ human-readable text.
   flagged `NONFINITE` and counted in `nonfinite`, which locates where a
   model first diverges.
 
-## 14. Roadmap
+## 14. Threads
+
+```
+-j N, --threads N    N worker threads; 0 or `auto` = one per online CPU; default 1
+```
+
+The thread pool (`src/par.c`, pthreads and C11 atomics) is shared by two kinds
+of work:
+
+- **Batch rows.** Rows are claimed dynamically in small chunks from an atomic
+  counter, because adaptive `think` loops make rows cost different amounts.
+  Each thread owns its arena and input pointers. Rows are computed in blocks
+  of `1024 * threads` and written in input order, so memory stays bounded and
+  output order never depends on scheduling.
+- **Large matmuls.** A matmul with at least 2 output rows and at least 2^16
+  multiply-adds splits its output rows across threads. Each output element is
+  computed by the same operations in the same order as the serial kernel.
+
+Guarantees:
+
+- **Bit-identical results at every thread count.** Neither path reorders
+  floating-point operations. Tested byte for byte on text and binary batches,
+  on a single large run, and on the nested case.
+- **No nested oversubscription.** A parallel loop started from inside a
+  worker runs inline, so a batch of models with large matmuls uses exactly N
+  threads.
+- **Race-free.** Workers run an allocation-free VM entry point with no shared
+  mutable state. The suite passes under ThreadSanitizer.
+
+Scope:
+
+- **`-vv` value traces** are produced by `run` only. `batch` reports aggregate
+  statistics (`rows`, `us_per_row`, `threads`, step min/mean/max).
+- **Generated C units stay single-threaded.** They target freestanding
+  embedded builds with no thread library.
+
+Measured on 4 cores:
+
+| Workload | 1 thread | 4 threads | Speedup |
+|----------|---------:|----------:|--------:|
+| `latent_reasoner`, 20,000-row batch, binary I/O | 130 ms | 47 ms | 2.8x |
+| `latent_reasoner`, 20,000-row batch, text I/O | 185 ms | 97 ms | 1.9x |
+| `tests/par/wide.tg`, one run (1024x1024 matvec in a 17-step think loop, best of 5) | 12.5 ms | 4.1 ms | 3.1x |
+
+The text batch is limited by serial parsing and formatting of numbers.
+
+## 15. Roadmap
 
 Ordered by importance for latent-reasoning models on embedded targets:
 

@@ -101,6 +101,22 @@ grep -q '"level":"debug"' "$log" && bad "debug events leaked into log without -v
 $TGC run examples/newton.tg 2,9,16 -vv --log "$TMP/d.jsonl" >/dev/null 2>&1
 grep -q '"stage":"vm".*"op":"div"' "$TMP/d.jsonl" && ok || bad "-vv log lacks vm events"
 
+# 4d. threads: results are bit-identical at any thread count (batch rows and
+#     intra-op matmul, including the nested case), and -j is validated
+perl -e 'srand(7); for (1..3000) { print join(",", map { sprintf "%.4f", rand()*4-2 } 1..8), "\n" }' > "$TMP/p.csv"
+$TGC batch examples/latent_reasoner.tg "$TMP/p.csv" -j 1 -o "$TMP/p1.csv"
+$TGC batch examples/latent_reasoner.tg "$TMP/p.csv" -j 4 -o "$TMP/p4.csv"
+cmp -s "$TMP/p1.csv" "$TMP/p4.csv" && [ "$(wc -l < "$TMP/p4.csv")" -eq 3000 ] && ok || bad "batch -j4 differs from -j1"
+perl -e 'srand(7); print pack("f<*", map { rand()*4-2 } 1..24000)' > "$TMP/p.bin"
+$TGC batch examples/latent_reasoner.tg "$TMP/p.bin" -j 1 -o "$TMP/q1.bin"
+$TGC batch examples/latent_reasoner.tg "$TMP/p.bin" -j auto -o "$TMP/q4.bin"
+cmp -s "$TMP/q1.bin" "$TMP/q4.bin" && ok || bad "binary batch -j auto differs from -j1"
+W=1,0,-1,0.5,0,0,1,0,0,2,0,0,-1,0,0,1
+[ "$($TGC run tests/par/wide.tg $W -j 4)" = "$($TGC run tests/par/wide.tg $W -j 1)" ] && ok || bad "parallel matmul changed the result"
+printf "%s\n%s\n%s\n" $W $W $W > "$TMP/w.csv"
+[ "$($TGC batch tests/par/wide.tg "$TMP/w.csv" -j 4)" = "$($TGC batch tests/par/wide.tg "$TMP/w.csv" -j 1)" ] && ok || bad "nested parallelism changed the result"
+$TGC run examples/xor.tg 1,0 -j abc >/dev/null 2>&1 && bad "-j abc must be rejected" || ok
+
 # 4a. cross-file imports: diamond dedup and cycle termination
 expect_run tests/imports/diamond.tg "23 43" 10,20
 expect_run tests/imports/cycle.tg "11 21" 10,20

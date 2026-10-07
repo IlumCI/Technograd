@@ -19,7 +19,8 @@ static void usage(void)
 	      "options:\n"
 	      "  --autofix   on a compile error, repair in memory and continue (source is not modified)\n"
 	      "  -v, --verbose   trace compiler stages and think loops to stderr; -vv adds every VM value\n"
-	      "  --log FILE  append a JSON Lines log of all events and errors (debug events need -vv)\n",
+	      "  --log FILE  append a JSON Lines log of all events and errors (debug events need -vv)\n"
+	      "  -j N, --threads N   worker threads for batch rows and large matmuls (N=0 or auto: one per CPU)\n",
 	      stderr);
 	exit(2);
 }
@@ -144,9 +145,10 @@ static void trace_batch(const Module *m, const Acc *a, double ms)
 {
 	tr_begin(1, "batch");
 	tr_num("rows", a->rows);
+	tr_num("threads", par_threads());
 	tr_num("ms", ms);
 	tr_num("us_per_row", a->rows ? 1e3 * ms / a->rows : 0);
-	tr_end("%d row(s) in %.2f ms (%.1f us/row)", a->rows, ms, a->rows ? 1e3 * ms / a->rows : 0.0);
+	tr_end("%d row(s) in %.2f ms (%.1f us/row) on %d thread(s)", a->rows, ms, a->rows ? 1e3 * ms / a->rows : 0.0, par_threads());
 	for (int t = 0; t < m->nthink && a->rows; t++) {
 		tr_begin(1, "think");
 		tr_num("loop", t);
@@ -154,6 +156,75 @@ static void trace_batch(const Module *m, const Acc *a, double ms)
 		tr_num("steps_mean", (double)a->sum[t] / a->rows);
 		tr_num("steps_max", a->mx[t]);
 		tr_end("think[%d] over batch: steps min %d mean %.2f max %d", t, a->mn[t], (double)a->sum[t] / a->rows, a->mx[t]);
+	}
+}
+
+/* All samples of a batch input as one row-major array of `per` floats each.
+ * Text rows and binary streams are validated completely before returning. */
+static float *load_samples(const char *data, int per, const char *model, int *rows)
+{
+	if (io_is_binary(data)) {
+		int cnt;
+		float *all = io_load(data, &cnt);
+		if (cnt % per) die(NULL, 0, "'%s': %d values is not a multiple of the %d per sample", data, cnt, per);
+		*rows = cnt / per;
+		return all;
+	}
+	char *raw = read_file(data, NULL);
+	float *all = NULL;
+	int nrows = 0;
+	for (int pass = 0; pass < 2; pass++) { /* pass 0 validates and counts, pass 1 parses */
+		if (pass == 1) all = xmalloc((size_t)(nrows ? nrows : 1) * (size_t)per * sizeof *all);
+		int line = 1, r = 0;
+		for (char *s = raw; *s; line++) {
+			char *nl = strchr(s, '\n');
+			size_t len = nl ? (size_t)(nl - s) : strlen(s);
+			char save = s[len];
+			s[len] = 0;
+			const char *bad;
+			int k = io_parse_row(s, NULL, 0, &bad);
+			if (k < 0) die(data, line, "bad number near '%.20s'", bad);
+			if (k > 0 && k != per) die(data, line, "row has %d values, model %s needs %d per sample", k, model, per);
+			if (k > 0) {
+				if (pass == 1) io_parse_row(s, all + (size_t)r * (size_t)per, per, &bad);
+				r++;
+			}
+			s[len] = save;
+			if (!nl) break;
+			s = nl + 1;
+		}
+		nrows = r;
+	}
+	xfree(raw);
+	*rows = nrows;
+	return all;
+}
+
+/* Batch worker state. Every thread owns a slice of `arenas` and `inptrs`;
+ * output rows are disjoint, so no synchronization is needed inside a block. */
+typedef struct {
+	const Module *m;
+	const float *all;
+	int per;
+	const int *off;
+	int n, nt, base;
+	float *out;
+	int *steps;
+	float *arenas;
+	int arena_floats;
+	const float **inptrs;
+} BatchJob;
+
+static void batch_rows(void *ctx, int lo, int hi, int tid)
+{
+	BatchJob *j = ctx;
+	const Module *m = j->m;
+	const float **in = j->inptrs + (size_t)tid * (size_t)(m->ninputs ? m->ninputs : 1);
+	float *arena = j->arenas + (size_t)tid * (size_t)j->arena_floats;
+	for (int r = lo; r < hi; r++) {
+		const float *row = j->all + (size_t)(j->base + r) * (size_t)j->per;
+		for (int i = 0; i < m->ninputs; i++) in[i] = row + j->off[i];
+		vm_run_into(m, in, j->out + (size_t)r * (size_t)j->n, j->steps + (size_t)r * (size_t)j->nt, arena, NULL);
 	}
 }
 
@@ -176,11 +247,18 @@ static Module *load_fixed(const char *path)
 
 int main(int argc, char **argv)
 {
-	int fix = 0, k = 1;
+	int fix = 0, k = 1, threads = 1;
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--autofix") == 0) fix = 1;
 		else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) tg_verbose = tg_verbose > 1 ? tg_verbose : 1;
 		else if (strcmp(argv[i], "-vv") == 0) tg_verbose = 2;
+		else if (strcmp(argv[i], "-j") == 0 || strcmp(argv[i], "--threads") == 0) {
+			if (++i == argc) usage();
+			char *e;
+			long t = strcmp(argv[i], "auto") == 0 ? 0 : strtol(argv[i], &e, 10);
+			if (strcmp(argv[i], "auto") != 0 && (*e || t < 0)) die(NULL, 0, "-j expects a thread count or 'auto', got '%s'", argv[i]);
+			threads = (int)t;
+		}
 		else if (strcmp(argv[i], "--log") == 0) {
 			if (++i == argc) usage();
 			tr_open_log(argv[i]);
@@ -189,6 +267,7 @@ int main(int argc, char **argv)
 	}
 	argc = k;
 	if (argc < 3) usage();
+	par_init(threads);
 	const char *cmd = argv[1];
 
 	if (strcmp(cmd, "fixer-train") == 0) {
@@ -257,52 +336,34 @@ int main(int argc, char **argv)
 			per += shape_numel(&m->val[m->inputs[i]].sh);
 		}
 		int n = shape_numel(&m->val[m->output].sh);
-		float *out = xmalloc((size_t)n * sizeof *out);
-		int *steps = xmalloc((size_t)(m->nthink ? m->nthink : 1) * sizeof *steps);
-		const float **in = xmalloc((size_t)m->ninputs * sizeof *in);
-		int obin = opath && io_is_binary(opath);
 		int nt = m->nthink ? m->nthink : 1;
+		int obin = opath && io_is_binary(opath);
 		Acc acc = { 0, xmalloc((size_t)nt * sizeof(long)), xmalloc((size_t)nt * sizeof(int)), xmalloc((size_t)nt * sizeof(int)) };
 		double tb = tr_now_ms();
-		FILE *f = NULL; /* opened only after the whole input validates */
-		if (io_is_binary(data)) {
-			int cnt;
-			float *all = io_load(data, &cnt);
-			if (cnt % per) die(NULL, 0, "'%s': %d values is not a multiple of the %d per sample", data, cnt, per);
-			f = opath ? open_out(opath) : stdout;
-			for (int r = 0; r < cnt / per; r++) {
-				for (int i = 0; i < m->ninputs; i++) in[i] = all + (size_t)r * (size_t)per + off[i];
-				vm_run(m, in, out, steps);
-				acc_add(&acc, steps, m->nthink);
-				io_write_row(f, obin, out, n, steps, obin ? 0 : m->nthink);
-			}
-		} else {
-			char *raw = read_file(data, NULL);
-			float *row = xmalloc((size_t)per * sizeof *row);
-			for (int i = 0; i < m->ninputs; i++) in[i] = row + off[i];
-			/* pass 0 validates every row; pass 1 computes, so a bad row yields no output */
-			for (int pass = 0; pass < 2; pass++) {
-				if (pass == 1) f = opath ? open_out(opath) : stdout;
-				int line = 1;
-				for (char *s = raw; *s; line++) {
-					char *nl = strchr(s, '\n');
-					size_t len = nl ? (size_t)(nl - s) : strlen(s);
-					char save = s[len];
-					s[len] = 0;
-					const char *bad;
-					int k = io_parse_row(s, NULL, 0, &bad);
-					if (k < 0) die(data, line, "bad number near '%.20s'", bad);
-					if (k > 0 && k != per) die(data, line, "row has %d values, model %s needs %d per sample", k, m->name, per);
-					if (k > 0 && pass == 1) {
-						io_parse_row(s, row, per, &bad);
-						vm_run(m, in, out, steps);
-				acc_add(&acc, steps, m->nthink);
-						io_write_row(f, obin, out, n, steps, obin ? 0 : m->nthink);
-					}
-					s[len] = save;
-					if (!nl) break;
-					s = nl + 1;
-				}
+
+		/* 1. load and validate everything before computing or creating the output */
+		int rows;
+		float *all = load_samples(data, per, m->name, &rows);
+		FILE *f = opath ? open_out(opath) : stdout;
+
+		/* 2. rows of a block run in parallel; blocks are written in input order */
+		int threads = par_threads();
+		int block = 1024 * threads;
+		if (block > rows) block = rows > 0 ? rows : 1;
+		int afl = m->arena ? m->arena : 1;
+		BatchJob j = { m, all, per, off, n, nt, 0,
+			       xmalloc((size_t)block * (size_t)n * sizeof(float)),
+			       xmalloc((size_t)block * (size_t)nt * sizeof(int)),
+			       xmalloc((size_t)threads * (size_t)afl * sizeof(float)), afl,
+			       xmalloc((size_t)threads * (size_t)(m->ninputs ? m->ninputs : 1) * sizeof(float *)) };
+		for (int b0 = 0; b0 < rows; b0 += block) {
+			int cnt = rows - b0 < block ? rows - b0 : block;
+			j.base = b0;
+			int grain = cnt / (16 * threads);
+			par_for(cnt, grain > 0 ? grain : 1, batch_rows, &j);
+			for (int r = 0; r < cnt; r++) {
+				acc_add(&acc, j.steps + (size_t)r * (size_t)nt, m->nthink);
+				io_write_row(f, obin, j.out + (size_t)r * (size_t)n, n, j.steps + (size_t)r * (size_t)nt, obin ? 0 : m->nthink);
 			}
 		}
 		if (opath) close_out(f, opath);
