@@ -2,7 +2,7 @@ CC      ?= cc
 CFLAGS  ?= -std=c11 -O2 -Wall -Wextra -Wpedantic
 LDLIBS  = -lm -pthread
 
-SRC = src/util.c src/sexp.c src/ops.c src/parse.c src/lower.c src/ir.c src/plan.c src/vm.c src/cgen.c src/fixer.c src/io.c src/trace.c src/par.c src/autodiff.c src/main.c
+SRC = src/util.c src/sexp.c src/ops.c src/parse.c src/lower.c src/ir.c src/plan.c src/vm.c src/cgen.c src/fixer.c src/io.c src/trace.c src/par.c src/autodiff.c src/optim.c src/data.c src/autotrain.c src/main.c
 OBJ = $(SRC:src/%.c=build/%.o)
 
 all: build/tgc
@@ -10,7 +10,7 @@ all: build/tgc
 build/tgc: $(OBJ)
 	$(CC) $(CFLAGS) -o $@ $(OBJ) $(LDLIBS)
 
-build/%.o: src/%.c src/tg.h runtime/tg_rt.h build/rt_embed.h build/forest_embed.h | build
+build/%.o: src/%.c src/tg.h src/data.h runtime/tg_rt.h build/rt_embed.h build/forest_embed.h | build
 	$(CC) $(CFLAGS) -pthread -Ibuild -c -o $@ $<
 
 # Embed the runtime kernels as C string lines so emitted units are self-contained.

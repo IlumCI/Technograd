@@ -55,7 +55,7 @@ static const char *rname[R_N] = {
 	"delete-token", "make-return", "delete-line", "fix-character",
 };
 
-static const char *keywords[] = { "model", "param", "def", "return", "think", "for", "until", "f32", "import", "state", "update",
+static const char *keywords[] = { "model", "param", "def", "return", "think", "for", "until", "f32", "import", "state", "update", "train", "with", "over",
 				  "zeros", "ones", "fill", "rand", "file", NULL };
 
 /* ---- small helpers ------------------------------------------------------ */

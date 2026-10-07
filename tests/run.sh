@@ -146,6 +146,50 @@ $TGC c examples/train_xor.tg -o "$TMP/tx.c" && $CC -std=c99 -O2 -Wall -Wextra -W
 head -200 "$TMP/xt.csv" > "$TMP/t200.csv"
 [ "$("$TMP/tx" $(awk -F, '{ printf "%s,%s %s ", $1, $2, $3 }' "$TMP/t200.csv"))" = "$($TGC batch examples/train_xor.tg "$TMP/t200.csv")" ] && ok || bad "on-device training differs from VM"
 
+# 4g. datasets, shared gradients, optimizers, one-command training (offline;
+#     set TG_TEST_NETWORK=1 to also train on a Hugging Face dataset)
+ins=$($TGC data inspect tests/data/messy.csv)
+case "$ins" in *"Id"*"dropped: identifier"*) ok ;; *) bad "identifier column not dropped" ;; esac
+case "$ins" in *"label_name"*"would leak the answer"*) ok ;; *) bad "leaking column not dropped" ;; esac
+case "$ins" in *"weight, kg"*"(has missing)"*) ok ;; *) bad "quoted header with comma / missing values" ;; esac
+case "$ins" in *"city"*"categorical"*"New York, NY"*) ok ;; *) bad "quoted field with comma" ;; esac
+case "$ins" in *"classification on 'label' (2 classes)"*) ok ;; *) bad "target not picked: [$ins]" ;; esac
+ins=$($TGC data inspect tests/data/rows.jsonl)
+case "$ins" in *"emb"*"vector"*"3 numbers per row"*"meta"*"nested objects"*"regression on 'y'"*) ok ;; *) bad "jsonl inspect: [$ins]" ;; esac
+case "$($TGC data inspect tests/data/hfpage.json)" in *"rows     2"*'x "quoted"'*) ok ;; *) bad "HF page / JSON escapes" ;; esac
+case "$($TGC data inspect tests/data/arr.npy)" in *"rows     3"*"col1"*"numeric"*) ok ;; *) bad "npy" ;; esac
+# separable 3-class blobs: train, then predict on unseen rows (deterministic)
+perl -e 'srand(9); print "a,b,kind\n"; for (1..900) { my $k = $_ % 3; my @c = ([0,0],[3,0],[0,3]); printf "%.3f,%.3f,k%d\n", $c[$k][0] + rand() - 0.5, $c[$k][1] + rand() - 0.5, $k }' > "$TMP/blobs.csv"
+$TGC train "$TMP/blobs.csv" -o "$TMP/blobs_model" > "$TMP/train.log" 2>&1 || bad "tgc train failed: $(tail -3 "$TMP/train.log")"
+grep -q "accuracy 100.00%" "$TMP/train.log" && ok || bad "blobs not separated: $(grep 'best epoch' "$TMP/train.log")"
+for f in model.tg infer.tg infer.c features.tgf report.txt weights.w1.bin; do [ -s "$TMP/blobs_model/$f" ] || bad "missing artifact $f"; done; ok
+printf 'b,a\n0.1,0.2\n3.1,0.1\n0.2,2.9\n' > "$TMP/new.csv"   # columns reordered, no target
+[ "$($TGC predict "$TMP/blobs_model" "$TMP/new.csv" 2>/dev/null | cut -d, -f1 | tr '\n' ' ')" = 'prediction "k0" "k2" "k1" ' ] && ok || bad "predict on reordered columns"
+$CC -std=c99 -Wall -Werror -c -o "$TMP/infer.o" "$TMP/blobs_model/infer.c" && ok || bad "generated infer.c does not compile"
+# shared backward pass: four grad() of one loss -> one pass; DCE keeps IR small
+[ "$($TGC check examples/train_xor.tg -vv 2>&1 | grep -c '\[grad\] backward pass')" -eq 1 ] && ok || bad "grad passes not shared"
+printf 'model d\ndef forward(x: f32[2]) -> f32[2]:\n    unused = exp(x) * 3\n    return x + 1\n' > "$TMP/dce.tg"
+$TGC ir "$TMP/dce.tg" | grep -q exp && bad "dead code survived" || ok
+# every optimizer learns XOR online
+for o in "sgd(lr=0.5)" "momentum(lr=0.1)" "adam(lr=0.02)" "adamw(lr=0.02)" "muon(lr=0.02)"; do
+	sed "s/OPT/$o/" > "$TMP/opt.tg" <<'TG'
+model xo
+state w1 : f32[4, 2] = rand(1, 1)
+state b1 : f32[4] = zeros
+state w2 : f32[4] = rand(2, 1)
+state b2 : f32 = 0
+def forward(x: f32[2], target: f32) -> f32:
+    p = sigmoid(dot(w2, tanh(w1 @ x + b1)) + b2)
+    train bce(p, target) with OPT
+    return p
+TG
+	$TGC batch "$TMP/opt.tg" "$TMP/xt.csv" -o "$TMP/op.csv"
+	paste -d, "$TMP/xt.csv" "$TMP/op.csv" | tail -400 | awk -F, '{ e = $3 - $4; if (e < 0) e = -e; if (e > 0.05) bad = 1 } END { exit bad }' && ok || bad "optimizer $o did not learn XOR"
+done
+if [ "${TG_TEST_NETWORK:-0}" = 1 ]; then
+	$TGC train hf:scikit-learn/iris -o "$TMP/iris" > "$TMP/iris.log" 2>&1 && grep -q "classification of 'Species'" "$TMP/iris.log" && ok || bad "hf iris"
+fi
+
 # 4a. cross-file imports: diamond dedup and cycle termination
 expect_run tests/imports/diamond.tg "23 43" 10,20
 expect_run tests/imports/cycle.tg "11 21" 10,20

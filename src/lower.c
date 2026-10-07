@@ -165,6 +165,34 @@ static int lower_expr(L *l, Block *b, Env *e, Sx *x)
 		return r;
 	}
 
+	if (!strcmp(fn->s, "mse") || !strcmp(fn->s, "bce") || !strcmp(fn->s, "xent")) {
+		if (nargs != 2) die(l->file, x->line, "'%s' takes (prediction, target)", fn->s);
+		if (!shape_eq(&l->m->val[args[0]].sh, &l->m->val[args[1]].sh)) {
+			char s0[64], s1[64];
+			shape_str(&l->m->val[args[0]].sh, s0, sizeof s0);
+			shape_str(&l->m->val[args[1]].sh, s1, sizeof s1);
+			die(l->file, x->line, "'%s' prediction %s and target %s differ in shape", fn->s, s0, s1);
+		}
+		int p = args[0], t = args[1];
+#define OP2(k, a, c) ir_op(l->m, b, k, a, c, l->file, x->line)
+#define CK(v) ir_k(l->m, b, v)
+		if (!strcmp(fn->s, "mse")) { /* mean((p - t)^2) */
+			int d = OP2(OP_SUB, p, t);
+			return OP2(OP_MEAN, OP2(OP_MUL, d, d), -1);
+		}
+		if (!strcmp(fn->s, "bce")) { /* -mean(t log p + (1-t) log(1-p)) */
+			int lp = OP2(OP_LOG, OP2(OP_ADD, p, CK(1e-7f)), -1);
+			int lq = OP2(OP_LOG, OP2(OP_ADD, OP2(OP_SUB, CK(1), p), CK(1e-7f)), -1);
+			int s = OP2(OP_ADD, OP2(OP_MUL, t, lp), OP2(OP_MUL, OP2(OP_SUB, CK(1), t), lq));
+			return OP2(OP_NEG, OP2(OP_MEAN, s, -1), -1);
+		}
+		if (l->m->val[p].sh.rank != 1) die(l->file, x->line, "'xent' needs vector logits and a one-hot target");
+		/* -sum(t * log softmax(logits)) */
+		int ls = OP2(OP_LOG, OP2(OP_ADD, OP2(OP_SOFTMAX, p, -1), CK(1e-12f)), -1);
+		return OP2(OP_NEG, OP2(OP_SUM, OP2(OP_MUL, t, ls), -1), -1);
+#undef OP2
+#undef CK
+	}
 	const char *opname = strcmp(fn->s, "dot") == 0 ? "matmul" : fn->s;
 	int op = op_lookup(opname);
 	if (op < 0) die(l->file, fn->line, "unknown function '%s'", fn->s);
@@ -190,6 +218,30 @@ static int lower_block(L *l, Block *b, Env *e, Sx *stmts, int is_fn)
 				die(l->file, s->line, "cannot assign to state '%s'; use 'update %s = ...'", n, n);
 			if (g >= 0) die(l->file, s->line, "cannot assign to parameter '%s'", n);
 			env_set(e, n, v);
+			continue;
+		}
+		if (strcmp(h, "train") == 0) {
+			if (l->depth > 0) die(l->file, s->line, "'train' is only allowed in the body of 'forward', not in a def");
+			if (l->in_think) die(l->file, s->line, "'train' inside think block");
+			int y = lower_expr(l, b, e, s->v[1]);
+			if (l->m->val[y].sh.rank != 0) die(l->file, s->line, "'train' needs a scalar loss; reduce it with sum(...) or mean(...)");
+			Sx *kv = s->v[3], *ov = s->v[4];
+			const char **keys = xmalloc((size_t)(kv->len + 1) * sizeof *keys);
+			double *vals = xmalloc((size_t)(kv->len + 1) * sizeof *vals);
+			for (int k = 0; k < kv->len; k++) {
+				keys[k] = kv->v[k]->v[0]->s;
+				vals[k] = kv->v[k]->v[1]->n;
+			}
+			int *over = xmalloc((size_t)(ov->len + 1) * sizeof *over);
+			for (int k = 0; k < ov->len; k++) {
+				int sv = env_get(&l->globals, ov->v[k]->s);
+				if (sv < 0 || l->m->val[sv].kind != V_STATE) die(l->file, s->line, "'%s' in 'over' is not a state", ov->v[k]->s);
+				over[k] = sv;
+			}
+			optim_train(l->m, b, y, s->v[2]->s, keys, vals, kv->len, over, ov->len, l->file, s->line);
+			xfree(keys);
+			xfree(vals);
+			xfree(over);
 			continue;
 		}
 		if (strcmp(h, "update") == 0) {
@@ -409,6 +461,53 @@ static float *materialize(L *l, Sx *init, const Shape *sh, const char *pname)
 	return NULL;
 }
 
+/* Dead-code elimination. Roots are the output and the update sources; a think
+ * loop that is live keeps its init and whatever its yield needs. Instructions
+ * are pure, so anything unreachable from a root is removed. Compiler-generated
+ * params (autodiff constants) that end up unreferenced are marked dead so the
+ * writers skip them. */
+static void dce_block(Block *b, char *live)
+{
+	int k = 0;
+	for (int i = b->len - 1; i >= 0; i--) {
+		Ins *in = &b->v[i];
+		if (!live[in->out]) {
+			in->out = -1; /* removed */
+			continue;
+		}
+		if (in->op == OP_THINK) {
+			live[in->init] = 1;
+			live[in->yield] = 1;
+			dce_block(in->body, live);
+		} else {
+			for (int j = 0; j < in->na; j++) live[in->a[j]] = 1;
+		}
+	}
+	for (int i = 0; i < b->len; i++)
+		if (b->v[i].out >= 0) b->v[k++] = b->v[i];
+	b->len = k;
+}
+
+static void dce(Module *m)
+{
+	char *live = xmalloc((size_t)m->nval);
+	live[m->output] = 1;
+	for (int i = 0; i < m->nupd; i++) live[m->upd_src[i]] = 1;
+	dce_block(&m->top, live);
+	for (int v = 0; v < m->nval; v++)
+		if (m->val[v].kind == V_PARAM && m->val[v].name && strncmp(m->val[v].name, "__", 2) == 0 && !live[v]) m->val[v].dead = 1;
+	xfree(live);
+	m->ndef = 0; /* the lowering tape is invalid after compaction */
+}
+
+/* Drop all updates and the code that only fed them (backward pass, optimizer
+ * arithmetic): the forward model alone, for fast evaluation. */
+void mod_strip_updates(Module *m)
+{
+	m->nupd = 0;
+	dce(m);
+}
+
 Module *lower(Sx *ast, const char *file)
 {
 	L l = { 0 };
@@ -438,7 +537,7 @@ Module *lower(Sx *ast, const char *file)
 		} else if (sx_issym(d->v[0], "def")) {
 			const char *dn = d->v[1]->s;
 			if (find_def(&l, dn)) die(file, d->line, "duplicate def '%s'", dn);
-			if (op_lookup(dn) >= 0 || strcmp(dn, "dot") == 0 || strcmp(dn, "grad") == 0) die(file, d->line, "'%s' shadows a builtin", dn);
+			if (op_lookup(dn) >= 0 || strcmp(dn, "dot") == 0 || strcmp(dn, "grad") == 0 || !strcmp(dn, "mse") || !strcmp(dn, "bce") || !strcmp(dn, "xent")) die(file, d->line, "'%s' shadows a builtin", dn);
 			l.defs = xrealloc(l.defs, (size_t)(l.ndefs + 1) * sizeof *l.defs);
 			l.defs[l.ndefs++] = d;
 			if (strcmp(dn, "forward") == 0) entry = d;
@@ -465,6 +564,7 @@ Module *lower(Sx *ast, const char *file)
 	Shape rt = to_shape(entry->v[3]);
 	if (!shape_eq(&rt, &l.m->val[r].sh)) die(file, entry->line, "'forward' return shape does not match its declaration");
 	l.m->output = r;
+	dce(l.m);
 	xfree(e.b);
 	return l.m;
 }

@@ -27,30 +27,50 @@ static void indent(FILE *f, int d)
 	for (int i = 0; i < d; i++) fputs("  ", f);
 }
 
+/* Canonical numbering: temporaries are numbered in the order the reader will
+ * recreate them (named values first, then instructions in pre-order, a think
+ * result before its body), so write(read(write(m))) == write(m) for any module,
+ * however it was built. */
+static int *ren;
+
+static void number(const Block *b, int *next)
+{
+	for (int i = 0; i < b->len; i++) {
+		ren[b->v[i].out] = (*next)++;
+		if (b->v[i].op == OP_THINK) number(b->v[i].body, next);
+	}
+}
+
+static void vname(const Module *m, int v, char *buf, size_t n)
+{
+	if (m->val[v].name) snprintf(buf, n, "%s", m->val[v].name);
+	else snprintf(buf, n, "%%%d", ren[v]);
+}
+
 static void write_block(const Module *m, const Block *b, FILE *f, int d)
 {
 	char sh[64], n0[64], n1[64], n2[64];
 	for (int i = 0; i < b->len; i++) {
 		const Ins *in = &b->v[i];
-		value_name(m, in->out, n0, sizeof n0);
+		vname(m, in->out, n0, sizeof n0);
 		shape_str(&m->val[in->out].sh, sh, sizeof sh);
 		indent(f, d);
 		fprintf(f, "(%s %s ", n0, sh);
 		if (in->op == OP_CONST) {
 			fprintf(f, "(const %.9g))\n", (double)in->k);
 		} else if (in->op == OP_THINK) {
-			value_name(m, in->init, n1, sizeof n1);
+			vname(m, in->init, n1, sizeof n1);
 			fprintf(f, "(think %s %d ", n1, in->maxit);
 			if (in->eps < 0) fputs("none\n", f);
 			else fprintf(f, "%.9g\n", (double)in->eps);
 			write_block(m, in->body, f, d + 1);
-			value_name(m, in->yield, n2, sizeof n2);
+			vname(m, in->yield, n2, sizeof n2);
 			indent(f, d + 1);
 			fprintf(f, "(yield %s)))\n", n2);
 		} else {
 			fprintf(f, "(%s", tg_ops[in->op].name);
 			for (int j = 0; j < in->na; j++) {
-				value_name(m, in->a[j], n1, sizeof n1);
+				vname(m, in->a[j], n1, sizeof n1);
 				fprintf(f, " %s", n1);
 			}
 			fputs("))\n", f);
@@ -61,10 +81,15 @@ static void write_block(const Module *m, const Block *b, FILE *f, int d)
 void ir_write(const Module *m, FILE *f)
 {
 	char sh[64], n[64];
+	ren = xmalloc((size_t)(m->nval ? m->nval : 1) * sizeof *ren);
+	int next = 0;
+	for (int v = 0; v < m->nval; v++)
+		if ((m->val[v].kind != V_TMP) && !m->val[v].dead) next++;
+	number(&m->top, &next);
 	fprintf(f, "(tgir 1\n  (model %s)\n", m->name);
 	for (int v = 0; v < m->nval; v++) {
 		const Value *x = &m->val[v];
-		if (x->kind != V_PARAM && x->kind != V_STATE) continue;
+		if ((x->kind != V_PARAM && x->kind != V_STATE) || x->dead) continue;
 		shape_str(&x->sh, sh, sizeof sh);
 		fprintf(f, "  (%s %s %s\n    (data", x->kind == V_STATE ? "state" : "param", x->name, sh);
 		int k = shape_numel(&x->sh);
@@ -81,14 +106,16 @@ void ir_write(const Module *m, FILE *f)
 	}
 	fputs("  (block\n", f);
 	write_block(m, &m->top, f, 2);
-	value_name(m, m->output, n, sizeof n);
+	vname(m, m->output, n, sizeof n);
 	fprintf(f, "  )\n  (output %s)", n);
 	for (int i = 0; i < m->nupd; i++) {
 		char s[64];
-		value_name(m, m->upd_src[i], s, sizeof s);
+		vname(m, m->upd_src[i], s, sizeof s);
 		fprintf(f, "\n  (update %s %s)", m->val[m->upd_state[i]].name, s);
 	}
 	fputs(")\n", f);
+	xfree(ren);
+	ren = NULL;
 }
 
 /* ---- reader / verifier -------------------------------------------------- */

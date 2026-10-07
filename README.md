@@ -29,7 +29,9 @@ file is the black box you ship to the target.
 
 ```sh
 make            # builds build/tgc (C11, no dependencies beyond libm; perl at build time)
-make test       # 128 checks: known answers, IR round trip, VM == compiled C, diagnostics, auto-fix, imports, file I/O, tracing, threads, self-updating state, autodiff
+build/tgc train hf:scikit-learn/iris            # any dataset, no configuration: detect, featurize, train, export
+build/tgc predict iris_model new_flowers.csv     # predictions on raw new data
+make test       # 147 checks (offline; TG_TEST_NETWORK=1 adds a Hugging Face run)
 make fixer      # retrain the auto-fix forest (deterministic, ~15 s) and evaluate it on held-out programs
 
 build/tgc run  examples/latent_reasoner.tg 1,0,0,1,0,1,1,0
@@ -211,6 +213,7 @@ every failure.
 - Survey: *A Survey on Latent Reasoning*, [arXiv:2507.06203](https://arxiv.org/abs/2507.06203).
 - Static arena planning, greedy by size: Pisarchyk & Lee, [arXiv:2001.03288](https://arxiv.org/abs/2001.03288).
 - Self-updating state: test-time training layers, [arXiv:2407.04620](https://arxiv.org/abs/2407.04620); Titans, [arXiv:2501.00663](https://arxiv.org/abs/2501.00663); DeltaNet, [arXiv:2406.06484](https://arxiv.org/abs/2406.06484); Gated DeltaNet, [arXiv:2412.06464](https://arxiv.org/abs/2412.06464); test-time regression as the unifying view, [arXiv:2501.12352](https://arxiv.org/abs/2501.12352). This is the basis for `state` and `update`.
+- Optimizers: Muon, [arXiv:2502.16982](https://arxiv.org/abs/2502.16982); optimizer comparison for tabular MLPs, [arXiv:2604.15297](https://arxiv.org/abs/2604.15297). Text features: feature hashing, Weinberger et al., [arXiv:0902.2206](https://arxiv.org/abs/0902.2206).
 - Automatic differentiation through `think` loops: Deep Equilibrium Models, [arXiv:1909.01377](https://arxiv.org/abs/1909.01377) (implicit differentiation at the fixed point); truncated adjoints are the Neumann-series phantom gradients related to Jacobian-free backpropagation, [arXiv:2103.12803](https://arxiv.org/abs/2103.12803).
 - Neural decision forests: Kontschieder et al., *Deep Neural Decision Forests*, ICCV 2015. This is the ranker architecture used by the auto-fixer.
 - Learning repair from compiler diagnostics with self-supervised corruption: Yasunaga & Liang, *DrRepair*, [arXiv:2005.10636](https://arxiv.org/abs/2005.10636), and *Break-It-Fix-It*, [arXiv:2106.06600](https://arxiv.org/abs/2106.06600). Repair as classification over diagnostics: SynShine, [arXiv:2104.14671](https://arxiv.org/abs/2104.14671).
@@ -223,10 +226,12 @@ src/        compiler: parse.c (surface), lower.c (inline/SSA), ir.c (TGIR read/w
             ops.c (op table + shape inference), plan.c (memory planner), vm.c, cgen.c, main.c
             fixer.c (repair operators, features, forest training and fix loop)
             autodiff.c (grad: reverse mode, implicit differentiation of think loops), par.c (threads)
+            optim.c (train statement, optimizers), data.c (dataset loading, inference, featurization),
+            autotrain.c (tgc train / predict / data)
 fixer/      forest.tg (trained ranker, a Technograd program), corpus/ (training programs)
 runtime/    tg_rt.h: kernels shared by the VM and the generated code
 examples/   xor.tg, newton.tg, latent_reasoner.tg, activations.tg + use_import.tg (cross-file),
-            delta_memory.tg, drift_calibration.tg (self-updating state), train_xor.tg (training via grad)
-tests/      run.sh, positive cases, diagnostic cases, fix/ (auto-fix), imports/ (cross-file)
+            delta_memory.tg, drift_calibration.tg (self-updating state), train_xor.tg (train + adamw), sgd_by_hand.tg (the same, via grad + update)
+tests/      run.sh, positive cases, diagnostic cases, fix/ (auto-fix), imports/ (cross-file), data/ (datasets)
 docs/       SPEC.md
 ```

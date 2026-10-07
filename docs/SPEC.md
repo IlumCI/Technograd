@@ -90,6 +90,7 @@ and parentheses. All binary operators are left associative.
 | `outer(a, b)` | `(m),(n)->(m,n)`, `a b^T`; the rank-1 write of delta-rule and Hebbian updates |
 | `step(x)` | elementwise `x > 0 ? 1 : 0`; the derivative of relu, max and min |
 | `grad(y, x)` | `y` scalar, `x` a name; returns dy/dx with the shape of `x` (section 16) |
+| `mse(p, t)`, `bce(p, t)`, `xent(logits, onehot)` | scalar losses (section 17) |
 
 ## 7. `think`: continuous latent loops
 
@@ -392,12 +393,17 @@ update w = w - lr * grad(loss, w)          # one SGD step, inside the model
 
 Reverse mode, as a source-to-source transform during lowering:
 
-1. The instructions on paths from `x` to `y` are collected from the lowering
-   tape.
-2. They are processed in reverse definition order, each contributing
-   vector-Jacobian products to its operands.
-3. Operands that do not depend on `x` receive nothing, so no gradient code is
-   emitted for them.
+1. The first `grad(y, \.)` in a block runs one full backward pass over the
+   instructions that reach `y` (collected from the lowering tape). It computes
+   the adjoint of every value on the way and caches the result.
+2. Every later `grad` of the same `y` in that block reuses the cached pass, so
+   `n` gradients of one loss cost one backward pass. The XOR trainer drops
+   from 61 to 31 instructions.
+3. Dead-code elimination then removes the adjoints nobody uses. It runs on
+   every program; its roots are the output and the update sources.
+4. TGIR is written canonically: temporaries are numbered in the order the
+   reader recreates them. Write, read, write is therefore a fixed point for
+   any module, including those with compiler-generated values.
 
 The gradient becomes ordinary instructions, so TGIR has no `grad` form. The
 planner, the VM, threading and the C backend are unchanged, and a training
@@ -436,8 +442,8 @@ gradient  theta_bar = (df/dtheta)^T u
 
 A model whose weights are `state` and which applies
 `update w = w - lr * grad(loss, w)` takes one SGD step per run. So
-`tgc batch` over a dataset is online training (`examples/train_xor.tg` learns
-XOR in 6000 steps).
+`tgc batch` over a dataset is online training (`examples/sgd_by_hand.tg` learns
+XOR in 6000 steps; `examples/train_xor.tg` is the same model using `train`).
 
 `--save-state PREFIX` writes each state to `PREFIX.<name>.bin` as raw
 little-endian f32, the format `param w : ... = file("PREFIX.w.bin")` loads. A
@@ -451,7 +457,165 @@ model itself also compiles to C (about 11.5 KB for the XOR MLP, using only
 implicit-differentiation cases, against central finite differences (22 cases,
 worst relative error 2.6e-4). A planted bug in one rule makes 9 cases fail.
 
-## 17. Roadmap
+## 17. Training statement and optimizers
+
+```python
+train LOSS [with OPTIMIZER[(option=value, ...)]] [over w1, w2, ...]
+```
+
+`train` turns a scalar loss into one optimizer step per run. It has the same
+placement rules as `update`: only in the body of `forward`, and not inside
+`think`.
+
+- **Weights.** Without `over`, the weights are every `state` the loss depends
+  on that no explicit `update` already changes. The shared backward pass
+  answers which ones those are.
+- **Expansion.** Gradients come from one shared backward pass (section 16).
+  Optimizer moments and step counters become hidden states named `__opt_*`.
+  The step itself becomes ordinary `update`s, so a training model compiles to
+  TGIR, the VM and C like any other.
+- **Saved state.** `--save-state` writes the weights and skips `__opt_*`.
+
+| Optimizer | Step | Defaults |
+|-----------|------|----------|
+| `sgd` | `w -= lr g` | lr 0.01 |
+| `momentum` | `m = mu m + g; w -= lr m` | lr 0.01, momentum 0.9 |
+| `adam` | Adam with bias correction | lr 0.001, beta1 0.9, beta2 0.999, eps 1e-8 |
+| `adamw` (default) | Adam + decoupled weight decay | as adam, wd 0.01 |
+| `muon` | rank-2 weights: Nesterov momentum orthogonalized by 5 quintic Newton–Schulz steps, scaled by 0.2·sqrt(max(rows, cols)) to share AdamW's learning rate (arXiv:2502.16982); other weights: AdamW | lr 0.001, momentum 0.95, wd 0.01 |
+
+`clip=c` (any optimizer) rescales all gradients so that their global L2 norm
+is at most `c`. An unknown optimizer or option is a compile error that lists
+the valid ones.
+
+Loss builtins expand to existing operations, so they differentiate like any
+other expression:
+
+| Builtin | Definition |
+|---------|-----------|
+| `mse(p, t)` | `mean((p - t)^2)` |
+| `bce(p, t)` | `-mean(t log(p + 1e-7) + (1 - t) log(1 - p + 1e-7))` |
+| `xent(logits, onehot)` | `-sum(onehot * log(softmax(logits) + 1e-12))` |
+
+### Choosing a default (measured)
+
+Each step is one sample, so an optimizer's per-step arithmetic is paid on
+every row.
+
+- **Muon's cost.** Its Newton–Schulz orthogonalization costs about 40 M FLOPs
+  per step on a 32×4096 layer: 112 ms per sample against AdamW's 4.5 ms
+  (SST-2 bag-of-words model), 25× slower.
+- **Quality.** On XOR all five optimizers converge (worst error < 0.01 over the
+  last 400 samples). On the tabular and text tasks below, AdamW at lr 0.003 was
+  as accurate as any alternative tried.
+- **Decision.** AdamW is the default. Muon is fully supported, and is the
+  right choice once steps are taken per mini-batch (roadmap).
+
+## 18. Datasets and one-command training
+
+```
+tgc train SOURCE [-o DIR] [--target COL] [--epochs N] [--hidden H] [--lr X]
+                 [--optimizer NAME] [--val FRACTION] [--max-rows N] [--seed S]
+tgc predict DIR SOURCE [-o OUT.csv]
+tgc data inspect SOURCE [--target COL]
+tgc data prep SOURCE -o OUT.csv [--target COL]
+```
+
+### Sources
+
+The format is detected from the extension, falling back to the content.
+
+| SOURCE | Read as |
+|--------|---------|
+| `*.csv`, `*.tsv`, other text | delimited text: delimiter sniffed among `,` tab `;` `\|`; header detected; RFC 4180 quoting; CRLF |
+| `*.jsonl`, `*.ndjson` | one JSON object per line |
+| `*.json` | an array of objects or arrays, or an object holding one (`rows`, `data`, `records`, ...); Hugging Face API pages are recognized |
+| `*.npy` | NumPy arrays: f4/f8, signed and unsigned integers, 1-D or 2-D, C order |
+| `hf:OWNER/NAME[/CONFIG[/SPLIT]]` | the Hugging Face datasets-server rows API |
+
+Notes on `hf:` sources:
+
+- **Fetching** uses `curl`, spawned directly with no shell, with retries for
+  rate limits and server errors.
+- **Defaults:** the first config, and the `train` split when one exists.
+- **Paging and size:** the dataset is fetched in pages of 100 rows, up to
+  `--max-rows` (default 20000).
+- **Caching:** pages are cached under `$XDG_CACHE_HOME/technograd` (or
+  `~/.cache/technograd`). The cache file is renamed into place only after a
+  complete fetch, so an interrupted download is never mistaken for a dataset.
+- **Gated datasets:** `HF_TOKEN` is sent when set.
+
+### Inference
+
+Each column is classified:
+
+| Kind | When | Features |
+|------|------|----------|
+| numeric | every value parses as a number | standardized; plus a 0/1 missing-value indicator if the column has missing values |
+| categorical | strings with few distinct values (≤ 64, or ≤ 5% of rows and short) | one-hot over the 32 most frequent values |
+| text | longer strings with many distinct values | 1024 signed hashed word-unigram buckets (feature hashing; `--text-dim N`), L2-normalized |
+| vector | fixed-length numeric lists | each component standardized |
+| dropped | identifiers (`id`, `*_id`, ...; or unique increasing integers), nested objects (images, audio), lists of varying length, empty columns | none, and the reason is printed |
+
+Two further rules:
+
+- **Leak guard.** A low-cardinality column whose values determine the target
+  exactly (for example `label_text` next to `label`) is dropped as
+  *"determines the target exactly (would leak the answer)"*.
+- **Target choice.** Without `--target`, a column named `label`, `target`,
+  `class`, `y`, `species`, `category`, ... is preferred; otherwise the last
+  usable column is taken. A categorical target, or one with few integer
+  values, gives classification (softmax, `xent`). Anything else gives
+  regression on the standardized target (`mse`), reported in original units.
+
+### Training
+
+1. **Split and fit.** A seeded split (default 20% validation) is made, and the
+   featurization (means, standard deviations, vocabularies) is fitted on the
+   training rows only.
+2. **Model.** The generated model is `D -> H (gelu) -> C`, with Glorot-uniform
+   initial weights. `H` is 16 for at most 8 inputs, 64 for 9 to 512 inputs,
+   and 32 otherwise, since wide sparse inputs overfit a wide layer. The model
+   trains with `train ... with adamw(lr=0.003)`.
+3. **Epochs and stopping.**
+   - Training runs `clamp(100000 / training rows, 20, 300)` epochs, with rows
+     shuffled each epoch.
+   - After each epoch, validation runs on a forward-only copy of the model.
+     The copy has its updates removed, so dead-code elimination drops the
+     backward pass, and it reads the training weights in place.
+   - The weights with the best validation loss are kept. Training stops
+     early after `max(10, epochs/5)` epochs without improvement.
+4. **Artifacts.** `DIR` (default `<name>_model`) receives:
+
+   | File | Contents |
+   |------|----------|
+   | `model.tg` | the training model, readable and editable |
+   | `infer.tg` | the frozen inference model, loading `weights.*.bin` via `file()` |
+   | `infer.c` | the inference model compiled to a freestanding C unit |
+   | `features.tgf` | the featurization, as plain text |
+   | `report.txt` | the run summary |
+
+`tgc predict DIR SOURCE` applies `features.tgf` to new raw data, matching
+columns by name in any order. A missing column counts as missing values. It
+prints `prediction,confidence` (classification) or `prediction` (regression,
+in original units), and reports accuracy or RMSE when the target column is
+present.
+
+### Measured
+
+| Dataset (no configuration given) | Result |
+|----------------------------------|--------|
+| `hf:scikit-learn/iris` (150 rows) | 93.3% validation accuracy; `Id` dropped as an identifier; 1.3 s including download |
+| `hf:SetFit/sst2` (6920 sentences) | 69.4% validation accuracy in 36 s; `label_text` caught as a leak |
+| SST-2 with `--text-dim 4096` | 72.4% (465 s); a linear bag-of-words model on the same features reaches 75.7% |
+| synthetic `y = 3 x1 - 2 x2 + [red] 1.5 + noise`, 3% missing `x2` | predictions 2.99 and -0.52 for true 3.0 and -0.5 |
+| synthetic 3-class blobs | 100% (regression-tested) |
+
+On text, unigrams outperformed unigrams+bigrams at every bucket count tried
+(256 to 4096). With a few thousand sentences, bigram collisions add more
+noise than signal.
+
+## 19. Roadmap
 
 Ordered by importance for latent-reasoning models on embedded targets:
 
@@ -464,7 +628,10 @@ Ordered by importance for latent-reasoning models on embedded targets:
    backpropagation through time with a statically planned activation store.
 4. Learned halting heads (`until` driven by a predicate value) in addition to
    convergence halting.
-5. Optimizer states (momentum, Adam) as library `def`s over `state`, and
-   multi-target `grad` that shares one reverse pass.
-6. Native backends from the planned IR: ARMv7-M/ARMv8-M assembly with
+5. Mini-batch steps: gradient accumulation with a conditionally executed
+   update block, so per-step optimizer cost (Muon's orthogonalization above
+   all) is paid once per batch.
+6. Sparse tensors for hashed text features (about 30 active of 1024+ buckets
+   per row), making wide text models proportionally cheaper.
+7. Native backends from the planned IR: ARMv7-M/ARMv8-M assembly with
    CMSIS-NN style kernels, and RISC-V with the vector extension.

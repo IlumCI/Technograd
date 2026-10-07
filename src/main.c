@@ -14,6 +14,9 @@ static void usage(void)
 	      "  batch <file> <data> [-o out]    one sample per text row, or a raw .bin/.f32 stream\n"
 	      "  c     <file> [-o out.c]   emit a freestanding C unit\n"
 	      "  fix   <file> [-o out.tg]  repair compile errors with the neural-forest fixer\n"
+	      "  train SOURCE [-o DIR] [--target COL] ...  train a model on a dataset file or hf:OWNER/NAME\n"
+	      "  predict DIR SOURCE [-o out.csv]           predict with a model from `tgc train`\n"
+	      "  data inspect|prep SOURCE ...              show what a dataset contains / write numeric features\n"
 	      "  fixer-train -o forest.tg <corpus.tg>...   train the fixer (self-supervised)\n"
 	      "  fixer-eval <corpus.tg>...                 measure repair rates on corrupted programs\n"
 	      "options:\n"
@@ -239,7 +242,7 @@ static void save_states(const Module *m, const char *prefix, const char *cmd)
 	int any = 0;
 	for (int v = 0; v < m->nval; v++) {
 		const Value *x = &m->val[v];
-		if (x->kind != V_STATE) continue;
+		if (x->kind != V_STATE || strncmp(x->name, "__", 2) == 0) continue; /* weights, not optimizer moments */
 		any = 1;
 		size_t len = strlen(prefix) + strlen(x->name) + 8;
 		char *path = xmalloc(len);
@@ -307,6 +310,7 @@ int main(int argc, char **argv)
 	par_init(threads);
 	const char *cmd = argv[1];
 
+	if (!strcmp(cmd, "train") || !strcmp(cmd, "predict") || !strcmp(cmd, "data")) return autotrain_main(argc, argv);
 	if (strcmp(cmd, "fixer-train") == 0) {
 		if (argc < 5 || strcmp(argv[2], "-o") != 0) usage();
 		return fixer_train(argv[3], argv + 4, argc - 4);

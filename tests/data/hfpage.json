@@ -1,0 +1,1 @@
+{"features":[{"name":"a"},{"name":"b"}],"rows":[{"row_idx":0,"row":{"a":1,"b":"x \"quoted\" é"},"truncated_cells":[]},{"row_idx":1,"row":{"a":2,"b":"y"},"truncated_cells":[]}],"num_rows_total":2}

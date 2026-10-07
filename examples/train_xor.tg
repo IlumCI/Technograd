@@ -1,14 +1,14 @@
-# Training inside the language: the network's weights are `state`, and every
-# run takes one stochastic-gradient step on the sample it just saw. Running
-# `tgc batch` over a dataset is online SGD; `--save-state` exports the result
-# as raw f32 files that `param ... = file("...")` loads for deployment.
+# Training inside the language: the weights are `state`, and the `train`
+# statement takes one optimizer step per run (one shared backward pass,
+# AdamW moments kept as hidden state). Running `tgc batch` over a dataset is
+# online training; `--save-state` exports the weights as raw f32 files that
+# `param ... = file("...")` loads for deployment.
 model train_xor
 
 state w1 : f32[4, 2] = rand(1, 1)
 state b1 : f32[4] = zeros
 state w2 : f32[4] = rand(2, 1)
 state b2 : f32 = 0
-param lr : f32 = 0.5
 
 def net(x: f32[2]) -> f32:
     h = tanh(w1 @ x + b1)
@@ -16,9 +16,5 @@ def net(x: f32[2]) -> f32:
 
 def forward(x: f32[2], target: f32) -> f32:
     p = net(x)
-    loss = (p - target) * (p - target)
-    update w1 = w1 - lr * grad(loss, w1)
-    update b1 = b1 - lr * grad(loss, b1)
-    update w2 = w2 - lr * grad(loss, w2)
-    update b2 = b2 - lr * grad(loss, b2)
+    train bce(p, target) with adamw(lr=0.02)
     return p

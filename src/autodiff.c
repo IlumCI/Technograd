@@ -47,6 +47,7 @@ typedef struct {
 	int hs;        /* a value always wanted (h* in the adjoint solve), or -1 */
 	int excl;      /* a value never wanted (h* in the parameter pass), or -1 */
 	int use_dep;   /* also want values that depend on x */
+	int all;       /* full backward pass: every value on the tape gets its adjoint */
 } AD;
 
 /* ---- maps --------------------------------------------------------------- */
@@ -204,7 +205,7 @@ static int want(AD *a, int v)
 	if (v == a->excl) return 0;
 	if (v >= a->clo && v < a->chi) return 1;
 	if (v == a->hs) return 1;
-	return a->use_dep && depends(a, v);
+	return a->use_dep && (a->all || depends(a, v));
 }
 
 static void acc(AD *a, Adj *adj, int v, int c)
@@ -494,7 +495,7 @@ static void collect_cb(void *ctx, int v) { collect(ctx, v); }
 static void collect(Tape *tp, int v)
 {
 	AD *a = tp->a;
-	if (v == a->x || tp->seen[v] || !depends(a, v)) return;
+	if (v == a->x || tp->seen[v] || (!a->all && !depends(a, v))) return;
 	tp->seen[v] = 1;
 	const Ins *in = def_of(a->m, v);
 	if (!in) return;
@@ -512,14 +513,19 @@ static int by_out_desc(const void *p, const void *q)
 	return s->b->v[s->i].out - r->b->v[r->i].out;
 }
 
-int ad_grad(Module *m, Block *b, int y, int x, const char *file, int line)
+/* One full backward pass per (objective, block), shared by every grad() of
+ * that objective: the first call computes the adjoint of every value on the
+ * tape and caches the map; later calls look theirs up. Adjoints nobody uses
+ * are removed by dead-code elimination after lowering. */
+static GradCache *gc_get(AD *a0, int y)
 {
-	AD a = { m, b, file, line, x, NULL, 0, 0, 0, -1, -1, 1 };
-	if (y == x) return K(&a, 1);
-	int result;
-	if (!depends(&a, y)) {
-		result = E(&a, OP_MUL, ONES(&a, SH(&a, x)), K(&a, 0));
-	} else {
+	AD a = *a0;
+	Module *m = a.m;
+	Block *b = a.b;
+	GradCache *c = NULL;
+	for (int i = 0; i < m->ngcache; i++)
+		if (m->gcache[i].y == y && m->gcache[i].b == b) c = &m->gcache[i];
+	if (!c) {
 		Tape tp = { &a, xmalloc((size_t)m->nval), NULL, 0, 0 };
 		collect(&tp, y);
 		qsort(tp.v, (size_t)tp.n, sizeof *tp.v, by_out_desc);
@@ -532,12 +538,54 @@ int ad_grad(Module *m, Block *b, int y, int x, const char *file, int line)
 			if (in.op == OP_THINK) think_vjp(&a, in, g, &adj);
 			else vjp(&a, &in, g, &adj);
 		}
-		result = adj_get(&adj, x);
-		if (result < 0) result = E(&a, OP_MUL, ONES(&a, SH(&a, x)), K(&a, 0));
-		xfree(adj.v);
 		xfree(tp.v);
 		xfree(tp.seen);
+		m->gcache = xrealloc(m->gcache, (size_t)(m->ngcache + 1) * sizeof *m->gcache);
+		c = &m->gcache[m->ngcache++];
+		c->y = y;
+		c->b = b;
+		c->adj = adj.v;
+		c->nadj = adj.n;
+		if (tr_on(2)) {
+			tr_begin(2, "grad");
+			tr_num("objective", y);
+			tr_num("tape", tp.n);
+			tr_end("backward pass for objective %%%d over %d instruction(s), shared by later grad() calls", y, tp.n);
+		}
 	}
 	xfree(a.dep);
-	return result;
+	return c;
+}
+
+int ad_grad(Module *m, Block *b, int y, int x, const char *file, int line)
+{
+	AD a = { m, b, file, line, -1, NULL, 0, 0, 0, -1, -1, 1, 1 };
+	if (y == x) return K(&a, 1);
+	GradCache *c = gc_get(&a, y);
+	int r = x < c->nadj ? c->adj[x] : -1;
+	if (r < 0) r = E(&a, OP_MUL, ONES(&a, SH(&a, x)), K(&a, 0)); /* y does not depend on x */
+	xfree(a.dep);
+	return r;
+}
+
+/* Does y depend on x? Answered from the shared backward pass. */
+int ad_depends(Module *m, Block *b, int y, int x, const char *file, int line)
+{
+	if (y == x) return 1;
+	AD a = { m, b, file, line, -1, NULL, 0, 0, 0, -1, -1, 1, 1 };
+	GradCache *c = gc_get(&a, y);
+	return x < c->nadj && c->adj[x] >= 0;
+}
+
+/* Shape-checked emission for other compiler passes (optimizers, losses). */
+int ir_op(Module *m, Block *b, Op op, int p, int q, const char *file, int line)
+{
+	AD a = { m, b, file, line, -1, NULL, 0, 0, 0, -1, -1, 1, 1 };
+	return E(&a, op, p, q);
+}
+
+int ir_k(Module *m, Block *b, float k)
+{
+	AD a = { m, b, "", 0, -1, NULL, 0, 0, 0, -1, -1, 1, 1 };
+	return K(&a, k);
 }

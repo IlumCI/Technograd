@@ -166,7 +166,7 @@ void cgen(const Module *m, FILE *f)
 
 	for (int v = 0; v < m->nval; v++) {
 		const Value *x = &m->val[v];
-		if (x->kind != V_PARAM) continue;
+		if (x->kind != V_PARAM || x->dead) continue;
 		int n = shape_numel(&x->sh);
 		fprintf(f, "static const float tgp_%s[%d] = {", x->name, n);
 		for (int i = 0; i < n; i++) {

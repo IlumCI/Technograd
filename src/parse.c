@@ -161,7 +161,7 @@ static Tok *expect(P *p, TokKind k, const char *what)
 	return t;
 }
 
-static const char *kw[] = { "model", "param", "def", "return", "think", "for", "until", "f32", "import", "state", "update", NULL };
+static const char *kw[] = { "model", "param", "def", "return", "think", "for", "until", "f32", "import", "state", "update", "train", "with", "over", NULL };
 
 static Tok *expect_name(P *p)
 {
@@ -338,6 +338,37 @@ static Sx *stmt(P *p)
 		Sx *e = expr(p);
 		expect(p, T_NL, "end of line");
 		return sx_list(line, 2, sx_sym("return", line), e);
+	}
+	if (iskw(t, "train")) {
+		next(p);
+		Sx *e = expr(p);
+		Sx *opt = sx_sym("default", line), *kv = sx_new(SX_LIST, line), *over = sx_new(SX_LIST, line);
+		if (iskw(peek(p), "with")) {
+			next(p);
+			Tok *o = expect(p, T_NAME, "optimizer name");
+			opt = sx_sym(o->s, o->line);
+			if (isop(peek(p), "(")) {
+				next(p);
+				for (;;) {
+					Tok *k = expect(p, T_NAME, "option name");
+					expect_op(p, "=");
+					sx_push(kv, sx_list(k->line, 2, sx_sym(k->s, k->line), sx_num(signed_num(p), k->line)));
+					if (isop(peek(p), ")")) { next(p); break; }
+					expect_op(p, ",");
+				}
+			}
+		}
+		if (iskw(peek(p), "over")) {
+			next(p);
+			for (;;) {
+				Tok *n = expect_name(p);
+				sx_push(over, sx_sym(n->s, n->line));
+				if (!isop(peek(p), ",")) break;
+				next(p);
+			}
+		}
+		expect(p, T_NL, "end of line");
+		return sx_list(line, 5, sx_sym("train", line), e, opt, kv, over);
 	}
 	if (iskw(t, "update")) {
 		next(p);

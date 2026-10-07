@@ -1,0 +1,25 @@
+# Training by hand: what `train` expands to, written out with grad() and
+# update. The weights are `state`, and every run takes one plain SGD step on
+# the sample it just saw. See train_xor.tg for the one-line `train` form. Running
+# `tgc batch` over a dataset is online SGD; `--save-state` exports the result
+# as raw f32 files that `param ... = file("...")` loads for deployment.
+model sgd_by_hand
+
+state w1 : f32[4, 2] = rand(1, 1)
+state b1 : f32[4] = zeros
+state w2 : f32[4] = rand(2, 1)
+state b2 : f32 = 0
+param lr : f32 = 0.5
+
+def net(x: f32[2]) -> f32:
+    h = tanh(w1 @ x + b1)
+    return sigmoid(dot(w2, h) + b2)
+
+def forward(x: f32[2], target: f32) -> f32:
+    p = net(x)
+    loss = (p - target) * (p - target)
+    update w1 = w1 - lr * grad(loss, w1)
+    update b1 = b1 - lr * grad(loss, b1)
+    update w2 = w2 - lr * grad(loss, w2)
+    update b2 = b2 - lr * grad(loss, b2)
+    return p

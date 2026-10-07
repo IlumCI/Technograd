@@ -102,10 +102,17 @@ typedef struct {
 	char *name;  /* params/inputs; NULL for temporaries */
 	float *data; /* params */
 	int index;   /* inputs: position in the entry signature */
+	int dead;    /* compiler-generated param left unused after dead-code elimination */
 	int def, last, off; /* filled by the planner (temporaries only) */
 } Value;
 
 typedef struct Block Block;
+
+typedef struct GradCache {
+	int y;
+	Block *b;
+	int *adj, nadj; /* value -> adjoint value, or -1 */
+} GradCache;
 
 typedef struct {
 	Op op;
@@ -144,6 +151,8 @@ typedef struct {
 	Block **def_blk;
 	int *def_idx, ndef;
 	int *open_think, nopen;
+	struct GradCache *gcache; /* shared backward passes, see autodiff.c */
+	int ngcache;
 	int arena; /* floats */
 	int planned;
 	int trace; /* VM tracing enabled (the user's model only) */
@@ -155,12 +164,18 @@ Ins *block_push(Block *b);
 void mod_update(Module *m, int state, int src); /* record `update state = src` */
 void mod_note_def(Module *m, int v, Block *b, int idx); /* record b->v[idx] as v's definition */
 int ad_grad(Module *m, Block *b, int y, int x, const char *file, int line); /* autodiff.c */
+int ad_depends(Module *m, Block *b, int y, int x, const char *file, int line);
+int ir_op(Module *m, Block *b, Op op, int p, int q, const char *file, int line); /* emit, shape-checked */
+int ir_k(Module *m, Block *b, float k);
+void optim_train(Module *m, Block *b, int loss, const char *opt, const char **keys, const double *vals, int nkv,
+		 const int *over, int nover, const char *file, int line); /* optim.c */
 void value_name(const Module *m, int v, char *buf, size_t n);
 
 /* frontends */
 Sx *surface_parse(const char *src, const char *file);
 Sx *surface_load(const char *path); /* parse + merge `import` declarations */
 Module *lower(Sx *ast, const char *file);
+void mod_strip_updates(Module *m); /* forward-only copy for evaluation */
 Module *ir_read(Sx *forms, const char *file);
 Module *load_module(const char *path);
 
@@ -203,5 +218,6 @@ void io_write_row(FILE *f, int binary, const float *v, int n, const int *steps, 
 char *autofix(const char *src, const char *path, int verbose, int *nfixed); /* NULL if unrepaired */
 int fixer_train(const char *out, char **corpus, int n);
 int fixer_eval(char **corpus, int n);
+int autotrain_main(int argc, char **argv); /* autotrain.c: train, predict, data */
 
 #endif
