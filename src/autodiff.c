@@ -214,10 +214,17 @@ static void acc(AD *a, Adj *adj, int v, int c)
 	adj_put(adj, v, prev < 0 ? c : E(a, OP_ADD, prev, c));
 }
 
-/* Sum a broadcast contribution back to a scalar operand. */
+/* Sum a broadcast contribution back to its operand's shape: to a scalar, or
+ * over the rows a row-broadcast operand was repeated across. */
 static int red(AD *a, int c, int operand)
 {
-	return SH(a, operand)->rank == 0 && SH(a, c)->rank != 0 ? E1(a, OP_SUM, c) : c;
+	const Shape *so = SH(a, operand), *sc = SH(a, c);
+	if (so->rank == sc->rank) return c;
+	if (so->rank == 0) return E1(a, OP_SUM, c);
+	if (sc->rank != 2 || so->rank != 1)
+		die(a->file, a->line, "autodiff of row broadcasting supports a vector over the rows of a matrix");
+	Shape rows = { 1, { sc->dim[0] } };
+	return E(a, OP_MATMUL, ONES(a, &rows), c); /* ones(R) @ g: column sums */
 }
 
 /* ---- row helpers for rank-2 softmax/rmsnorm ------------------------------ */

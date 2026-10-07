@@ -80,7 +80,7 @@ and parentheses. All binary operators are left associative.
 
 | Builtin | Shape rule |
 |---------|------------|
-| `a + b`, `a - b`, `a * b`, `a / b`, `max(a,b)`, `min(a,b)` | equal shapes, or either operand scalar (broadcast) |
+| `a + b`, `a - b`, `a * b`, `a / b`, `max(a,b)`, `min(a,b)` | equal shapes; either operand scalar; or one operand's shape equal to the trailing dimensions of the other (row broadcast: `(B,H) + (H)` adds the vector to every row) |
 | `-a`, `neg tanh relu sigmoid exp sqrt gelu silu` | elementwise, shape preserved; `gelu` uses the tanh approximation |
 | `a @ b` (`matmul`, `dot`) | `(m,k)@(k)->(m)`, `(m,k)@(k,n)->(m,n)`, `(k)@(k,n)->(n)`, `(k)@(k)->()` |
 | `softplus(x)`, `log(x)` | elementwise; softplus is overflow-free: `max(x,0) + log1p(exp(-|x|))` |
@@ -411,7 +411,8 @@ model compiles to freestanding C like any other.
 
 **Coverage.** Every builtin has a derivative:
 
-- broadcasting operands are summed back to their shape;
+- broadcasting operands are summed back to their shape: a scalar by `sum`,
+  a row-broadcast vector over the rows of a matrix by `ones(B) @ g`;
 - `max`/`min`/`relu` send the gradient through the selected operand, with ties
   going to the second;
 - `softmax` and `rmsnorm` are supported on rank 1 and 2;
@@ -495,27 +496,35 @@ other expression:
 |---------|-----------|
 | `mse(p, t)` | `mean((p - t)^2)` |
 | `bce(p, t)` | `-mean(t log(p + 1e-7) + (1 - t) log(1 - p + 1e-7))` |
-| `xent(logits, onehot)` | `-sum(onehot * log(softmax(logits) + 1e-12))` |
+| `xent(logits, onehot)` | `-sum(onehot * log(softmax(logits) + 1e-12))`; for a batch of logits `(B, C)` the sum is divided by `B` (mean over rows) |
 
 ### Choosing a default (measured)
 
-Each step is one sample, so an optimizer's per-step arithmetic is paid on
-every row.
+A step's cost is paid once per mini-batch: a model whose input is a batch
+`(B, D)` takes one optimizer step per `B` rows (section 18).
 
 - **Muon's cost.** Its Newton–Schulz orthogonalization costs about 40 M FLOPs
-  per step on a 32×4096 layer: 112 ms per sample against AdamW's 4.5 ms
-  (SST-2 bag-of-words model), 25× slower.
+  per step on a 32×4096 layer. With one step per sample this was 112 ms per
+  sample against AdamW's 4.5 ms (25×); with batch 32 the gap is 24 s against
+  5 s for a full SST-2 run.
 - **Quality.** On XOR all five optimizers converge (worst error < 0.01 over the
-  last 400 samples). On the tabular and text tasks below, AdamW at lr 0.003 was
-  as accurate as any alternative tried.
-- **Decision.** AdamW is the default. Muon is fully supported, and is the
-  right choice once steps are taken per mini-batch (roadmap).
+  last 400 samples). With batch 32, lr 0.01, 3 seeds:
+
+  | Task | AdamW | Muon |
+  |------|-------|------|
+  | iris (accuracy) | 96.67% | similar |
+  | regression (RMSE) | 0.48 | similar |
+  | 3-class blobs | 100% | 100% |
+  | SST-2 (accuracy, time) | 69.73%, 5 s | 69.94%, 24 s |
+
+- **Decision.** AdamW at lr 0.01 is the default. Muon is fully supported and
+  marginally more accurate on text at about 5× the time.
 
 ## 18. Datasets and one-command training
 
 ```
 tgc train SOURCE [-o DIR] [--target COL] [--epochs N] [--hidden H] [--lr X]
-                 [--optimizer NAME] [--val FRACTION] [--max-rows N] [--seed S]
+                 [--batch B] [--text-dim N] [--optimizer NAME] [--val FRACTION] [--max-rows N] [--seed S]
 tgc predict DIR SOURCE [-o OUT.csv]
 tgc data inspect SOURCE [--target COL]
 tgc data prep SOURCE -o OUT.csv [--target COL]
@@ -573,16 +582,20 @@ Two further rules:
 1. **Split and fit.** A seeded split (default 20% validation) is made, and the
    featurization (means, standard deviations, vocabularies) is fitted on the
    training rows only.
-2. **Model.** The generated model is `D -> H (gelu) -> C`, with Glorot-uniform
-   initial weights. `H` is 16 for at most 8 inputs, 64 for 9 to 512 inputs,
-   and 32 otherwise, since wide sparse inputs overfit a wide layer. The model
-   trains with `train ... with adamw(lr=0.003)`.
+2. **Model.** The generated model is `D -> H (gelu) -> C` over a batch:
+   `h = gelu(x @ w1 + b1); return h @ w2 + b2` with `x : f32[B, D]`, weights
+   stored `(in, out)` and Glorot-uniform initial weights. `H` is 16 for at
+   most 8 inputs, 32 for 9 to 64 inputs, 64 for 65 to 512 inputs, and 32
+   above that, since wide sparse inputs overfit a wide layer. The model trains with
+   `train ... with adamw(lr=0.01)`. `B` is 32 by default (`--batch`), capped
+   at the number of training rows.
 3. **Epochs and stopping.**
-   - Training runs `clamp(100000 / training rows, 20, 300)` epochs, with rows
-     shuffled each epoch.
-   - After each epoch, validation runs on a forward-only copy of the model.
-     The copy has its updates removed, so dead-code elimination drops the
-     backward pass, and it reads the training weights in place.
+   - Training runs `clamp(ceil(3000 B / training rows), 20, 500)` epochs, a
+     budget of about 3000 optimizer steps. Rows are shuffled each epoch and
+     packed into batches of `B`; the last partial batch is dropped.
+   - After each epoch, validation runs on a generated single-row,
+     forward-only model with no `train` statement, so it carries no backward
+     pass; its weights point at the training states in place.
    - The weights with the best validation loss are kept. Training stops
      early after `max(10, epochs/5)` epochs without improvement.
 4. **Artifacts.** `DIR` (default `<name>_model`) receives:
@@ -605,9 +618,9 @@ present.
 
 | Dataset (no configuration given) | Result |
 |----------------------------------|--------|
-| `hf:scikit-learn/iris` (150 rows) | 93.3% validation accuracy; `Id` dropped as an identifier; 1.3 s including download |
-| `hf:SetFit/sst2` (6920 sentences) | 69.4% validation accuracy in 36 s; `label_text` caught as a leak |
-| SST-2 with `--text-dim 4096` | 72.4% (465 s); a linear bag-of-words model on the same features reaches 75.7% |
+| `hf:scikit-learn/iris` (150 rows) | 96.67% validation accuracy (mean of 3 seeds); `Id` dropped as an identifier |
+| `hf:SetFit/sst2` (6920 sentences) | 69.73% validation accuracy in 5 s (36 s with one step per sample); `label_text` caught as a leak |
+| SST-2 with `--text-dim 4096`, one step per sample | 72.4% (465 s); a linear bag-of-words model on the same features reaches 75.7% |
 | synthetic `y = 3 x1 - 2 x2 + [red] 1.5 + noise`, 3% missing `x2` | predictions 2.99 and -0.52 for true 3.0 and -0.5 |
 | synthetic 3-class blobs | 100% (regression-tested) |
 
@@ -628,10 +641,7 @@ Ordered by importance for latent-reasoning models on embedded targets:
    backpropagation through time with a statically planned activation store.
 4. Learned halting heads (`until` driven by a predicate value) in addition to
    convergence halting.
-5. Mini-batch steps: gradient accumulation with a conditionally executed
-   update block, so per-step optimizer cost (Muon's orthogonalization above
-   all) is paid once per batch.
-6. Sparse tensors for hashed text features (about 30 active of 1024+ buckets
+5. Sparse tensors for hashed text features (about 30 active of 1024+ buckets
    per row), making wide text models proportionally cheaper.
-7. Native backends from the planned IR: ARMv7-M/ARMv8-M assembly with
+6. Native backends from the planned IR: ARMv7-M/ARMv8-M assembly with
    CMSIS-NN style kernels, and RISC-V with the vector extension.

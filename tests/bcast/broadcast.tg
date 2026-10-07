@@ -1,0 +1,12 @@
+# Row broadcasting: a vector of the trailing dimension repeats over the rows,
+# on either side of every binary operator, including inside a think loop.
+model broadcast
+
+param bias : f32[3] = [0.5, -1, 2]
+param scale : f32[3] = [1, 0.5, 2]
+
+def forward(x: f32[4, 3]) -> f32[4, 3]:
+    h = tanh(x * scale + bias)
+    think h for 30 until 0.000001:
+        h = tanh(0.5 * h - bias / 4 + x * 0.1)
+    return max(h, bias * 0) - min(scale, h) / 2

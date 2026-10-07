@@ -95,16 +95,16 @@ static void exec(VM *vm, const Block *b)
 			o[0] = in->k;
 			break;
 		case CLS_BIN: {
-			int sa = shape_numel(&m->val[in->a[0]].sh) == n ? 1 : 0;
-			int sb = shape_numel(&m->val[in->a[1]].sh) == n ? 1 : 0;
-			switch (in->op) {
-			case OP_ADD: tg_add(o, a, sa, c, sb, n); break;
-			case OP_SUB: tg_sub(o, a, sa, c, sb, n); break;
-			case OP_MUL: tg_mul(o, a, sa, c, sb, n); break;
-			case OP_DIV: tg_div(o, a, sa, c, sb, n); break;
-			case OP_MAX: tg_max(o, a, sa, c, sb, n); break;
-			case OP_MIN: tg_min(o, a, sa, c, sb, n); break;
-			default: abort();
+			void (*k)(float *, const float *, int, const float *, int, int) =
+				in->op == OP_ADD ? tg_add : in->op == OP_SUB ? tg_sub : in->op == OP_MUL ? tg_mul
+				: in->op == OP_DIV ? tg_div : in->op == OP_MAX ? tg_max : tg_min;
+			int na = shape_numel(&m->val[in->a[0]].sh), nb = shape_numel(&m->val[in->a[1]].sh);
+			if ((na == n || na == 1) && (nb == n || nb == 1)) {
+				k(o, a, na == n, c, nb == n, n);
+			} else { /* row broadcast: the smaller operand repeats over the rows */
+				int w = na < n ? na : nb;
+				for (int r = 0; r < n / w; r++)
+					k(o + r * w, na < n ? a : a + r * w, 1, nb < n ? c : c + r * w, 1, w);
 			}
 			break;
 		}

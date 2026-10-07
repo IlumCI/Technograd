@@ -186,10 +186,13 @@ static int lower_expr(L *l, Block *b, Env *e, Sx *x)
 			int s = OP2(OP_ADD, OP2(OP_MUL, t, lp), OP2(OP_MUL, OP2(OP_SUB, CK(1), t), lq));
 			return OP2(OP_NEG, OP2(OP_MEAN, s, -1), -1);
 		}
-		if (l->m->val[p].sh.rank != 1) die(l->file, x->line, "'xent' needs vector logits and a one-hot target");
-		/* -sum(t * log softmax(logits)) */
+		int rk = l->m->val[p].sh.rank;
+		if (rk != 1 && rk != 2) die(l->file, x->line, "'xent' needs logits of shape (C) or a batch (B, C), with one-hot targets");
+		/* -sum(t * log softmax(logits)), averaged over the rows of a batch */
 		int ls = OP2(OP_LOG, OP2(OP_ADD, OP2(OP_SOFTMAX, p, -1), CK(1e-12f)), -1);
-		return OP2(OP_NEG, OP2(OP_SUM, OP2(OP_MUL, t, ls), -1), -1);
+		int s = OP2(OP_SUM, OP2(OP_MUL, t, ls), -1);
+		if (rk == 2) s = OP2(OP_DIV, s, CK((float)l->m->val[p].sh.dim[0]));
+		return OP2(OP_NEG, s, -1);
 #undef OP2
 #undef CK
 	}
@@ -498,14 +501,6 @@ static void dce(Module *m)
 		if (m->val[v].kind == V_PARAM && m->val[v].name && strncmp(m->val[v].name, "__", 2) == 0 && !live[v]) m->val[v].dead = 1;
 	xfree(live);
 	m->ndef = 0; /* the lowering tape is invalid after compaction */
-}
-
-/* Drop all updates and the code that only fed them (backward pass, optimizer
- * arithmetic): the forward model alone, for fast evaluation. */
-void mod_strip_updates(Module *m)
-{
-	m->nupd = 0;
-	dce(m);
 }
 
 Module *lower(Sx *ast, const char *file)

@@ -31,7 +31,7 @@ file is the black box you ship to the target.
 make            # builds build/tgc (C11, no dependencies beyond libm; perl at build time)
 build/tgc train hf:scikit-learn/iris            # any dataset, no configuration: detect, featurize, train, export
 build/tgc predict iris_model new_flowers.csv     # predictions on raw new data
-make test       # 147 checks (offline; TG_TEST_NETWORK=1 adds a Hugging Face run)
+make test       # 151 checks (offline; TG_TEST_NETWORK=1 adds a Hugging Face run)
 make fixer      # retrain the auto-fix forest (deterministic, ~15 s) and evaluate it on held-out programs
 
 build/tgc run  examples/latent_reasoner.tg 1,0,0,1,0,1,1,0
@@ -189,7 +189,7 @@ every failure.
   or transform TGIR with no knowledge of the surface grammar. The reader
   re-verifies every shape, so generated IR cannot get past the checker.
 - **Abstract enough to program.** The surface syntax has functions, infix
-  tensor algebra (`+ - * / @`), scalar broadcast, and `think` loops.
+  tensor algebra (`+ - * / @`), scalar and row broadcast, and `think` loops.
 - **Black box by construction.** A compiled unit exposes only
   `tg_<model>_run(inputs..., out)` and size macros. Weights are static
   `const` data. Memory use is fixed when the unit is compiled

@@ -38,6 +38,7 @@ typedef struct {
 
 int shape_numel(const Shape *s);
 int shape_eq(const Shape *a, const Shape *b);
+int shape_suffix(const Shape *small, const Shape *big); /* row broadcasting: (H) into (B,H) */
 void shape_str(const Shape *s, char *buf, size_t n); /* "(f32 8 4)" */
 
 /* ---- S-expressions (TGIR carrier and surface AST) ----------------------- */
@@ -175,7 +176,6 @@ void value_name(const Module *m, int v, char *buf, size_t n);
 Sx *surface_parse(const char *src, const char *file);
 Sx *surface_load(const char *path); /* parse + merge `import` declarations */
 Module *lower(Sx *ast, const char *file);
-void mod_strip_updates(Module *m); /* forward-only copy for evaluation */
 Module *ir_read(Sx *forms, const char *file);
 Module *load_module(const char *path);
 

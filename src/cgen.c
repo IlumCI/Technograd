@@ -58,9 +58,16 @@ static void block(G *g, const Block *b, int d)
 			fputs(";\n", g->f);
 			break;
 		case CLS_BIN: {
-			int sa = shape_numel(&m->val[in->a[0]].sh) == n;
-			int sb = shape_numel(&m->val[in->a[1]].sh) == n;
-			fprintf(g->f, "tg_%s(%s, %s, %d, %s, %d, %d);\n", tg_ops[in->op].name, o, a, sa, c, sb, n);
+			int na = shape_numel(&m->val[in->a[0]].sh), nb = shape_numel(&m->val[in->a[1]].sh);
+			if ((na == n || na == 1) && (nb == n || nb == 1)) {
+				fprintf(g->f, "tg_%s(%s, %s, %d, %s, %d, %d);\n", tg_ops[in->op].name, o, a, na == n, c, nb == n, n);
+			} else { /* row broadcast */
+				int w = na < n ? na : nb;
+				char step[32];
+				snprintf(step, sizeof step, " + r * %d", w);
+				fprintf(g->f, "for (int r = 0; r < %d; r++) tg_%s(%s%s, %s%s, 1, %s%s, 1, %d);\n", n / w, tg_ops[in->op].name, o, step,
+					a, na < n ? "" : step, c, nb < n ? "" : step, w);
+			}
 			break;
 		}
 		case CLS_UN:

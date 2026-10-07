@@ -35,7 +35,7 @@ expect_run tests/cases/ops.tg "$(cat tests/cases/ops.expected)" 1,-2,3,0.5
 CASES="examples/xor.tg:1,0 examples/newton.tg:2,9,16 examples/latent_reasoner.tg:1,0,0,1,0,1,1,0
 examples/latent_reasoner.tg:0.1,0.2,-0.3,0.5,0.9,-1,0.3,0 tests/cases/ops.tg:1,-2,3,0.5
 tests/cases/nested.tg:0.3,-0.7 tests/cases/multi_input.tg:1,2,3:0.5 tests/cases/file_param.tg:1,2
-examples/use_import.tg:1,-1,2,-2 examples/delta_memory.tg:1,0,0,0:1,2,3,4
+examples/use_import.tg:1,-1,2,-2 examples/delta_memory.tg:1,0,0,0:1,2,3,4 tests/bcast/broadcast.tg:0.1,-0.2,0.3,1,2,-1,0,0,0,-3,0.5,0.25
 examples/drift_calibration.tg:10,20,30"
 for c in $CASES; do
 	f=${c%%:*}
@@ -135,7 +135,7 @@ $TGC ir examples/delta_memory.tg | grep -q "(update mem %" && ok || bad "TGIR lo
 #     on-device training in generated C matching the VM bit for bit
 mkdir -p "$TMP/gc"
 if perl tests/gradcheck.pl "$TGC" "$TMP/gc" > "$TMP/gc.out"; then ok; else bad "gradcheck: $(grep FAIL "$TMP/gc.out")"; fi
-[ "$(grep -c "^ok" "$TMP/gc.out")" -ge 22 ] && ok || bad "gradcheck ran too few cases"
+[ "$(grep -c "^ok" "$TMP/gc.out")" -ge 25 ] && ok || bad "gradcheck ran too few cases"
 perl -e 'srand(3); my @d=([0,0,0],[0,1,1],[1,0,1],[1,1,0]); for (1..1500) { for my $r (sort { rand() <=> 0.5 } @d) { print join(",", @$r), "\n" } }' > "$TMP/xt.csv"
 $TGC batch examples/train_xor.tg "$TMP/xt.csv" --save-state "$TMP/xor" -o "$TMP/xp.csv"
 paste -d, "$TMP/xt.csv" "$TMP/xp.csv" | tail -8 | awk -F, '{ if ($3 == 1 && $4 < 0.9 || $3 == 0 && $4 > 0.1) bad = 1 } END { exit bad }' && ok || bad "XOR not learned"

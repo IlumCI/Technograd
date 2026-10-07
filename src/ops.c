@@ -66,11 +66,11 @@ int op_infer(Op op, const Shape *a, int na, Shape *out, char *err, size_t errn)
 	case CLS_CONST:
 		return 1;
 	case CLS_BIN:
-		if (shape_eq(&a[0], &a[1]) || a[1].rank == 0) { *out = a[0]; return 1; }
-		if (a[0].rank == 0) { *out = a[1]; return 1; }
+		if (shape_eq(&a[0], &a[1]) || a[1].rank == 0 || shape_suffix(&a[1], &a[0])) { *out = a[0]; return 1; }
+		if (a[0].rank == 0 || shape_suffix(&a[0], &a[1])) { *out = a[1]; return 1; }
 		shape_str(&a[0], s0, sizeof s0);
 		shape_str(&a[1], s1, sizeof s1);
-		snprintf(err, errn, "'%s' shape mismatch %s vs %s (only equal shapes or scalar broadcast)", oi->name, s0, s1);
+		snprintf(err, errn, "'%s' shape mismatch %s vs %s (shapes must be equal, one a scalar, or one the trailing dimensions of the other)", oi->name, s0, s1);
 		return 0;
 	case CLS_UN:
 		*out = a[0];

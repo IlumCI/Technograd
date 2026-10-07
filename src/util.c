@@ -142,6 +142,15 @@ int shape_numel(const Shape *s)
 	return n;
 }
 
+/* small is a strict suffix of big: (H) of (B,H), (C,H) of (A,C,H). Row broadcasting. */
+int shape_suffix(const Shape *small, const Shape *big)
+{
+	if (small->rank < 1 || small->rank >= big->rank) return 0;
+	for (int i = 1; i <= small->rank; i++)
+		if (small->dim[small->rank - i] != big->dim[big->rank - i]) return 0;
+	return 1;
+}
+
 int shape_eq(const Shape *a, const Shape *b)
 {
 	if (a->rank != b->rank) return 0;
