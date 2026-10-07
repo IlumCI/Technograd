@@ -1,0 +1,5 @@
+# cycle.tg imports lib.tg which imports cycle.tg back; resolution must terminate.
+import "lib.tg"
+model cycle
+def forward(x: f32[2]) -> f32[2]:
+    return bump(x)

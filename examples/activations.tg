@@ -1,0 +1,9 @@
+# A library of activation helpers. Has no `forward`, so it is import-only,
+# but it could also declare a model and be run on its own.
+param leak : f32 = 0.1
+
+def swish(x: f32[4]) -> f32[4]:
+    return silu(x)
+
+def leaky(x: f32[4]) -> f32[4]:
+    return max(x, 0) + leak * min(x, 0)

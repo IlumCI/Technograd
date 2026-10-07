@@ -1,0 +1,5 @@
+# expect: cannot open import
+import "does_not_exist.tg"
+model m
+def forward(x: f32[2]) -> f32[2]:
+    return x

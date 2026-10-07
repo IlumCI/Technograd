@@ -217,7 +217,7 @@ src/        compiler: parse.c (surface), lower.c (inline/SSA), ir.c (TGIR read/w
             fixer.c (repair operators, features, forest training and fix loop)
 fixer/      forest.tg (trained ranker, a Technograd program), corpus/ (training programs)
 runtime/    tg_rt.h: kernels shared by the VM and the generated code
-examples/   xor.tg, newton.tg, latent_reasoner.tg
-tests/      run.sh, positive cases, diagnostic cases, fix/ (auto-fix regressions)
+examples/   xor.tg, newton.tg, latent_reasoner.tg, activations.tg + use_import.tg (cross-file)
+tests/      run.sh, positive cases, diagnostic cases, fix/ (auto-fix), imports/ (cross-file)
 docs/       SPEC.md
 ```

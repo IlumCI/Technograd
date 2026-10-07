@@ -1,0 +1,3 @@
+import "cycle.tg"
+def bump(x: f32[2]) -> f32[2]:
+    return x + 1

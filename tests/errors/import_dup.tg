@@ -1,0 +1,7 @@
+# expect: duplicate def 'one'
+import "../imports/common.tg"
+model m
+def one(x: f32[2]) -> f32[2]:
+    return x
+def forward(x: f32[2]) -> f32[2]:
+    return one(x)

@@ -34,7 +34,8 @@ expect_run tests/cases/ops.tg "$(cat tests/cases/ops.expected)" 1,-2,3,0.5
 # 2-3. every example and positive case
 CASES="examples/xor.tg:1,0 examples/newton.tg:2,9,16 examples/latent_reasoner.tg:1,0,0,1,0,1,1,0
 examples/latent_reasoner.tg:0.1,0.2,-0.3,0.5,0.9,-1,0.3,0 tests/cases/ops.tg:1,-2,3,0.5
-tests/cases/nested.tg:0.3,-0.7 tests/cases/multi_input.tg:1,2,3:0.5 tests/cases/file_param.tg:1,2"
+tests/cases/nested.tg:0.3,-0.7 tests/cases/multi_input.tg:1,2,3:0.5 tests/cases/file_param.tg:1,2
+examples/use_import.tg:1,-1,2,-2"
 for c in $CASES; do
 	f=${c%%:*}
 	args=$(echo "${c#*:}" | tr ':' ' ')
@@ -63,6 +64,10 @@ if nm "$TMP/lr.o" 2>/dev/null | grep ' U ' | grep -qv -e expf -e tanhf -e sqrtf 
 else
 	ok
 fi
+
+# 4a. cross-file imports: diamond dedup and cycle termination
+expect_run tests/imports/diamond.tg "23 43" 10,20
+expect_run tests/imports/cycle.tg "11 21" 10,20
 
 # 4. diagnostics
 for f in tests/errors/*.tg tests/errors/*.tgir; do

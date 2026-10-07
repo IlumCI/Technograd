@@ -1,0 +1,6 @@
+# common.tg is imported via both l1 and l2; it must be merged exactly once.
+import "l1.tg"
+import "l2.tg"
+model diamond
+def forward(x: f32[2]) -> f32[2]:
+    return f1(x) + f2(x)

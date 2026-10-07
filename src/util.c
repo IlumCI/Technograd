@@ -211,9 +211,15 @@ Module *load_module(const char *path)
 	char *src = read_file(path, NULL);
 	const char *p = src;
 	while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+	int is_ir = (*p == '(' || *p == ';');
 	Module *m;
-	if (*p == '(' || *p == ';') m = ir_read(sx_read(src, path), path);
-	else m = lower(surface_parse(src, path), path);
+	if (is_ir) {
+		m = ir_read(sx_read(src, path), path); /* TGIR is already flat: no imports */
+	} else {
+		xfree(src);
+		m = lower(surface_load(path), path);
+		return m;
+	}
 	xfree(src);
 	return m;
 }

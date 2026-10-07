@@ -144,6 +144,7 @@ void value_name(const Module *m, int v, char *buf, size_t n);
 
 /* frontends */
 Sx *surface_parse(const char *src, const char *file);
+Sx *surface_load(const char *path); /* parse + merge `import` declarations */
 Module *lower(Sx *ast, const char *file);
 Module *ir_read(Sx *forms, const char *file);
 Module *load_module(const char *path);

@@ -239,6 +239,74 @@ static char *dirname_of(const char *path)
 	return d;
 }
 
+static char *path_join(const char *dir, const char *rel)
+{
+	if (rel[0] == '/') return xstrdup(rel);
+	char *full = xmalloc(strlen(dir) + strlen(rel) + 2);
+	sprintf(full, "%s/%s", dir, rel);
+	return full;
+}
+
+/* Recursively merge `import "path"` declarations into one flat AST.
+ *
+ * The root file contributes everything. An imported file is a library: only
+ * its `param`s and its non-`forward` `def`s are pulled in, so the same file
+ * can be run on its own and imported elsewhere. Imports are idempotent and
+ * their resolved paths are tracked, so diamonds and cycles terminate. */
+typedef struct {
+	char **p;
+	int n, cap;
+} Seen;
+
+static int seen_add(Seen *s, const char *path)
+{
+	for (int i = 0; i < s->n; i++)
+		if (strcmp(s->p[i], path) == 0) return 0;
+	if (s->n == s->cap) s->p = xrealloc(s->p, (size_t)(s->cap = s->cap ? s->cap * 2 : 8) * sizeof *s->p);
+	s->p[s->n++] = xstrdup(path);
+	return 1;
+}
+
+static void load_into(Sx *out, const char *path, Seen *seen, int depth, int root, const char *importer, int iline)
+{
+	if (depth > 64) die(importer, iline, "import nesting too deep (cycle involving '%s'?)", path);
+	if (!seen_add(seen, path)) return; /* already merged */
+	FILE *probe = fopen(path, "rb");
+	if (!probe) {
+		if (importer) die(importer, iline, "cannot open import '%s'", path);
+		die(NULL, 0, "cannot open '%s'", path);
+	}
+	fclose(probe);
+	char *src = read_file(path, NULL);
+	Sx *ast = surface_parse(src, path);
+	xfree(src);
+	for (int i = 0; i < ast->len; i++) {
+		Sx *d = ast->v[i];
+		const char *h = d->v[0]->s;
+		if (strcmp(h, "import") == 0) {
+			char *dir = dirname_of(path);
+			char *full = path_join(dir, d->v[1]->s);
+			xfree(dir);
+			load_into(out, full, seen, depth + 1, 0, path, d->line);
+			xfree(full);
+		} else if (root) {
+			sx_push(out, d);
+		} else if (strcmp(h, "param") == 0 || (strcmp(h, "def") == 0 && strcmp(d->v[1]->s, "forward") != 0)) {
+			sx_push(out, d); /* library: skip the imported file's model and its forward */
+		}
+	}
+}
+
+Sx *surface_load(const char *path)
+{
+	Seen seen = { 0 };
+	Sx *merged = sx_new(SX_LIST, 1);
+	load_into(merged, path, &seen, 0, 1, NULL, 0);
+	for (int i = 0; i < seen.n; i++) xfree(seen.p[i]);
+	xfree(seen.p);
+	return merged;
+}
+
 static float *materialize(L *l, Sx *init, const Shape *sh, const char *pname)
 {
 	int n = shape_numel(sh);

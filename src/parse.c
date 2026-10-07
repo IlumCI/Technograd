@@ -161,7 +161,7 @@ static Tok *expect(P *p, TokKind k, const char *what)
 	return t;
 }
 
-static const char *kw[] = { "model", "param", "def", "return", "think", "for", "until", "f32", NULL };
+static const char *kw[] = { "model", "param", "def", "return", "think", "for", "until", "f32", "import", NULL };
 
 static Tok *expect_name(P *p)
 {
@@ -376,6 +376,11 @@ static Sx *decl(P *p)
 {
 	Tok *t = next(p);
 	int line = t->line;
+	if (iskw(t, "import")) {
+		Tok *s = expect(p, T_STR, "import path string");
+		expect(p, T_NL, "end of line");
+		return sx_list(line, 2, sx_sym("import", line), sx_str(s->s, line));
+	}
 	if (iskw(t, "model")) {
 		Tok *n = expect_name(p);
 		expect(p, T_NL, "end of line");
@@ -410,7 +415,7 @@ static Sx *decl(P *p)
 		Sx *b = block(p);
 		return sx_list(line, 5, sx_sym("def", line), sx_sym(n->s, line), args, rt, b);
 	}
-	die(p->file, line, "expected 'model', 'param' or 'def', got '%s'", tokdesc(t));
+	die(p->file, line, "expected 'import', 'model', 'param' or 'def', got '%s'", tokdesc(t));
 	return NULL;
 }
 

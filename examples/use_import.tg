@@ -1,0 +1,10 @@
+# Cross-file program: pulls helpers from activations.tg.
+import "activations.tg"
+
+model use_import
+
+param w : f32[4, 4] = rand(7, 0.5)
+
+def forward(x: f32[4]) -> f32[4]:
+    h = swish(w @ x)
+    return leaky(h)

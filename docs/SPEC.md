@@ -9,10 +9,32 @@ A program defines one model. Its parts:
 - `def NAME(args) -> TYPE:`: pure functions. Each one is inlined at every call site.
 - `def forward(...)`: the entry point. Its arguments are the model inputs, in
   order, and its return value is the single output.
+- `import "path"`: merge another surface file's `param`s and `def`s into this
+  one (section 1.1).
 
 Execution is a static dataflow graph. The only control flow is the `think`
 loop. There is no recursion, no data-dependent shape, and no allocation at
 run time.
+
+### 1.1 Imports
+
+`import "path"` appears among the top-level declarations. `path` is resolved
+relative to the directory of the file containing the `import`, or absolutely
+if it begins with `/`.
+
+An imported file is treated as a library: only its `param` declarations and
+its `def`s **other than `forward`** are merged in. Its own `model` line and
+`forward`, if any, are ignored, so one file can both be run on its own and be
+imported elsewhere. Imports are transitive.
+
+Each resolved file is merged at most once, so a file reachable by several
+paths (a diamond) contributes its definitions once, and an import cycle
+terminates rather than looping. A name defined in two merged files is a
+`duplicate param`/`duplicate def` error.
+
+Imports are a surface-file feature resolved before lowering. TGIR is already
+flat and has no `import`. After merging, a shape error inside an imported
+definition is reported at the imported line but under the root file's name.
 
 ## 2. Types
 
