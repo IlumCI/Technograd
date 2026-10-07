@@ -20,7 +20,8 @@ static void usage(void)
 	      "  --autofix   on a compile error, repair in memory and continue (source is not modified)\n"
 	      "  -v, --verbose   trace compiler stages and think loops to stderr; -vv adds every VM value\n"
 	      "  --log FILE  append a JSON Lines log of all events and errors (debug events need -vv)\n"
-	      "  -j N, --threads N   worker threads for batch rows and large matmuls (N=0 or auto: one per CPU)\n",
+	      "  -j N, --threads N   worker threads for batch rows and large matmuls (N=0 or auto: one per CPU)\n"
+	      "  --save-state P      after run/batch, write each state to P.<name>.bin (loadable with file())\n",
 	      stderr);
 	exit(2);
 }
@@ -230,6 +231,35 @@ static void batch_rows(void *ctx, int lo, int hi, int tid)
 	}
 }
 
+/* --save-state PREFIX: write every state as PREFIX.<name>.bin, raw little-endian
+ * f32, the format param file("...") initializers load. */
+static void save_states(const Module *m, const char *prefix, const char *cmd)
+{
+	if (strcmp(cmd, "run") != 0 && strcmp(cmd, "batch") != 0) die(NULL, 0, "--save-state applies to run and batch");
+	int any = 0;
+	for (int v = 0; v < m->nval; v++) {
+		const Value *x = &m->val[v];
+		if (x->kind != V_STATE) continue;
+		any = 1;
+		size_t len = strlen(prefix) + strlen(x->name) + 8;
+		char *path = xmalloc(len);
+		snprintf(path, len, "%s.%s.bin", prefix, x->name);
+		FILE *f = fopen(path, "wb");
+		if (!f) die(NULL, 0, "cannot write '%s'", path);
+		io_write_row(f, 1, x->data, shape_numel(&x->sh), NULL, 0);
+		close_out(f, path);
+		if (tr_on(1)) {
+			tr_begin(1, "save");
+			tr_str("state", x->name);
+			tr_str("file", path);
+			tr_num("floats", shape_numel(&x->sh));
+			tr_end("state %s saved to %s", x->name, path);
+		}
+		xfree(path);
+	}
+	if (!any) die(NULL, 0, "--save-state: model %s has no state", m->name);
+}
+
 static int is_ir(const char *src)
 {
 	while (*src == ' ' || *src == '\t' || *src == '\n' || *src == '\r') src++;
@@ -250,10 +280,15 @@ static Module *load_fixed(const char *path)
 int main(int argc, char **argv)
 {
 	int fix = 0, k = 1, threads = 1;
+	const char *save_state = NULL;
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--autofix") == 0) fix = 1;
 		else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) tg_verbose = tg_verbose > 1 ? tg_verbose : 1;
 		else if (strcmp(argv[i], "-vv") == 0) tg_verbose = 2;
+		else if (strcmp(argv[i], "--save-state") == 0) {
+			if (++i == argc) usage();
+			save_state = argv[i];
+		}
 		else if (strcmp(argv[i], "-j") == 0 || strcmp(argv[i], "--threads") == 0) {
 			if (++i == argc) usage();
 			char *e;
@@ -390,5 +425,6 @@ int main(int argc, char **argv)
 	} else {
 		usage();
 	}
+	if (save_state) save_states(m, save_state, cmd);
 	return 0;
 }

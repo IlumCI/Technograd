@@ -1,0 +1,6 @@
+# expect: 'grad' shadows a builtin
+model e
+def grad(x: f32[2]) -> f32[2]:
+    return x
+def forward(x: f32[2]) -> f32[2]:
+    return x

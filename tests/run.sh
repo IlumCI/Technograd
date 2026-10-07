@@ -130,6 +130,22 @@ c=$("$TMP/dm" 1,0,0,0 1,2,3,4 0,1,0,0 5,6,7,8 1,0,0,0 0,0,0,0 0,1,0,0 0,0,0,0 1,
 $CC -std=c99 -Wall -Wextra -Werror -I"$TMP" -o "$TMP/harness" tests/state/harness.c -lm && "$TMP/harness" >/dev/null && ok || bad "reset/save/restore harness"
 $TGC ir examples/delta_memory.tg | grep -q "(update mem %" && ok || bad "TGIR lost the update"
 
+# 4f. autodiff: finite-difference check of every VJP rule (incl. implicit
+#     differentiation through think), online training, deploy via file(), and
+#     on-device training in generated C matching the VM bit for bit
+mkdir -p "$TMP/gc"
+if perl tests/gradcheck.pl "$TGC" "$TMP/gc" > "$TMP/gc.out"; then ok; else bad "gradcheck: $(grep FAIL "$TMP/gc.out")"; fi
+[ "$(grep -c "^ok" "$TMP/gc.out")" -ge 22 ] && ok || bad "gradcheck ran too few cases"
+perl -e 'srand(3); my @d=([0,0,0],[0,1,1],[1,0,1],[1,1,0]); for (1..1500) { for my $r (sort { rand() <=> 0.5 } @d) { print join(",", @$r), "\n" } }' > "$TMP/xt.csv"
+$TGC batch examples/train_xor.tg "$TMP/xt.csv" --save-state "$TMP/xor" -o "$TMP/xp.csv"
+paste -d, "$TMP/xt.csv" "$TMP/xp.csv" | tail -8 | awk -F, '{ if ($3 == 1 && $4 < 0.9 || $3 == 0 && $4 > 0.1) bad = 1 } END { exit bad }' && ok || bad "XOR not learned"
+printf 'model xd\nparam w1 : f32[4, 2] = file("xor.w1.bin")\nparam b1 : f32[4] = file("xor.b1.bin")\nparam w2 : f32[4] = file("xor.w2.bin")\nparam b2 : f32 = file("xor.b2.bin")\ndef forward(x: f32[2]) -> f32:\n    return sigmoid(dot(w2, tanh(w1 @ x + b1)) + b2)\n' > "$TMP/xd.tg"
+a=$($TGC run "$TMP/xd.tg" 0,1); b=$($TGC run "$TMP/xd.tg" 1,1)
+awk -v a="$a" -v b="$b" 'BEGIN { exit !(a > 0.9 && b < 0.1) }' && ok || bad "deployed weights do not reproduce training: $a $b"
+$TGC c examples/train_xor.tg -o "$TMP/tx.c" && $CC -std=c99 -O2 -Wall -Wextra -Werror -pedantic -DTG_MAIN -o "$TMP/tx" "$TMP/tx.c" -lm && ok || bad "training unit compile"
+head -200 "$TMP/xt.csv" > "$TMP/t200.csv"
+[ "$("$TMP/tx" $(awk -F, '{ printf "%s,%s %s ", $1, $2, $3 }' "$TMP/t200.csv"))" = "$($TGC batch examples/train_xor.tg "$TMP/t200.csv")" ] && ok || bad "on-device training differs from VM"
+
 # 4a. cross-file imports: diamond dedup and cycle termination
 expect_run tests/imports/diamond.tg "23 43" 10,20
 expect_run tests/imports/cycle.tg "11 21" 10,20

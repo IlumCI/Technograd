@@ -29,6 +29,7 @@ const OpInfo tg_ops[OP_COUNT] = {
 	[OP_MEAN]      = { "mean",      1, CLS_RED },
 	[OP_TRANSPOSE] = { "transpose", 1, CLS_TRANS },
 	[OP_OUTER]     = { "outer",     2, CLS_OUTER },
+	[OP_STEP]      = { "step",      1, CLS_UN },
 	[OP_THINK]     = { "think",     0, CLS_THINK },
 };
 

@@ -29,7 +29,7 @@ file is the black box you ship to the target.
 
 ```sh
 make            # builds build/tgc (C11, no dependencies beyond libm; perl at build time)
-make test       # 117 checks: known answers, IR round trip, VM == compiled C, diagnostics, auto-fix, imports, file I/O, tracing, threads, self-updating state
+make test       # 128 checks: known answers, IR round trip, VM == compiled C, diagnostics, auto-fix, imports, file I/O, tracing, threads, self-updating state, autodiff
 make fixer      # retrain the auto-fix forest (deterministic, ~15 s) and evaluate it on held-out programs
 
 build/tgc run  examples/latent_reasoner.tg 1,0,0,1,0,1,1,0
@@ -41,6 +41,7 @@ build/tgc batch examples/xor.tg tests/io/xor.csv   # one sample per row; .bin/.f
 build/tgc run examples/newton.tg 2,9,16 -vv --log run.jsonl   # stage/value/iteration trace + JSONL log
 build/tgc batch examples/latent_reasoner.tg data.bin -j auto -o out.bin   # rows across all cores, bit-identical to -j 1
 build/tgc batch examples/delta_memory.tg tests/state/mem.csv   # a model that rewrites its own memory every run
+build/tgc batch examples/train_xor.tg xor.csv --save-state xor   # online SGD via grad(); writes xor.<weight>.bin
 build/tgc plan examples/latent_reasoner.tg   # arena layout: 320 B instead of 624 B unshared
 build/tgc c    examples/latent_reasoner.tg -o reasoner.c
 cc -O2 -DTG_MAIN reasoner.c -lm -o reasoner && ./reasoner 1,0,0,1,0,1,1,0
@@ -210,6 +211,7 @@ every failure.
 - Survey: *A Survey on Latent Reasoning*, [arXiv:2507.06203](https://arxiv.org/abs/2507.06203).
 - Static arena planning, greedy by size: Pisarchyk & Lee, [arXiv:2001.03288](https://arxiv.org/abs/2001.03288).
 - Self-updating state: test-time training layers, [arXiv:2407.04620](https://arxiv.org/abs/2407.04620); Titans, [arXiv:2501.00663](https://arxiv.org/abs/2501.00663); DeltaNet, [arXiv:2406.06484](https://arxiv.org/abs/2406.06484); Gated DeltaNet, [arXiv:2412.06464](https://arxiv.org/abs/2412.06464); test-time regression as the unifying view, [arXiv:2501.12352](https://arxiv.org/abs/2501.12352). This is the basis for `state` and `update`.
+- Automatic differentiation through `think` loops: Deep Equilibrium Models, [arXiv:1909.01377](https://arxiv.org/abs/1909.01377) (implicit differentiation at the fixed point); truncated adjoints are the Neumann-series phantom gradients related to Jacobian-free backpropagation, [arXiv:2103.12803](https://arxiv.org/abs/2103.12803).
 - Neural decision forests: Kontschieder et al., *Deep Neural Decision Forests*, ICCV 2015. This is the ranker architecture used by the auto-fixer.
 - Learning repair from compiler diagnostics with self-supervised corruption: Yasunaga & Liang, *DrRepair*, [arXiv:2005.10636](https://arxiv.org/abs/2005.10636), and *Break-It-Fix-It*, [arXiv:2106.06600](https://arxiv.org/abs/2106.06600). Repair as classification over diagnostics: SynShine, [arXiv:2104.14671](https://arxiv.org/abs/2104.14671).
 - Embedded deployment baselines: TFLite Micro [arXiv:2010.08678](https://arxiv.org/abs/2010.08678), MicroFlow [arXiv:2409.19432](https://arxiv.org/abs/2409.19432).
@@ -220,10 +222,11 @@ every failure.
 src/        compiler: parse.c (surface), lower.c (inline/SSA), ir.c (TGIR read/write/verify),
             ops.c (op table + shape inference), plan.c (memory planner), vm.c, cgen.c, main.c
             fixer.c (repair operators, features, forest training and fix loop)
+            autodiff.c (grad: reverse mode, implicit differentiation of think loops), par.c (threads)
 fixer/      forest.tg (trained ranker, a Technograd program), corpus/ (training programs)
 runtime/    tg_rt.h: kernels shared by the VM and the generated code
 examples/   xor.tg, newton.tg, latent_reasoner.tg, activations.tg + use_import.tg (cross-file),
-            delta_memory.tg, drift_calibration.tg (self-updating state)
+            delta_memory.tg, drift_calibration.tg (self-updating state), train_xor.tg (training via grad)
 tests/      run.sh, positive cases, diagnostic cases, fix/ (auto-fix), imports/ (cross-file)
 docs/       SPEC.md
 ```

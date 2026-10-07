@@ -188,6 +188,19 @@ int mod_value(Module *m, VKind k, const Shape *sh, const char *name)
 	return m->nval++;
 }
 
+void mod_note_def(Module *m, int v, Block *b, int idx)
+{
+	if (v >= m->ndef) {
+		int n = m->nval > v + 1 ? m->nval : v + 1;
+		m->def_blk = xrealloc(m->def_blk, (size_t)n * sizeof *m->def_blk);
+		m->def_idx = xrealloc(m->def_idx, (size_t)n * sizeof *m->def_idx);
+		for (int i = m->ndef; i < n; i++) m->def_blk[i] = NULL;
+		m->ndef = n;
+	}
+	m->def_blk[v] = b;
+	m->def_idx[v] = idx;
+}
+
 void mod_update(Module *m, int state, int src)
 {
 	m->upd_state = xrealloc(m->upd_state, (size_t)(m->nupd + 1) * sizeof *m->upd_state);

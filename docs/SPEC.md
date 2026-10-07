@@ -88,6 +88,8 @@ and parentheses. All binary operators are left associative.
 | `sum(x)`, `mean(x)` | reduce to scalar |
 | `transpose(x)` | rank 2 only |
 | `outer(a, b)` | `(m),(n)->(m,n)`, `a b^T`; the rank-1 write of delta-rule and Hebbian updates |
+| `step(x)` | elementwise `x > 0 ? 1 : 0`; the derivative of relu, max and min |
+| `grad(y, x)` | `y` scalar, `x` a name; returns dy/dx with the shape of `x` (section 16) |
 
 ## 7. `think`: continuous latent loops
 
@@ -376,7 +378,80 @@ from the input, such as Titans' surprise-based momentum and forgetting
 (arXiv:2501.00663), can be written the same way: compute the gate as a value,
 then use it in the `update` expression. A second `state` holds momentum.
 
-## 16. Roadmap
+## 16. Automatic differentiation
+
+`grad(y, x)` returns the gradient of the scalar `y` with respect to `x`, which
+must be a name: an input, a param, a state, or a local variable. The result
+has the shape of `x`.
+
+```python
+update w = w - lr * grad(loss, w)          # one SGD step, inside the model
+```
+
+### How it works
+
+Reverse mode, as a source-to-source transform during lowering:
+
+1. The instructions on paths from `x` to `y` are collected from the lowering
+   tape.
+2. They are processed in reverse definition order, each contributing
+   vector-Jacobian products to its operands.
+3. Operands that do not depend on `x` receive nothing, so no gradient code is
+   emitted for them.
+
+The gradient becomes ordinary instructions, so TGIR has no `grad` form. The
+planner, the VM, threading and the C backend are unchanged, and a training
+model compiles to freestanding C like any other.
+
+**Coverage.** Every builtin has a derivative:
+
+- broadcasting operands are summed back to their shape;
+- `max`/`min`/`relu` send the gradient through the selected operand, with ties
+  going to the second;
+- `softmax` and `rmsnorm` are supported on rank 1 and 2;
+- all four `matmul` shape cases and `outer` are covered.
+
+### Through `think` loops
+
+Loops with `until` are differentiated implicitly, as in Deep Equilibrium
+Models (arXiv:1909.01377). At the converged fixed point h* = f(h*, theta):
+
+```
+adjoint   u = g + (df/dh)^T u      solved by a generated think loop (same budget and threshold)
+gradient  theta_bar = (df/dtheta)^T u
+```
+
+- **Memory** is constant in the number of iterations: no per-iteration
+  activations are kept.
+- **Truncation.** If the adjoint loop stops at its budget, the result is the
+  truncated Neumann series, the "phantom gradient" approximation.
+- **Initial state.** At a fixed point the result does not depend on the
+  loop's initial state, so the init receives no gradient.
+- **Extra steps lines.** The generated adjoint loop is an ordinary think
+  loop, so it appears in `steps` output.
+- **Not yet supported:** fixed-budget loops (no `until`) and nested think
+  loops. Both are compile errors.
+
+### Training and deployment
+
+A model whose weights are `state` and which applies
+`update w = w - lr * grad(loss, w)` takes one SGD step per run. So
+`tgc batch` over a dataset is online training (`examples/train_xor.tg` learns
+XOR in 6000 steps).
+
+`--save-state PREFIX` writes each state to `PREFIX.<name>.bin` as raw
+little-endian f32, the format `param w : ... = file("PREFIX.w.bin")` loads. A
+frozen inference model can then be compiled for deployment. The training
+model itself also compiles to C (about 11.5 KB for the XOR MLP, using only
+`expf` and `tanhf`), and trains on the device bit-identically to the VM.
+
+### Verification
+
+`tests/gradcheck.pl` compares every derivative rule, including both
+implicit-differentiation cases, against central finite differences (22 cases,
+worst relative error 2.6e-4). A planted bug in one rule makes 9 cases fail.
+
+## 17. Roadmap
 
 Ordered by importance for latent-reasoning models on embedded targets:
 
@@ -385,9 +460,11 @@ Ordered by importance for latent-reasoning models on embedded targets:
 2. `embed(table, token)` gather and causal attention over a fixed-size KV
    ring. These are needed for token-level Coconut models, where continuous
    thoughts are mixed with token embeddings.
-3. Reverse-mode autodiff over TGIR, including backprop through `think`, so
-   that Coconut's multi-stage curriculum can be trained in-language.
+3. Autodiff through fixed-budget and nested think loops: unrolled
+   backpropagation through time with a statically planned activation store.
 4. Learned halting heads (`until` driven by a predicate value) in addition to
    convergence halting.
-5. Native backends from the planned IR: ARMv7-M/ARMv8-M assembly with
+5. Optimizer states (momentum, Adam) as library `def`s over `state`, and
+   multi-target `grad` that shares one reverse pass.
+6. Native backends from the planned IR: ARMv7-M/ARMv8-M assembly with
    CMSIS-NN style kernels, and RISC-V with the vector extension.

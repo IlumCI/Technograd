@@ -1,0 +1,4 @@
+# expect: second argument of 'grad' must be a name, not an expression
+model e
+def forward(x: f32[2]) -> f32[2]:
+    return grad(sum(x), x * 2)

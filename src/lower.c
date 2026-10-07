@@ -97,6 +97,7 @@ static int emit_op(L *l, Block *b, Op op, const int *args, int na, int line)
 	ins->out = o;
 	ins->na = na;
 	for (int i = 0; i < na; i++) ins->a[i] = args[i];
+	mod_note_def(l->m, o, b, b->len - 1);
 	return o;
 }
 
@@ -112,12 +113,23 @@ static int lower_expr(L *l, Block *b, Env *e, Sx *x)
 		ins->op = OP_CONST;
 		ins->out = o;
 		ins->k = (float)x->v[1]->n;
+		mod_note_def(l->m, o, b, b->len - 1);
 		return o;
 	}
 	if (strcmp(h, "ref") == 0) return lookup(l, e, x->v[1]);
 
 	/* call */
 	Sx *fn = x->v[1];
+	if (strcmp(fn->s, "grad") == 0) {
+		if (x->len != 4) die(l->file, x->line, "'grad' takes (objective, name)");
+		Sx *wrt = x->v[3];
+		if (!sx_issym(wrt->v[0], "ref")) die(l->file, x->line, "second argument of 'grad' must be a name, not an expression");
+		int xv = lookup(l, e, wrt->v[1]);
+		int yv = lower_expr(l, b, e, x->v[2]);
+		if (l->m->val[yv].sh.rank != 0)
+			die(l->file, x->line, "'grad' needs a scalar objective; reduce it with sum(...) or mean(...)");
+		return ad_grad(l->m, b, yv, xv, l->file, x->line);
+	}
 	int nargs = x->len - 2;
 	int args[16];
 	if (nargs > 16) die(l->file, x->line, "too many arguments");
@@ -217,13 +229,17 @@ static int lower_block(L *l, Block *b, Env *e, Sx *stmts, int is_fn)
 			ins->maxit = (int)s->v[2]->n;
 			ins->eps = (float)s->v[3]->n;
 			ins->tid = l->m->nthink++;
+			mod_note_def(l->m, state, b, idx);
 			Block *body = xmalloc(sizeof *body);
 
 			Env inner = env_copy(e);
 			env_set(&inner, st->s, state);
 			int outer_n = e->n;
 			l->in_think++;
+			l->m->open_think = xrealloc(l->m->open_think, (size_t)(l->m->nopen + 1) * sizeof *l->m->open_think);
+			l->m->open_think[l->m->nopen++] = state; /* its body sees the state as an input */
 			lower_block(l, body, &inner, s->v[4], 0);
+			l->m->nopen--;
 			l->in_think--;
 			/* Only the state may be carried: reject assignments to other outer names. */
 			for (int j = 0; j < outer_n; j++) {
@@ -422,7 +438,7 @@ Module *lower(Sx *ast, const char *file)
 		} else if (sx_issym(d->v[0], "def")) {
 			const char *dn = d->v[1]->s;
 			if (find_def(&l, dn)) die(file, d->line, "duplicate def '%s'", dn);
-			if (op_lookup(dn) >= 0 || strcmp(dn, "dot") == 0) die(file, d->line, "'%s' shadows a builtin", dn);
+			if (op_lookup(dn) >= 0 || strcmp(dn, "dot") == 0 || strcmp(dn, "grad") == 0) die(file, d->line, "'%s' shadows a builtin", dn);
 			l.defs = xrealloc(l.defs, (size_t)(l.ndefs + 1) * sizeof *l.defs);
 			l.defs[l.ndefs++] = d;
 			if (strcmp(dn, "forward") == 0) entry = d;

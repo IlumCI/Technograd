@@ -120,6 +120,7 @@ static void exec(VM *vm, const Block *b)
 			case OP_SILU: tg_silu(o, a, n); break;
 			case OP_SOFTPLUS: tg_softplus(o, a, n); break;
 			case OP_LOG: tg_log(o, a, n); break;
+			case OP_STEP: tg_step(o, a, n); break;
 			default: abort();
 			}
 			break;

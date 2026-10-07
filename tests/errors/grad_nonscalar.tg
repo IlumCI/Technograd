@@ -1,0 +1,4 @@
+# expect: 'grad' needs a scalar objective; reduce it with sum(...) or mean(...)
+model e
+def forward(x: f32[2]) -> f32[2]:
+    return grad(x * x, x)

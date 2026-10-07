@@ -71,6 +71,7 @@ typedef enum {
 	OP_SUM, OP_MEAN,
 	OP_TRANSPOSE,
 	OP_OUTER,
+	OP_STEP,
 	OP_THINK,
 	OP_COUNT
 } Op;
@@ -138,6 +139,11 @@ typedef struct {
 	int *upd_state, *upd_src; /* update i: upd_state[i] <- upd_src[i] after the run */
 	int nupd;
 	int stage;       /* arena offset of the commit staging area (floats) */
+	/* Lowering-time tape for autodiff: the instruction defining each value, and
+	 * the think loops whose bodies are being lowered (their state is a leaf). */
+	Block **def_blk;
+	int *def_idx, ndef;
+	int *open_think, nopen;
 	int arena; /* floats */
 	int planned;
 	int trace; /* VM tracing enabled (the user's model only) */
@@ -147,6 +153,8 @@ Module *mod_new(const char *name);
 int mod_value(Module *m, VKind k, const Shape *sh, const char *name);
 Ins *block_push(Block *b);
 void mod_update(Module *m, int state, int src); /* record `update state = src` */
+void mod_note_def(Module *m, int v, Block *b, int idx); /* record b->v[idx] as v's definition */
+int ad_grad(Module *m, Block *b, int y, int x, const char *file, int line); /* autodiff.c */
 void value_name(const Module *m, int v, char *buf, size_t n);
 
 /* frontends */
