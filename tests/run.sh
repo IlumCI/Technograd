@@ -65,6 +65,26 @@ else
 	ok
 fi
 
+# 4b. file I/O: @file inputs, -o outputs, batch (text and raw f32), atomic failure
+expect_run examples/newton.tg "1.41421354 3 4
+steps 0 5" @tests/io/newton_a.txt
+got=$($TGC batch examples/xor.tg tests/io/xor.csv)
+[ "$got" = "$(cat tests/io/xor.expected)" ] && ok || bad "batch xor: [$got]"
+# each batch row must equal the corresponding single run
+rows=""
+for x in 0,0 1,0 0,1 1,1; do rows="$rows$($TGC run examples/xor.tg $x)
+"; done
+[ "$(printf "$rows")" = "$got" ] && ok || bad "batch differs from run"
+# raw f32: input stream -> output stream, decoded and compared with the text path
+perl -e 'print pack("f<*", 0,0, 1,0, 0,1, 1,1)' > "$TMP/xor.bin"
+$TGC batch examples/xor.tg "$TMP/xor.bin" -o "$TMP/xor_out.bin"
+dec=$(perl -e 'local $/; $_ = <STDIN>; print join("\n", unpack("f<*", $_)), "\n"' < "$TMP/xor_out.bin")
+[ "$dec" = "$got" ] && ok || bad "binary batch: [$dec]"
+$TGC run examples/newton.tg @"$TMP/xor.bin" >/dev/null 2>&1 && bad "size mismatch must fail" || ok
+$TGC run examples/newton.tg 2,9,16 -o "$TMP/nw.csv" && [ "$(cat "$TMP/nw.csv")" = "1.41421354,3,4,5" ] && ok || bad "run -o csv"
+$TGC batch examples/xor.tg tests/io/bad_row.csv -o "$TMP/partial.csv" >/dev/null 2>&1 && bad "bad row must fail" || ok
+[ ! -e "$TMP/partial.csv" ] && ok || bad "failed batch left a partial output file"
+
 # 4a. cross-file imports: diamond dedup and cycle termination
 expect_run tests/imports/diamond.tg "23 43" 10,20
 expect_run tests/imports/cycle.tg "11 21" 10,20

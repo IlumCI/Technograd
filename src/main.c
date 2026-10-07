@@ -10,7 +10,8 @@ static void usage(void)
 	      "  check <file>              parse, lower and verify\n"
 	      "  ir    <file>              print canonical TGIR (S-expressions)\n"
 	      "  plan  <file>              print the static memory plan\n"
-	      "  run   <file> <in>...      interpret; each input is comma-separated f32 values\n"
+	      "  run   <file> <in>... [-o out]   interpret; each input is comma-separated values or @file\n"
+	      "  batch <file> <data> [-o out]    one sample per text row, or a raw .bin/.f32 stream\n"
 	      "  c     <file> [-o out.c]   emit a freestanding C unit\n"
 	      "  fix   <file> [-o out.tg]  repair compile errors with the neural-forest fixer\n"
 	      "  fixer-train -o forest.tg <corpus.tg>...   train the fixer (self-supervised)\n"
@@ -34,6 +35,43 @@ static void parse_input(const char *s, float *v, int n, const char *name)
 		s = e + 1;
 	}
 	if (k != n) die(NULL, 0, "input '%s' needs %d values, got %d", name, n, k);
+}
+
+/* A trailing `-o PATH` pair, removed from argv. */
+static const char *take_output(int *argc, char **argv)
+{
+	if (*argc >= 5 && strcmp(argv[*argc - 2], "-o") == 0) {
+		*argc -= 2;
+		return argv[*argc + 1];
+	}
+	return NULL;
+}
+
+static FILE *open_out(const char *path)
+{
+	FILE *f = fopen(path, io_is_binary(path) ? "wb" : "w");
+	if (!f) die(NULL, 0, "cannot write '%s'", path);
+	return f;
+}
+
+static void close_out(FILE *f, const char *path)
+{
+	if (ferror(f) | fclose(f)) die(NULL, 0, "write failed '%s'", path);
+}
+
+/* An input is inline comma-separated values, or @PATH to read them from a file. */
+static const float *load_input(const char *arg, const Value *x)
+{
+	int n = shape_numel(&x->sh);
+	if (arg[0] == '@') {
+		int cnt;
+		float *v = io_load(arg + 1, &cnt);
+		if (cnt != n) die(NULL, 0, "input '%s' needs %d values, '%s' has %d", x->name, n, arg + 1, cnt);
+		return v;
+	}
+	float *buf = xmalloc((size_t)n * sizeof *buf);
+	parse_input(arg, buf, n, x->name);
+	return buf;
 }
 
 static int is_ir(const char *src)
@@ -97,21 +135,78 @@ int main(int argc, char **argv)
 		if (argc != 3) usage();
 		plan_dump(m, stdout);
 	} else if (strcmp(cmd, "run") == 0) {
+		const char *opath = take_output(&argc, argv);
 		if (argc != 3 + m->ninputs) die(NULL, 0, "model %s takes %d input(s), got %d", m->name, m->ninputs, argc - 3);
 		const float **in = xmalloc((size_t)m->ninputs * sizeof *in);
-		for (int i = 0; i < m->ninputs; i++) {
-			const Value *x = &m->val[m->inputs[i]];
-			float *buf = xmalloc((size_t)shape_numel(&x->sh) * sizeof *buf);
-			parse_input(argv[3 + i], buf, shape_numel(&x->sh), x->name);
-			in[i] = buf;
-		}
+		for (int i = 0; i < m->ninputs; i++) in[i] = load_input(argv[3 + i], &m->val[m->inputs[i]]);
 		int n = shape_numel(&m->val[m->output].sh);
 		float *out = xmalloc((size_t)n * sizeof *out);
 		int *steps = xmalloc((size_t)(m->nthink ? m->nthink : 1) * sizeof *steps);
 		vm_run(m, in, out, steps);
-		for (int i = 0; i < n; i++) printf("%s%.9g", i ? " " : "", (double)out[i]);
-		putchar('\n');
-		for (int i = 0; i < m->nthink; i++) printf("steps %d %d\n", i, steps[i]);
+		if (opath) {
+			int bin = io_is_binary(opath);
+			FILE *f = open_out(opath);
+			io_write_row(f, bin, out, n, steps, bin ? 0 : m->nthink);
+			close_out(f, opath);
+		} else {
+			for (int i = 0; i < n; i++) printf("%s%.9g", i ? " " : "", (double)out[i]);
+			putchar('\n');
+			for (int i = 0; i < m->nthink; i++) printf("steps %d %d\n", i, steps[i]);
+		}
+	} else if (strcmp(cmd, "batch") == 0) {
+		const char *opath = take_output(&argc, argv);
+		if (argc != 4) usage();
+		const char *data = argv[3];
+		int per = 0, *off = xmalloc((size_t)m->ninputs * sizeof *off);
+		for (int i = 0; i < m->ninputs; i++) {
+			off[i] = per;
+			per += shape_numel(&m->val[m->inputs[i]].sh);
+		}
+		int n = shape_numel(&m->val[m->output].sh);
+		float *out = xmalloc((size_t)n * sizeof *out);
+		int *steps = xmalloc((size_t)(m->nthink ? m->nthink : 1) * sizeof *steps);
+		const float **in = xmalloc((size_t)m->ninputs * sizeof *in);
+		int obin = opath && io_is_binary(opath);
+		FILE *f = NULL; /* opened only after the whole input validates */
+		if (io_is_binary(data)) {
+			int cnt;
+			float *all = io_load(data, &cnt);
+			if (cnt % per) die(NULL, 0, "'%s': %d values is not a multiple of the %d per sample", data, cnt, per);
+			f = opath ? open_out(opath) : stdout;
+			for (int r = 0; r < cnt / per; r++) {
+				for (int i = 0; i < m->ninputs; i++) in[i] = all + (size_t)r * (size_t)per + off[i];
+				vm_run(m, in, out, steps);
+				io_write_row(f, obin, out, n, steps, obin ? 0 : m->nthink);
+			}
+		} else {
+			char *raw = read_file(data, NULL);
+			float *row = xmalloc((size_t)per * sizeof *row);
+			for (int i = 0; i < m->ninputs; i++) in[i] = row + off[i];
+			/* pass 0 validates every row; pass 1 computes, so a bad row yields no output */
+			for (int pass = 0; pass < 2; pass++) {
+				if (pass == 1) f = opath ? open_out(opath) : stdout;
+				int line = 1;
+				for (char *s = raw; *s; line++) {
+					char *nl = strchr(s, '\n');
+					size_t len = nl ? (size_t)(nl - s) : strlen(s);
+					char save = s[len];
+					s[len] = 0;
+					const char *bad;
+					int k = io_parse_row(s, NULL, 0, &bad);
+					if (k < 0) die(data, line, "bad number near '%.20s'", bad);
+					if (k > 0 && k != per) die(data, line, "row has %d values, model %s needs %d per sample", k, m->name, per);
+					if (k > 0 && pass == 1) {
+						io_parse_row(s, row, per, &bad);
+						vm_run(m, in, out, steps);
+						io_write_row(f, obin, out, n, steps, obin ? 0 : m->nthink);
+					}
+					s[len] = save;
+					if (!nl) break;
+					s = nl + 1;
+				}
+			}
+		}
+		if (opath) close_out(f, opath);
 	} else if (strcmp(cmd, "c") == 0) {
 		FILE *f = stdout;
 		if (argc == 5 && strcmp(argv[3], "-o") == 0) {

@@ -1,0 +1,6 @@
+# xor truth table, one sample per row
+0,0
+1,0
+
+0,1   # comment after values
+1 1

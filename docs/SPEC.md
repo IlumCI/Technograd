@@ -191,7 +191,39 @@ README. These properties are part of the contract:
 - Genuine semantic errors, such as shape mismatches between existing values,
   produce no candidates.
 
-## 12. Roadmap
+## 12. Command-line data I/O
+
+File formats are chosen by extension:
+
+| Extension | Format |
+|-----------|--------|
+| `.bin`, `.f32` | raw little-endian IEEE-754 f32, no header (the same format `file("...")` params read) |
+| anything else | text: numbers separated by commas and/or whitespace; `#` starts a comment to end of line |
+
+Commands:
+
+```
+tgc run   <file> <in>... [-o out]   each <in> is inline values (1,2,3) or @path
+tgc batch <file> <data> [-o out]    one sample per row, or a raw f32 stream
+```
+
+- **`@path` inputs.** The file must hold exactly `numel` values for that
+  input. In text files the line structure is ignored.
+- **`run -o`.** Writes the output instead of printing it. A text file gets one
+  row: the output values, then one column per think loop with its step count.
+  A binary file gets the output values only.
+- **`batch`, text input.** Each non-blank, non-comment row is one sample: all
+  inputs concatenated in signature order (`forward(v: f32[3], k: f32)` takes 4
+  values per row). Each sample produces one output row in the `run -o` text
+  format, written to stdout or `-o`.
+- **`batch`, binary input.** The stream is consecutive samples of the same
+  concatenated layout, and its length must be a multiple of the per-sample
+  count. Binary output is the output tensors back to back.
+- **Atomic failure.** The whole input is validated (row widths, numbers,
+  stream length) before anything is computed or any output file is created.
+  A bad row 1000 produces no output at all, not 999 rows.
+
+## 13. Roadmap
 
 Ordered by importance for latent-reasoning models on embedded targets:
 

@@ -156,6 +156,12 @@ void plan_dump(const Module *m, FILE *f);
 void vm_run(const Module *m, const float **in, float *out, int *steps);
 void cgen(const Module *m, FILE *f);
 
+/* tensor file I/O (io.c): .bin/.f32 = raw little-endian f32, else text */
+int io_is_binary(const char *path);
+int io_parse_row(const char *s, float *v, int max, const char **bad);
+float *io_load(const char *path, int *count);
+void io_write_row(FILE *f, int binary, const float *v, int n, const int *steps, int nsteps);
+
 /* auto-fixer (fixer.c) */
 char *autofix(const char *src, const char *path, int verbose, int *nfixed); /* NULL if unrepaired */
 int fixer_train(const char *out, char **corpus, int n);
