@@ -1,0 +1,34 @@
+# Streaming causal attention over a fixed-size key/value ring: one token per
+# run. Keys and values live in RAM state; each run writes one ring slot, so
+# memory is fixed (W x d) however long the stream, and a compiled C unit
+# needs no allocation. Positions enter through rotary embeddings (rope), so
+# a key keeps its absolute rotation in the ring and the ring's slot order is
+# irrelevant: this computes exactly what attention(Q, K, V, 4) computes over
+# the whole sequence at once (tests/attn/window.tg, compared in the tests).
+model kv_attention
+
+param Wq : f32[8, 8] = rand(61, 0.5)
+param Wk : f32[8, 8] = rand(62, 0.5)
+param Wv : f32[8, 8] = rand(63, 0.5)
+param idx : f32[4] = [0, 1, 2, 3]
+param ones8 : f32[8] = ones
+
+state K : f32[4, 8] = zeros
+state V : f32[4, 8] = zeros
+state pos : f32 = 0
+
+def forward(x: f32[8]) -> f32[8]:
+    q = rope(Wq @ x, pos)
+    k = rope(Wk @ x, pos)
+    v = Wv @ x
+    slot = pos - 4 * floor(pos / 4)
+    hot = step(slot + 0.5 - idx) * step(idx + 0.5 - slot)
+    keep = outer(1 - hot, ones8)
+    Kc = K * keep + outer(hot, k)
+    Vc = V * keep + outer(hot, v)
+    filled = step(pos + 0.5 - idx)
+    p = softmax(Kc @ q * 0.353553391 + (filled - 1) * 1000000000)
+    update K[reshape(slot, 1)] = reshape(k, 1, 8)
+    update V[reshape(slot, 1)] = reshape(v, 1, 8)
+    update pos = pos + 1
+    return p @ Vc

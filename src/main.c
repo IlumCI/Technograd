@@ -11,7 +11,9 @@ static void usage(void)
 	      "  ir    <file>              print canonical TGIR (S-expressions)\n"
 	      "  plan  <file>              print the static memory plan\n"
 	      "  run   <file> <in>... [-o out]   interpret; each input is comma-separated values or @file\n"
-	      "  batch <file> <data> [-o out]    one sample per text row, or a raw .bin/.f32 stream\n"
+	      "  batch <file> <data> [-o out]    one sample per text row, or a raw .bin/.f32 stream; data '-' = stdin\n"
+	      "  stream <file> [src] [-o dst]    row in, row out, flushed; src/dst: - (std), a file, or tcp://HOST:PORT\n"
+	      "  serve <file> --listen [HOST:]PORT   TCP row protocol and HTTP (GET /health, GET /, POST /run)\n"
 	      "  c     <file> [-o out.c]   emit a freestanding C unit\n"
 	      "  fix   <file> [-o out.tg]  repair compile errors with the neural-forest fixer\n"
 	      "  train SOURCE [-o DIR] [--target COL] ...  train a model on a dataset file or hf:OWNER/NAME\n"
@@ -238,7 +240,8 @@ static void batch_rows(void *ctx, int lo, int hi, int tid)
  * f32, the format param file("...") initializers load. */
 static void save_states(const Module *m, const char *prefix, const char *cmd)
 {
-	if (strcmp(cmd, "run") != 0 && strcmp(cmd, "batch") != 0) die(NULL, 0, "--save-state applies to run and batch");
+	if (strcmp(cmd, "run") != 0 && strcmp(cmd, "batch") != 0 && strcmp(cmd, "stream") != 0 && strcmp(cmd, "serve") != 0)
+		die(NULL, 0, "--save-state applies to run, batch, stream and serve");
 	int any = 0;
 	for (int v = 0; v < m->nval; v++) {
 		const Value *x = &m->val[v];
@@ -337,7 +340,17 @@ int main(int argc, char **argv)
 	m->trace = 1;
 	if (tr_on(1)) trace_plan(m, tr_now_ms() - tp);
 
-	if (strcmp(cmd, "check") == 0) {
+	int status = 0;
+	if (strcmp(cmd, "stream") == 0) {
+		const char *opath = take_output(&argc, argv);
+		if (argc != 3 && argc != 4) usage();
+		tg_signals();
+		status = stream_main(m, argc == 4 ? argv[3] : "-", opath);
+	} else if (strcmp(cmd, "serve") == 0) {
+		if (argc != 5 || strcmp(argv[3], "--listen") != 0) usage();
+		tg_signals();
+		status = serve_main(m, argv[4]);
+	} else if (strcmp(cmd, "check") == 0) {
 		if (argc != 3) usage();
 		printf("ok: model %s, %d input(s), %d think loop(s), arena %d bytes\n", m->name, m->ninputs, m->nthink, m->arena * 4);
 	} else if (strcmp(cmd, "ir") == 0) {
@@ -385,6 +398,7 @@ int main(int argc, char **argv)
 		/* 1. load and validate everything before computing or creating the output */
 		int rows;
 		float *all = load_samples(data, per, m->name, &rows);
+		tg_signals(); /* a stop request ends the batch after the current block, state saved */
 		FILE *f = opath ? open_out(opath) : stdout;
 
 		/* 2. rows of a block run in parallel; blocks are written in input order */
@@ -397,7 +411,7 @@ int main(int argc, char **argv)
 			       xmalloc((size_t)block * (size_t)nt * sizeof(int)),
 			       xmalloc((size_t)threads * (size_t)afl * sizeof(float)), afl,
 			       xmalloc((size_t)threads * (size_t)(m->ninputs ? m->ninputs : 1) * sizeof(float *)) };
-		for (int b0 = 0; b0 < rows; b0 += block) {
+		for (int b0 = 0; b0 < rows && !tg_stopping(); b0 += block) {
 			int cnt = rows - b0 < block ? rows - b0 : block;
 			j.base = b0;
 			int grain = cnt / (16 * threads);
@@ -410,6 +424,7 @@ int main(int argc, char **argv)
 		}
 		if (opath) close_out(f, opath);
 		if (tr_on(1)) trace_batch(m, &acc, tr_now_ms() - tb);
+		status = tg_exit_status();
 	} else if (strcmp(cmd, "c") == 0) {
 		FILE *f = stdout;
 		if (argc == 5 && strcmp(argv[3], "-o") == 0) {
@@ -430,5 +445,5 @@ int main(int argc, char **argv)
 		usage();
 	}
 	if (save_state) save_states(m, save_state, cmd);
-	return 0;
+	return status;
 }

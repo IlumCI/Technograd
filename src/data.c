@@ -439,7 +439,7 @@ static void load_npy(Table *t, const char *path)
 /* ---- Hugging Face ------------------------------------------------------- */
 
 /* Run curl without a shell; returns the response body or dies with a hint. */
-static char *http_get(const char *url, const char *what)
+static char *http_get(const char *url, const char *what, int hf)
 {
 	int fd[2];
 	if (pipe(fd)) die(NULL, 0, "pipe failed");
@@ -448,7 +448,7 @@ static char *http_get(const char *url, const char *what)
 	posix_spawn_file_actions_adddup2(&fa, fd[1], 1);
 	posix_spawn_file_actions_addclose(&fa, fd[0]);
 	char auth[600];
-	const char *tok = getenv("HF_TOKEN");
+	const char *tok = hf ? getenv("HF_TOKEN") : NULL; /* the token goes to Hugging Face only */
 	char *argv[16];
 	int a = 0;
 	argv[a++] = "curl";
@@ -470,7 +470,7 @@ static char *http_get(const char *url, const char *what)
 	int rc = posix_spawnp(&pid, "curl", &fa, NULL, argv, environ);
 	posix_spawn_file_actions_destroy(&fa);
 	close(fd[1]);
-	if (rc) die(NULL, 0, "cannot run curl (needed for hf: datasets): %s", strerror(rc));
+	if (rc) die(NULL, 0, "cannot run curl (needed for hf: and http(s):// sources): %s", strerror(rc));
 	size_t cap = 1 << 16, n = 0;
 	char *buf = xmalloc(cap);
 	for (;;) {
@@ -485,8 +485,8 @@ static char *http_get(const char *url, const char *what)
 	int st;
 	waitpid(pid, &st, 0);
 	if (!WIFEXITED(st) || WEXITSTATUS(st))
-		die(NULL, 0, "fetching %s failed (curl exit %d); check the dataset id, network access%s", what,
-		    WIFEXITED(st) ? WEXITSTATUS(st) : -1, tok ? "" : ", or set HF_TOKEN for gated datasets");
+		die(NULL, 0, "fetching %s failed (curl exit %d); check the %s, network access%s", what, WIFEXITED(st) ? WEXITSTATUS(st) : -1,
+		    hf ? "dataset id" : "URL", hf && !tok ? ", or set HF_TOKEN for gated datasets" : "");
 	return buf;
 }
 
@@ -528,7 +528,7 @@ static void load_hf(Table *t, const char *spec, int max_rows)
 	if (!*config || !*split) { /* choose config (first) and split (train if present) */
 		snprintf(url, sizeof url, "https://datasets-server.huggingface.co/splits?dataset=%s", eid);
 		J *v;
-		JP j = { http_get(url, id), "splits", 1 };
+		JP j = { http_get(url, id, 1), "splits", 1 };
 		v = jvalue(&j, 0);
 		J *sp = jget(v, "splits");
 		if (!sp || sp->k != J_ARR || !sp->len) die(NULL, 0, "%s: no splits available (the dataset may need conversion on the Hub)", id);
@@ -584,7 +584,7 @@ static void load_hf(Table *t, const char *spec, int max_rows)
 		long want = max_rows - off < 100 ? max_rows - off : 100;
 		snprintf(url, sizeof url, "https://datasets-server.huggingface.co/rows?dataset=%s&config=%s&split=%s&offset=%ld&length=%ld",
 			 eid, ec, es, off, want);
-		char *body = http_get(url, id);
+		char *body = http_get(url, id, 1);
 		JP j = { body, "rows", 1 };
 		J *page = jvalue(&j, 0);
 		J *rows = jget(page, "rows"), *tot = jget(page, "num_rows_total");
@@ -604,6 +604,22 @@ static void load_hf(Table *t, const char *spec, int max_rows)
 
 /* ---- loading ------------------------------------------------------------ */
 
+/* JSON Lines, JSON or delimited text, by name and then by content. */
+static void load_text(Table *t, char *text, const char *src)
+{
+	const char *p = text;
+	while (isspace((unsigned char)*p)) p++;
+	int jl = ends_with(src, ".jsonl") || ends_with(src, ".ndjson");
+	if (!jl && *p == '{') { /* one object per line, or a single object holding rows */
+		const char *nl = strchr(p, '\n');
+		while (nl && isspace((unsigned char)*nl)) nl++;
+		jl = nl && *nl == '{';
+	}
+	if (jl) { t->format = "jsonl"; load_json_text(t, text, src, 1); }
+	else if (*p == '{' || *p == '[') { t->format = "json"; load_json_text(t, text, src, 0); }
+	else { t->format = "delimited text"; load_delimited(t, text, src); }
+}
+
 Table *data_load(const char *src, int max_rows)
 {
 	Table *t = xmalloc(sizeof *t);
@@ -611,25 +627,20 @@ Table *data_load(const char *src, int max_rows)
 	if (!strncmp(src, "hf:", 3)) {
 		t->format = "huggingface";
 		load_hf(t, src, max_rows);
+	} else if (!strncmp(src, "http://", 7) || !strncmp(src, "https://", 8)) { /* text formats over the network */
+		char path[1024];
+		snprintf(path, sizeof path, "%s", src);
+		path[strcspn(path, "?#")] = 0;
+		if (ends_with(path, ".npy")) die(NULL, 0, "%s: download .npy files first (only text formats are read from URLs)", src);
+		char *text = http_get(src, src, 0);
+		load_text(t, text, path);
 	} else if (ends_with(src, ".npy")) {
 		t->format = "npy";
 		load_npy(t, src);
 	} else if (ends_with(src, ".bin") || ends_with(src, ".f32")) {
 		die(NULL, 0, "%s: raw f32 has no columns; convert it with numpy (.npy) or use tgc batch directly", src);
 	} else {
-		size_t len;
-		char *text = read_file(src, &len);
-		const char *p = text;
-		while (isspace((unsigned char)*p)) p++;
-		int jl = ends_with(src, ".jsonl") || ends_with(src, ".ndjson");
-		if (!jl && *p == '{') { /* one object per line, or a single object holding rows */
-			const char *nl = strchr(p, '\n');
-			while (nl && isspace((unsigned char)*nl)) nl++;
-			jl = nl && *nl == '{';
-		}
-		if (jl) { t->format = "jsonl"; load_json_text(t, text, src, 1); }
-		else if (*p == '{' || *p == '[') { t->format = "json"; load_json_text(t, text, src, 0); }
-		else { t->format = "delimited text"; load_delimited(t, text, src); }
+		load_text(t, read_file(src, NULL), src);
 	}
 	if (t->nrows > max_rows) t->nrows = max_rows;
 	if (!t->nrows) die(NULL, 0, "%s: no rows", src);

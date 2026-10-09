@@ -1,7 +1,0 @@
-# expect: grad through a fixed-budget think loop is not supported
-model e
-def forward(x: f32[2]) -> f32[2]:
-    h = x
-    think h for 5:
-        h = tanh(h + x)
-    return grad(sum(h), x)

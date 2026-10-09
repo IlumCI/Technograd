@@ -58,6 +58,7 @@ definition is reported at the imported line but under the root file's name.
 | `zeros`, `ones`, `fill(v)` | constant fill |
 | `rand(seed, scale)` | uniform in `[-scale, scale)` from xorshift32 seeded with `seed`; deterministic |
 | `file("path")` | raw little-endian f32, exactly `4 * numel` bytes; relative paths resolve against the source file's directory |
+| `env("NAME")`, `env("NAME", v)` | an environment variable at compile time: `numel` numbers, or one number to fill; without it, the default `v` (or a compile error) |
 | `[ ... ]` / `v` | literal values in row-major order; nesting is optional, the count must equal `numel` |
 
 All initializers are evaluated at compile time. The IR always holds the values
@@ -88,7 +89,9 @@ and parentheses. All binary operators are left associative.
 | `-a`, `neg tanh relu sigmoid exp sqrt gelu silu` | elementwise, shape preserved; `gelu` uses the tanh approximation |
 | `a @ b` (`matmul`, `dot`) | `(m,k)@(k)->(m)`, `(m,k)@(k,n)->(m,n)`, `(k)@(k,n)->(n)`, `(k)@(k)->()` |
 | `softplus(x)`, `log(x)` | elementwise; softplus is overflow-free: `max(x,0) + log1p(exp(-|x|))` |
-| `sin(x)`, `cos(x)` | elementwise |
+| `sin(x)`, `cos(x)`, `floor(x)` | elementwise; `floor` has zero derivative |
+| `rope(x, pos)` | rotary position embedding (arXiv:2104.09864): x (d) at a scalar position, or the rows of x (T, d) at positions (T); channel pair (2i, 2i+1) rotates by pos * 10000^(-2i/d); d even |
+| `attention(Q, K, V, W)` | causal attention of the rows of Q (T, d) over K (T, d) and V (T, e) within a window of W rows (row t sees t-W+1 .. t): `softmax(Q K^T / sqrt(d) + M) V`, M a constant 0 / -1e9 mask; W a literal, W >= T is full causal attention (section 20) |
 | `reshape(x, d0, d1, ...)` | the same elements in row-major order with new dimensions (integer literals, same element count); TGIR `(reshape X)` with the target as the declared type |
 | `softmax(x)`, `rmsnorm(x)` | over the last axis, shape preserved, rank >= 1; rmsnorm eps = 1e-6, no gain |
 | `sum(x)`, `mean(x)` | reduce to scalar |
@@ -149,8 +152,8 @@ TYPE  := (f32 d...)
 INSTR := (NAME TYPE (OP VALUE...))        ; OP from the builtin table, by name; 1 to 3 operands
        | (NAME TYPE (const NUMBER))
        | (NAME TYPE (think INIT MAX EPS|none INSTR... (yield VALUE)))
-       | (scan T forward|reverse (carry C TYPE INIT)... (in X TYPE SEQ)...
-               (body INSTR...) (next C VALUE)... (emit Y TYPE VALUE)...)   ; section 19
+       | (scan T forward|reverse [steps] (carry C TYPE INIT)... (in X TYPE SEQ)...
+               (body INSTR...) (next C VALUE)... (emit Y TYPE VALUE)...)   ; section 19; `steps`: a fixed-budget think loop turned into a scan by `grad` reports T in the next steps slot
 ```
 
 Rules enforced by the reader:
@@ -231,7 +234,9 @@ Commands:
 
 ```
 tgc run   <file> <in>... [-o out]   each <in> is inline values (1,2,3) or @path
-tgc batch <file> <data> [-o out]    one sample per row, or a raw f32 stream
+tgc batch <file> <data> [-o out]    one sample per row, or a raw f32 stream; <data> - is stdin
+tgc stream <file> [src] [-o dst]    one row in, one row out, flushed per row
+tgc serve <file> --listen [HOST:]PORT
 ```
 
 - **`@path` inputs.** The file must hold exactly `numel` values for that
@@ -249,6 +254,42 @@ tgc batch <file> <data> [-o out]    one sample per row, or a raw f32 stream
 - **Atomic failure.** The whole input is validated (row widths, numbers,
   stream length) before anything is computed or any output file is created.
   A bad row 1000 produces no output at all, not 999 rows.
+
+### Streams, sockets and signals
+
+The model stays a pure function with a static memory plan; `stream` and
+`serve` connect it to the operating system and the network.
+
+- **`stream`.** Reads rows one at a time and writes each output row as soon
+  as it is computed (flushed), so it works in pipelines and on endless
+  inputs. `src` and `dst` are `-` (stdin/stdout, the defaults), a file, or
+  `tcp://HOST:PORT`, a connection tgc opens. With a `tcp://` source and no
+  `-o`, outputs go back over the same connection. A malformed row produces
+  `error: ...` on the output and the stream continues.
+- **`serve`.** A TCP server; HOST defaults to 127.0.0.1 (give 0.0.0.0 to
+  accept other machines). Each connection uses one of two protocols, chosen
+  by its first line:
+  - the row protocol: send rows, receive one output row each, any number per
+    connection;
+  - HTTP/1.1: `GET /health` (`ok`), `GET /` (the signature as JSON: inputs
+    and types, output type, values per row, think loops, whether the model
+    is stateful), `POST /run` (body rows in, output rows out, text/plain).
+
+  Stateless models serve connections in parallel, one thread and private
+  arena each. A model with `update`s (or running with `-j` > 1) runs one row
+  at a time in arrival order, so its state evolves exactly as in `batch`
+  (tested: HTTP and row-protocol requests against `batch` on the same rows,
+  outputs and saved state byte-identical).
+- **Signals.** SIGINT and SIGTERM stop `batch` (after the current block),
+  `stream` and `serve` (after the current row) cleanly: outputs are flushed,
+  `--save-state` is written, and the exit status is 128 + the signal number
+  (130, 143). SIGPIPE is ignored, so a disconnecting peer ends only its own
+  connection.
+- **Environment.** `env("NAME")` initializers read configuration from the
+  environment when a model is compiled (section 4).
+- **Datasets over HTTP.** `tgc train` and `tgc data` accept `http://` and
+  `https://` URLs of CSV/TSV/JSON/JSON Lines files (fetched with curl;
+  `HF_TOKEN` is sent only to Hugging Face).
 
 ## 13. Tracing and logs
 
@@ -471,8 +512,11 @@ gradient  theta_bar = (df/dtheta)^T u
   loop's initial state, so the init receives no gradient.
 - **Extra steps lines.** The generated adjoint loop is an ordinary think
   loop, so it appears in `steps` output.
-- **Not yet supported:** fixed-budget loops (no `until`) and nested think
-  loops. Both are compile errors.
+- **Fixed-budget loops** (no `until`) have no fixed point. `grad` turns
+  such a loop into a scan of its budget and differentiates it through time
+  (section 19); the loop still reports its step count.
+- **Nested loops** (think or scan, in any order and depth) inside a body
+  are cloned whole and differentiated by their own rule.
 
 ### Training and deployment
 
@@ -491,7 +535,7 @@ model itself also compiles to C (about 11.5 KB for the XOR MLP, using only
 
 `tests/gradcheck.pl` compares every derivative rule, including both
 implicit-differentiation cases and both second-order `spmm` cases, against
-central finite differences (38 cases, worst relative error 4.3e-4). A planted bug in one rule makes 9 cases fail.
+central finite differences (46 cases, worst relative error 4.3e-4). A planted bug in one rule makes 9 cases fail.
 
 ## 17. Training statement and optimizers
 
@@ -622,6 +666,7 @@ The format is detected from the extension, falling back to the content.
 | `*.json` | an array of objects or arrays, or an object holding one (`rows`, `data`, `records`, ...); Hugging Face API pages are recognized |
 | `*.npy` | NumPy arrays: f4/f8, signed and unsigned integers, 1-D or 2-D, C order |
 | `hf:OWNER/NAME[/CONFIG[/SPLIT]]` | the Hugging Face datasets-server rows API |
+| `http://...`, `https://...` | a text-format file (the format from the URL path, then the content) |
 
 Notes on `hf:` sources:
 
@@ -855,8 +900,13 @@ dead-code elimination. `-vv` reports each transform:
 `[grad] backpropagation through a 12-step scan: 1 carry, 6 accumulated
 gradient(s), 1 stacked carry history`.
 
-Not yet supported: gradients through loops nested in a scan body (a compile
-error). Forward execution of nested loops works.
+Loops nested in a scan body (scans, think loops with or without `until`)
+are differentiated too: the reverse body clones them whole, and each is
+differentiated by its own rule inside the reverse scan. Six further
+finite-difference cases cover a fixed-budget think loop, a scan in a scan, a
+think-until in a scan, a fixed think in a scan, a scan in a think-until, and
+a second-order gradient through a fixed-budget loop; `tests/scan/nested_grad.tg`
+runs several at once in the VM, from TGIR and as C.
 
 **Verification.** Six finite-difference cases in `tests/gradcheck.pl`:
 gradients with respect to the sequence, the weights and the initial carry;
@@ -890,7 +940,58 @@ predicting zero (about 20% measured) in 0.8 s. The full training step
 model compiles to C and trains on the device exactly like the VM (tested
 over 100 sequences).
 
-## 20. Roadmap
+## 20. Attention and latent reasoning
+
+### Causal attention over a key/value ring
+
+`attention(Q, K, V, W)` is the training form: every position at once, each
+row attending to itself and the W-1 rows before it. For deployment the same
+layer runs one token per call over a ring of W keys and values held in
+`state` (`examples/kv_attention.tg`):
+
+```python
+slot = pos - 4 * floor(pos / 4)                       # ring slot of this token
+hot = step(slot + 0.5 - idx) * step(idx + 0.5 - slot) # one-hot of the slot
+Kc = K * outer(1 - hot, ones8) + outer(hot, k)        # ring with this token in it
+filled = step(pos + 0.5 - idx)                        # slots written so far
+p = softmax(Kc @ q * 0.353553391 + (filled - 1) * 1000000000)
+update K[reshape(slot, 1)] = reshape(k, 1, 8)          # one row written per call
+update pos = pos + 1
+return p @ Vc
+```
+
+Keys are stored already rotated by `rope` at their absolute position, so the
+order of slots in the ring does not matter and the streaming form computes
+the windowed attention exactly. Memory is W x d whatever the stream length,
+and the compiled C unit allocates nothing. Tested: the outputs of 7 streamed
+tokens (wrapping a ring of 4) equal `attention(..., 4)` over the sequence
+within 1e-5 (measured 6e-8), and the C unit equals the VM. Gradients of
+`attention` and `rope` are finite-difference checked.
+
+### Coconut curriculum, trained in the language
+
+`examples/coconut/` trains a Coconut-style model (Hao et al.,
+arXiv:2412.06769): the answer to a k-hop question over a graph given in the
+input is read out after k continuous latent steps (`think h for k:`), with
+no supervision of the intermediate hops. Fixed-budget think loops are
+differentiated through time, so `train` handles it directly.
+`curriculum.sh` trains it in stages as Coconut does: stage k uses k latent
+steps on k-hop answers and starts from stage k-1's weights (`--save-state`,
+then `file()` initializers). Accuracy over the last 500 of each stage's
+fresh examples (AdamW lr 0.003):
+
+| Hops | Rows per stage | Curriculum (final stage) | Direct, from scratch, same total rows |
+|------|----------------|--------------------------|---------------------------------------|
+| 4 | 1000 | 100% | 92.8% |
+| 6 | 1000 | 100% | 100% |
+| 8 | 2000 | 100% | 83.6% |
+
+At lr 0.01 the curriculum broke at stage 3 (14.6%), so the rate matters
+more than the schedule; at lr 0.003 the curriculum reached every depth
+tried, while direct training fell short at 4 hops with 1000 rows per stage
+and at 8 hops. The 4-hop curriculum is regression-tested.
+
+## 21. Roadmap
 
 Ordered by importance for latent-reasoning models on embedded targets:
 
@@ -900,11 +1001,11 @@ Ordered by importance for latent-reasoning models on embedded targets:
    and MIMO, a fused scan kernel (the VM spends 10x the bag-of-words time
    on SST-2), and pretraining of the embeddings and layer on unlabeled text
    (next-token prediction with the same scan), which a 7k-sentence task
-   cannot replace. Causal attention over a fixed-size KV ring only where a
-   hybrid needs it.
-3. Autodiff through fixed-budget think loops (as a scan with a stored
-   history) and through loops nested in scan and think bodies.
-4. Learned halting heads (`until` driven by a predicate value) in addition to
+   cannot replace.
+3. Learned halting heads (`until` driven by a predicate value) in addition to
    convergence halting.
+4. Distributed execution: multiple processes over `serve`/`stream`
+   transports, then data-parallel training with gradients and optimizer
+   state partitioned across them (ZeRO, arXiv:1910.02054).
 5. Native backends from the planned IR: ARMv7-M/ARMv8-M assembly with
    CMSIS-NN style kernels, and RISC-V with the vector extension.

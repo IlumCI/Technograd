@@ -8,7 +8,7 @@
  *   arg      := NAME ':' type
  *   type     := 'f32' [ '[' INT {',' INT} ']' ]
  *   init     := 'zeros' | 'ones' | 'fill' '(' num ')' | 'rand' '(' num ',' num ')'
- *             | 'file' '(' STR ')' | literal
+ *             | 'file' '(' STR ')' | 'env' '(' STR [',' num] ')' | literal
  *   literal  := num | '[' literal {',' literal} ']'
  *   block    := NL INDENT stmt {stmt} DEDENT
  *   stmt     := NAME '=' expr NL | 'return' expr NL
@@ -249,6 +249,18 @@ static Sx *init(P *p)
 		Tok *s = expect(p, T_STR, "string");
 		expect_op(p, ")");
 		return sx_list(line, 2, sx_sym("file", line), sx_str(s->s, line));
+	}
+	if (iskw(t, "env")) { /* env("NAME") or env("NAME", default) */
+		next(p);
+		expect_op(p, "(");
+		Tok *s = expect(p, T_STR, "string");
+		Sx *e = sx_list(line, 2, sx_sym("env", line), sx_str(s->s, line));
+		if (isop(peek(p), ",")) {
+			next(p);
+			sx_push(e, sx_num(signed_num(p), line));
+		}
+		expect_op(p, ")");
+		return e;
 	}
 	Sx *data = sx_list(line, 1, sx_sym("data", line));
 	literal(p, data);

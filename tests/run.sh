@@ -38,7 +38,7 @@ tests/cases/nested.tg:0.3,-0.7 tests/cases/multi_input.tg:1,2,3:0.5 tests/cases/
 examples/use_import.tg:1,-1,2,-2 examples/delta_memory.tg:1,0,0,0:1,2,3,4 tests/bcast/broadcast.tg:0.1,-0.2,0.3,1,2,-1,0,0,0,-3,0.5,0.25
 tests/sparse/spmm.tg:0,1,2,0.5,5,-1,0,0,1,1,1,1,9,3,-1,2:0.5,-0.5
 tests/sparse/rows.tg:0,1,2,0.5,5,-1,1,1,1,1,9,0.3:0.5,-0.5
-tests/scan/scan.tg:1,2,3,4,5,6,7,8:1,0.5,-1,2 examples/selective_ssm.tg:0.1,0,0.2,0,-0.3,1,0.4,0,0.1,0,0.2,1,-0.1,0,0.3,0,0.2,0,-0.4,1,0.1,0,0.2,0:0.1,0.3,-0.3,0.1,0.2,0.2,0.1,0.4,0.6,-0.4,-0.3,-0.1
+tests/attn/window.tg:0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1,1.1,1.2,1.3,1.4,1.5,1.6,-0.1,-0.2,-0.3,-0.4,-0.5,-0.6,-0.7,-0.8,0.3,0.1,0.4,0.1,0.5,0.9,0.2,0.6,1,0,1,0,1,0,1,0,0,1,0,1,0,1,0,1,0.5,0.5,0.5,0.5,-0.5,-0.5,-0.5,-0.5 tests/scan/scan.tg:1,2,3,4,5,6,7,8:1,0.5,-1,2 tests/scan/nested_grad.tg:0.1,0.2,0.3,-0.4,0.5,0.1,-0.2,0.3 examples/selective_ssm.tg:0.1,0,0.2,0,-0.3,1,0.4,0,0.1,0,0.2,1,-0.1,0,0.3,0,0.2,0,-0.4,1,0.1,0,0.2,0:0.1,0.3,-0.3,0.1,0.2,0.2,0.1,0.4,0.6,-0.4,-0.3,-0.1
 examples/drift_calibration.tg:10,20,30"
 for c in $CASES; do
 	f=${c%%:*}
@@ -138,7 +138,7 @@ $TGC ir examples/delta_memory.tg | grep -q "(update mem %" && ok || bad "TGIR lo
 #     on-device training in generated C matching the VM bit for bit
 mkdir -p "$TMP/gc"
 if perl tests/gradcheck.pl "$TGC" "$TMP/gc" > "$TMP/gc.out"; then ok; else bad "gradcheck: $(grep FAIL "$TMP/gc.out")"; fi
-[ "$(grep -c "^ok" "$TMP/gc.out")" -ge 38 ] && ok || bad "gradcheck ran too few cases"
+[ "$(grep -c "^ok" "$TMP/gc.out")" -ge 46 ] && ok || bad "gradcheck ran too few cases"
 perl -e 'srand(3); my @d=([0,0,0],[0,1,1],[1,0,1],[1,1,0]); for (1..1500) { for my $r (sort { rand() <=> 0.5 } @d) { print join(",", @$r), "\n" } }' > "$TMP/xt.csv"
 $TGC batch examples/train_xor.tg "$TMP/xt.csv" --save-state "$TMP/xor" -o "$TMP/xp.csv"
 paste -d, "$TMP/xt.csv" "$TMP/xp.csv" | tail -8 | awk -F, '{ if ($3 == 1 && $4 < 0.9 || $3 == 0 && $4 > 0.1) bad = 1 } END { exit bad }' && ok || bad "XOR not learned"
@@ -187,6 +187,46 @@ grep -q "selective SSM over 'text'" "$TMP/os.log" && grep -q "scan h, pv, p, n o
 printf 'text\nthe film was not bad\nthe film was bad not\n' > "$TMP/onew.csv"
 [ "$($TGC predict "$TMP/ord_ssm" "$TMP/onew.csv" 2>/dev/null | cut -d, -f1 | tr '\n' ' ')" = 'prediction "pos" "neg" ' ] && ok || bad "ssm predict"
 $CC -std=c99 -Wall -Werror -c -o "$TMP/oinfer.o" "$TMP/ord_ssm/infer.c" && ok || bad "ssm infer.c does not compile"
+# attention: streaming over a KV ring (one token per run) equals the windowed parallel form
+perl -e 'srand(3); for (1..7) { print join(",", map { sprintf("%.3f", 2*rand()-1) } 1..8), "\n" }' > "$TMP/seq.csv"
+$TGC batch examples/kv_attention.tg "$TMP/seq.csv" | tr ',' '\n' > "$TMP/stream.out"
+$TGC run tests/attn/window.tg "$(paste -sd, "$TMP/seq.csv")" | tr ' ' '\n' > "$TMP/par.out"
+paste "$TMP/stream.out" "$TMP/par.out" | awk '{ d = $1 - $2; if (d < 0) d = -d; if (d > m) m = d } END { exit !(NR == 56 && m < 1e-5) }' && ok || bad "KV-ring attention differs from windowed attention"
+$TGC c examples/kv_attention.tg -o "$TMP/kv.c" && $CC -std=c99 -O2 -Wall -Wextra -Werror -pedantic -DTG_MAIN -o "$TMP/kvb" "$TMP/kv.c" -lm && ok || bad "kv_attention unit compile"
+[ "$("$TMP/kvb" $(cat "$TMP/seq.csv") | tr ' ' ',')" = "$($TGC batch examples/kv_attention.tg "$TMP/seq.csv")" ] && ok || bad "C KV ring differs from VM"
+# Coconut curriculum: latent think steps trained by BPTT, stage k warm-started from stage k-1
+sh examples/coconut/curriculum.sh "$TGC" "$TMP/coconut" 1000 4 > "$TMP/coconut.log" 2>&1
+grep -q "stage 4 (4 latent steps, 4-hop answers): 100.0%" "$TMP/coconut.log" && ok || bad "Coconut curriculum: $(tail -3 "$TMP/coconut.log")"
+# OS and network host layer: env() initializers, stdin, stream, serve, signals, URL datasets
+printf 'model ev\nparam g : f32[3] = env("TG_TEST_GAIN", 1)\ndef forward(x: f32[3]) -> f32[3]:\n    return x * g\n' > "$TMP/ev.tg"
+[ "$($TGC run "$TMP/ev.tg" 1,2,3)" = "1 2 3" ] && [ "$(TG_TEST_GAIN=1,0,-1 $TGC run "$TMP/ev.tg" 1,2,3)" = "1 0 -3" ] && [ "$(TG_TEST_GAIN=2 $TGC run "$TMP/ev.tg" 1,2,3)" = "2 4 6" ] && ok || bad "env() initializer"
+printf '1,0\n0,0\n1,1\n' > "$TMP/x3.csv"
+[ "$($TGC batch examples/xor.tg - < "$TMP/x3.csv")" = "$($TGC batch examples/xor.tg "$TMP/x3.csv")" ] && ok || bad "batch from stdin"
+[ "$(printf '1,0\nbad\n\n0,0\n' | $TGC stream examples/xor.tg | tr '\n' '|')" = "1|error: bad number near 'bad'|0|" ] && ok || bad "stream rows"
+mkfifo "$TMP/fifo"
+$TGC stream examples/delta_memory.tg "$TMP/fifo" -o "$TMP/fifo.out" --save-state "$TMP/fs" & SPID=$!
+exec 7>"$TMP/fifo"; printf '1,0,0,0,1,2,3,4\n' >&7; sleep 0.3; kill -TERM $SPID; wait $SPID; st=$?; exec 7>&-
+[ $st = 143 ] && [ "$(wc -l < "$TMP/fifo.out")" = 1 ] && [ -s "$TMP/fs.mem.bin" ] && ok || bad "stream SIGTERM: status $st"
+if command -v curl > /dev/null; then
+	PORT=$((30000 + $$ % 20000))
+	$TGC serve examples/delta_memory.tg --listen 127.0.0.1:$PORT --save-state "$TMP/sv" 2> "$TMP/serve.log" & SPID=$!
+	for i in $(seq 50); do curl -sf "http://127.0.0.1:$PORT/health" > /dev/null && break; sleep 0.1; done
+	[ "$(curl -s "http://127.0.0.1:$PORT/health")" = ok ] && ok || bad "serve /health"
+	curl -s "http://127.0.0.1:$PORT/" | grep -q '"values_per_row":8,"think_loops":0,"stateful":true' && ok || bad "serve signature"
+	head -4 tests/state/mem.csv | curl -s --data-binary @- "http://127.0.0.1:$PORT/run" > "$TMP/srv.out"
+	exec 8<>"/dev/tcp/127.0.0.1/$PORT"; sed -n 5,6p tests/state/mem.csv >&8; read -r r1 <&8; read -r r2 <&8; exec 8>&-
+	printf '%s\n%s\n' "$r1" "$r2" >> "$TMP/srv.out"
+	kill -TERM $SPID; wait $SPID; st=$?
+	head -6 tests/state/mem.csv > "$TMP/mem6.csv"
+	$TGC batch examples/delta_memory.tg "$TMP/mem6.csv" -o "$TMP/bat.out" --save-state "$TMP/bt"
+	cmp -s "$TMP/srv.out" "$TMP/bat.out" && ok || bad "serve (HTTP + row protocol) differs from batch"
+	[ $st = 143 ] && cmp -s "$TMP/sv.mem.bin" "$TMP/bt.mem.bin" && ok || bad "serve SIGTERM: status $st, state not saved"
+	perl -MIO::Socket::INET -e '$s = IO::Socket::INET->new(LocalAddr => "127.0.0.1", LocalPort => $ARGV[0], Listen => 1, ReuseAddr => 1) or die; $c = $s->accept; print $c "1,0\n0,0\n1,1\n"; shutdown($c, 1); print while <$c>' $((PORT + 1)) > "$TMP/client.out" & PP=$!
+	sleep 0.3; $TGC stream examples/xor.tg "tcp://127.0.0.1:$((PORT + 1))"; wait $PP
+	[ "$(tr '\n' ' ' < "$TMP/client.out")" = "1 0 0 " ] && ok || bad "stream as a TCP client"
+	perl -MIO::Socket::INET -e '$s = IO::Socket::INET->new(LocalAddr => "127.0.0.1", LocalPort => $ARGV[0], Listen => 1, ReuseAddr => 1) or die; open F, "<", $ARGV[1]; { local $/; $b = <F>; } $c = $s->accept; while (<$c> =~ /\S/) {} print $c "HTTP/1.1 200 OK\r\nContent-Length: " . length($b) . "\r\nConnection: close\r\n\r\n$b"; close $c' $((PORT + 2)) tests/data/messy.csv & PP=$!
+	sleep 0.3; $TGC data inspect "http://127.0.0.1:$((PORT + 2))/messy.csv?v=1" | grep -q "rows     5" && ok || bad "dataset over http"; wait $PP
+fi
 # row-sparse (lazy) optimizer steps on spmm tables
 lz() { sed "s/OPT/$1/" > "$TMP/lz.tg" <<'TG'
 model lz

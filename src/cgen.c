@@ -160,6 +160,10 @@ static void block(G *g, const Block *b, int d)
 			}
 			ind(g, d);
 			fputs("}\n", g->f);
+			if (s->tid >= 0) {
+				ind(g, d);
+				fprintf(g->f, "tg_%s_steps[%d] = %d;\n", m->name, s->tid, s->T);
+			}
 			break;
 		}
 		case CLS_THINK: {

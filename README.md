@@ -32,7 +32,7 @@ make            # builds build/tgc (C11, no dependencies beyond libm; perl at bu
 build/tgc train hf:scikit-learn/iris            # any dataset, no configuration: detect, featurize, train, export
 build/tgc train reviews.csv --model ssm         # adds a Mamba-3-style sequence layer over the words
 build/tgc predict iris_model new_flowers.csv     # predictions on raw new data
-make test       # 195 checks (offline; TG_TEST_NETWORK=1 adds a Hugging Face run)
+make test       # 215 checks (offline; TG_TEST_NETWORK=1 adds a Hugging Face run)
 make fixer      # retrain the auto-fix forest (deterministic, ~15 s) and evaluate it on held-out programs
 
 build/tgc run  examples/latent_reasoner.tg 1,0,0,1,0,1,1,0
@@ -46,6 +46,10 @@ build/tgc batch examples/latent_reasoner.tg data.bin -j auto -o out.bin   # rows
 build/tgc batch examples/delta_memory.tg tests/state/mem.csv   # a model that rewrites its own memory every run
 build/tgc batch examples/train_xor.tg xor.csv --save-state xor   # online SGD via grad(); writes xor.<weight>.bin
 build/tgc batch examples/selective_ssm.tg seqs.csv   # a Mamba-style layer over 12-step sequences, trained by BPTT
+build/tgc batch examples/kv_attention.tg tokens.csv   # streaming causal attention over a fixed key/value ring
+sh examples/coconut/curriculum.sh build/tgc work     # Coconut curriculum: k latent steps for k-hop answers
+build/tgc serve examples/xor.tg --listen 8080      # TCP rows and HTTP (GET /health, GET /, POST /run)
+printf '1,0\n0,1\n' | build/tgc stream examples/xor.tg   # row in, row out; tcp://HOST:PORT works as source/sink
 build/tgc plan examples/latent_reasoner.tg   # arena layout: 320 B instead of 624 B unshared
 build/tgc c    examples/latent_reasoner.tg -o reasoner.c
 cc -O2 -DTG_MAIN reasoner.c -lm -o reasoner && ./reasoner 1,0,0,1,0,1,1,0
@@ -209,7 +213,8 @@ every failure.
 
 ## Research basis
 
-- Coconut, continuous latent reasoning: Hao et al., *Training Large Language Models to Reason in a Continuous Latent Space*, [arXiv:2412.06769](https://arxiv.org/abs/2412.06769). This is the source of `think`: the hidden state is the next input.
+- Coconut, continuous latent reasoning: Hao et al., *Training Large Language Models to Reason in a Continuous Latent Space*, [arXiv:2412.06769](https://arxiv.org/abs/2412.06769). This is the source of `think`: the hidden state is the next input. `examples/coconut/` runs its multi-stage curriculum in the language, by backpropagation through fixed-budget think loops.
+- Attention: rotary position embedding (RoFormer), [arXiv:2104.09864](https://arxiv.org/abs/2104.09864); sliding-window causal attention with a rolling key/value buffer as in Mistral 7B, [arXiv:2310.06825](https://arxiv.org/abs/2310.06825). This is the basis for `rope`, `attention` and `examples/kv_attention.tg`.
 - Recurrent depth with input re-injection: Geiping et al., *Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach*, [arXiv:2502.05171](https://arxiv.org/abs/2502.05171). This is the pattern used in `examples/latent_reasoner.tg`.
 - Convergence-based adaptive halting: AdaAnchor, [arXiv:2603.15051](https://arxiv.org/abs/2603.15051). It reports 48-60% fewer latent steps at equal budget. This is the basis for `until eps`.
 - Survey: *A Survey on Latent Reasoning*, [arXiv:2507.06203](https://arxiv.org/abs/2507.06203).
@@ -236,7 +241,8 @@ fixer/      forest.tg (trained ranker, a Technograd program), corpus/ (training 
 runtime/    tg_rt.h: kernels shared by the VM and the generated code
 examples/   xor.tg, newton.tg, latent_reasoner.tg, activations.tg + use_import.tg (cross-file),
             delta_memory.tg, drift_calibration.tg (self-updating state), train_xor.tg (train + adamw), sgd_by_hand.tg (the same, via grad + update),
-            selective_ssm.tg (scan + backpropagation through time)
+            selective_ssm.tg (scan + backpropagation through time), kv_attention.tg (KV-ring attention),
+            coconut/ (latent-reasoning curriculum)
 tests/      run.sh, positive cases, diagnostic cases, fix/ (auto-fix), imports/ (cross-file), data/ (datasets)
 docs/       SPEC.md
 ```

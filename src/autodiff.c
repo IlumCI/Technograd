@@ -334,6 +334,7 @@ static void vjp(AD *a, const Ins *in, int g, Adj *adj)
 	switch (in->op) {
 	case OP_CONST:
 	case OP_STEP:
+	case OP_FLOOR: /* piecewise constant */
 		return;
 	case OP_ADD:
 		if (w0) acc(a, adj, x0, red(a, g, x0));
@@ -513,16 +514,10 @@ static void sweep(AD *a, Block *b, int lo, int hi, Adj *adj)
 
 /* ---- think: implicit differentiation ------------------------------------- */
 
-static int has_think(const Block *b)
-{
-	for (int i = 0; i < b->len; i++)
-		if (b->v[i].op == OP_THINK || b->v[i].op == OP_SCAN) return 1;
-	return 0;
-}
-
 /* Re-emit a loop body into a->b with the values from[i] replaced by to[i].
  * Returns the map from body values to their clones (-1 outside the body);
- * the caller frees it. Bodies hold no nested loops (checked by callers). */
+ * the caller frees it. Nested think and scan loops are cloned whole, with
+ * fresh values for everything they define. */
 typedef struct {
 	int *map, n;
 	const int *from, *to;
@@ -536,17 +531,72 @@ static int cl_get(const Clone *c, int v)
 	return v < c->n && c->map[v] >= 0 ? c->map[v] : v;
 }
 
+static int fresh(AD *a, Clone *c, int v) /* a new value standing for loop-defined v */
+{
+	int o = mod_value(a->m, V_TMP, &a->m->val[v].sh, NULL);
+	c->map[v] = o;
+	return o;
+}
+
+static void clone_into(AD *a, const Block *body, Clone *c)
+{
+	Module *m = a->m;
+	for (int i = 0; i < body->len; i++) {
+		Ins in = body->v[i];
+		if (in.op == OP_THINK) {
+			int st = fresh(a, c, in.out);
+			Ins *ni = block_push(a->b);
+			int idx = a->b->len - 1;
+			ni->op = OP_THINK;
+			ni->out = st;
+			ni->init = cl_get(c, in.init);
+			ni->maxit = in.maxit;
+			ni->eps = in.eps;
+			ni->tid = m->nthink++;
+			mod_note_def(m, st, a->b, idx);
+			Block *outer = a->b, *nb = xmalloc(sizeof *nb);
+			a->b = nb;
+			clone_into(a, in.body, c);
+			a->b = outer;
+			outer->v[idx].body = nb;
+			outer->v[idx].yield = cl_get(c, in.yield);
+		} else if (in.op == OP_SCAN) {
+			const Scan *s = in.sc;
+			Scan *ns = scan_new(s->T, s->reverse);
+			if (s->tid >= 0) ns->tid = m->nthink++;
+			for (int k = 0; k < s->nc; k++) scan_carry(ns, fresh(a, c, s->c[k]), cl_get(c, s->init[k]), -1);
+			for (int j = 0; j < s->nx; j++) scan_seq(ns, cl_get(c, s->x[j]), fresh(a, c, s->xt[j]));
+			Ins *ni = block_push(a->b);
+			int idx = a->b->len - 1;
+			ni->op = OP_SCAN;
+			ni->sc = ns;
+			ni->out = ns->c[0];
+			for (int k = 0; k < ns->nc; k++) mod_note_def(m, ns->c[k], a->b, idx);
+			Block *outer = a->b, *nb = xmalloc(sizeof *nb);
+			a->b = nb;
+			clone_into(a, in.body, c);
+			a->b = outer;
+			outer->v[idx].body = nb;
+			for (int k = 0; k < s->nc; k++) ns->next[k] = cl_get(c, s->next[k]);
+			for (int y = 0; y < s->ny; y++) {
+				int ys = fresh(a, c, s->ys[y]);
+				scan_stack(ns, cl_get(c, s->y[y]), ys);
+				mod_note_def(m, ys, outer, idx);
+			}
+		} else {
+			c->map[in.out] = in.op == OP_CONST ? K(a, in.k)
+				       : in.op == OP_RESHAPE ? RESHAPE(a, cl_get(c, in.a[0]), &m->val[in.out].sh)
+				       : E3(a, in.op, cl_get(c, in.a[0]), in.na > 1 ? cl_get(c, in.a[1]) : -1, in.na > 2 ? cl_get(c, in.a[2]) : -1);
+		}
+	}
+}
+
 static Clone clone_block(AD *a, const Block *body, const int *from, const int *to, int nsub)
 {
 	Clone c = { NULL, a->m->nval, from, to, nsub };
 	c.map = xmalloc((size_t)c.n * sizeof *c.map);
 	for (int i = 0; i < c.n; i++) c.map[i] = -1;
-	for (int i = 0; i < body->len; i++) {
-		Ins in = body->v[i];
-		c.map[in.out] = in.op == OP_CONST ? K(a, in.k)
-			      : in.op == OP_RESHAPE ? RESHAPE(a, cl_get(&c, in.a[0]), &a->m->val[in.out].sh)
-			      : E3(a, in.op, cl_get(&c, in.a[0]), in.na > 1 ? cl_get(&c, in.a[1]) : -1, in.na > 2 ? cl_get(&c, in.a[2]) : -1);
-	}
+	clone_into(a, body, &c);
 	return c;
 }
 
@@ -599,7 +649,6 @@ static void scan_vjp(AD *a, Ins t, Adj *adj)
 {
 	Module *m = a->m;
 	Scan *s = t.sc; /* shared with the instruction in its block: history is added in place */
-	if (has_think(t.body)) die(a->file, a->line, "grad through loops nested in a scan is not supported yet");
 	AD save = *a;
 	Block *outer = a->b;
 	int T = s->T, nc = s->nc, nx = s->nx, ny0 = s->ny;
@@ -746,10 +795,18 @@ static void scan_vjp(AD *a, Ins t, Adj *adj)
 static void think_vjp(AD *a, Ins t, int g, Adj *adj)
 {
 	Module *m = a->m;
-	if (t.eps < 0)
-		die(a->file, a->line, "grad through a fixed-budget think loop is not supported: add 'until' so the loop "
-				      "converges (implicit differentiation needs a fixed point)");
-	if (has_think(t.body)) die(a->file, a->line, "grad through nested think loops is not supported yet");
+	if (t.eps < 0) { /* a fixed budget has no fixed point: it is a T-step scan, differentiated through time */
+		Ins *in = &m->def_blk[t.out]->v[m->def_idx[t.out]];
+		Scan *s = scan_new(in->maxit, 0);
+		s->tid = in->tid;
+		scan_carry(s, in->out, in->init, in->yield);
+		in->op = OP_SCAN;
+		in->sc = s;
+		in->init = in->yield = -1;
+		(void)g;
+		scan_vjp(a, *in, adj);
+		return;
+	}
 	AD save = *a;
 	int hstar = t.out;
 	Shape s = m->val[hstar].sh;
@@ -841,6 +898,7 @@ static void collect(Tape *tp, int v)
 		scan_outer_reads(a, &t, collect_cb, tp);
 		return;
 	}
+	if (t.op == OP_THINK && t.eps < 0) collect(tp, t.init); /* a fixed budget: the result depends on the start */
 	if (t.op == OP_THINK) outer_reads(a, &t, collect_cb, tp); /* the fixed point does not depend on init */
 	else
 		for (int j = 0; j < t.na; j++) collect(tp, t.a[j]);

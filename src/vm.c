@@ -123,6 +123,7 @@ static void exec(VM *vm, const Block *b)
 			case OP_LOG: tg_log(o, a, n); break;
 			case OP_STEP: tg_step(o, a, n); break;
 			case OP_SIN: tg_sin(o, a, n); break;
+			case OP_FLOOR: tg_floor(o, a, n); break;
 			case OP_COS: tg_cos(o, a, n); break;
 			default: abort();
 			}
@@ -201,6 +202,7 @@ static void exec(VM *vm, const Block *b)
 				}
 				for (int k = 0; k < s->nc; k++) tg_copy(ptr(vm, s->c[k]), ptr(vm, s->next[k]), shape_numel(&m->val[s->c[k]].sh));
 			}
+			if (s->tid >= 0) vm->steps[s->tid] = s->T;
 			break;
 		}
 		case CLS_THINK: {

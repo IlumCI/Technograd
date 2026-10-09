@@ -8,6 +8,7 @@
  *   `emit`ted values stacked over the steps. */
 #include "tg.h"
 
+#include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -112,6 +113,7 @@ static int emit_op(L *l, Block *b, Op op, const int *args, int na, int line)
 }
 
 static int lower_block(L *l, Block *b, Env *e, Sx *stmts, int is_fn);
+static int lower_attn(L *l, Block *b, Env *e, Sx *x);
 
 static int lower_expr(L *l, Block *b, Env *e, Sx *x)
 {
@@ -140,6 +142,7 @@ static int lower_expr(L *l, Block *b, Env *e, Sx *x)
 			die(l->file, x->line, "'grad' needs a scalar objective; reduce it with sum(...) or mean(...)");
 		return ad_grad(l->m, b, yv, xv, l->file, x->line);
 	}
+	if (strcmp(fn->s, "rope") == 0 || strcmp(fn->s, "attention") == 0) return lower_attn(l, b, e, x);
 	if (strcmp(fn->s, "reshape") == 0) { /* reshape(x, d0, d1, ...): literal dimensions */
 		Shape to = { 0 };
 		if (x->len < 4 || x->len - 3 > TG_MAXRANK) die(l->file, x->line, "'reshape' takes a tensor and 1 to %d dimensions", TG_MAXRANK);
@@ -228,6 +231,79 @@ static int lower_expr(L *l, Block *b, Env *e, Sx *x)
 	int op = op_lookup(opname);
 	if (op < 0) die(l->file, fn->line, "unknown function '%s'", fn->s);
 	return emit_op(l, b, (Op)op, args, nargs, x->line);
+}
+
+/* A compiler-generated constant, shared by name (dropped when unused). */
+static int const_param(L *l, const char *name, const Shape *sh, const float *data)
+{
+	Module *m = l->m;
+	for (int v = 0; v < m->nval; v++)
+		if (m->val[v].kind == V_PARAM && m->val[v].name && !strcmp(m->val[v].name, name)) return v;
+	int v = mod_value(m, V_PARAM, sh, name);
+	int n = shape_numel(sh);
+	m->val[v].data = xmalloc((size_t)n * sizeof(float));
+	memcpy(m->val[v].data, data, (size_t)n * sizeof(float));
+	return v;
+}
+
+/* rope(x, pos): rotary position embedding (RoFormer, arXiv:2104.09864) of x
+ * (d) at scalar position pos, or of the rows of x (T, d) at positions pos
+ * (T). Channel pairs (2i, 2i+1) rotate by pos * 10000^(-2i/d):
+ *   rope(x) = x * cos(a) + (x @ swap) * sin(a),  x @ swap = (-x1, x0, -x3, x2, ...)
+ *
+ * attention(Q, K, V, W): causal attention of the rows of Q (T, d) over the
+ * rows of K (T, d) and V (T, e) within a window of W positions (row t sees
+ * rows t-W+1 .. t), softmax(Q K^T / sqrt(d) + M) V with a constant mask M
+ * (0 inside the window, -1e9 outside: exactly zero weight). W >= T gives
+ * full causal attention; a ring of W keys at inference computes the same.
+ * Both expand to differentiable builtins. */
+static int lower_attn(L *l, Block *b, Env *e, Sx *x)
+{
+	Module *m = l->m;
+	const char *fn = x->v[1]->s;
+	char name[64];
+#define OP2(k, p, q) ir_op(m, b, k, p, q, l->file, x->line)
+	if (!strcmp(fn, "rope")) {
+		if (x->len != 4) die(l->file, x->line, "'rope' takes (x, position)");
+		int v = lower_expr(l, b, e, x->v[2]), p = lower_expr(l, b, e, x->v[3]);
+		Shape xs = m->val[v].sh, ps = m->val[p].sh;
+		int d = xs.dim[xs.rank - 1];
+		int ok = (xs.rank == 1 && ps.rank == 0) || (xs.rank == 2 && ps.rank == 1 && ps.dim[0] == xs.dim[0]);
+		if (!ok || d % 2) die(l->file, x->line, "'rope' takes x (d) with a scalar position or x (T, d) with positions (T), d even");
+		float *fr = xmalloc((size_t)d * sizeof *fr), *sw = xmalloc((size_t)d * (size_t)d * sizeof *sw);
+		for (int i = 0; i < d; i++) fr[i] = (float)pow(10000.0, -(double)(i / 2 * 2) / d);
+		for (int i = 0; i < d * d; i++) sw[i] = 0;
+		for (int i = 0; i < d; i += 2) { sw[i * d + i + 1] = 1; sw[(i + 1) * d + i] = -1; }
+		Shape s1 = { 1, { d } }, s2 = { 2, { d, d } };
+		snprintf(name, sizeof name, "__rope_freq_%d", d);
+		int fv = const_param(l, name, &s1, fr);
+		snprintf(name, sizeof name, "__swap_%d", d);
+		int sv = const_param(l, name, &s2, sw);
+		xfree(fr);
+		xfree(sw);
+		int ang = xs.rank == 1 ? OP2(OP_MUL, fv, p) : OP2(OP_OUTER, p, fv);
+		return OP2(OP_ADD, OP2(OP_MUL, v, OP2(OP_COS, ang, -1)), OP2(OP_MUL, OP2(OP_MATMUL, v, sv), OP2(OP_SIN, ang, -1)));
+	}
+	if (x->len != 6) die(l->file, x->line, "'attention' takes (Q, K, V, window)");
+	Sx *wd = x->v[5];
+	if (!sx_issym(wd->v[0], "num") || wd->v[1]->n < 1 || wd->v[1]->n != (double)(int)wd->v[1]->n)
+		die(l->file, x->line, "'attention' window must be a positive integer literal");
+	int W = (int)wd->v[1]->n;
+	int q = lower_expr(l, b, e, x->v[2]), k = lower_expr(l, b, e, x->v[3]), v = lower_expr(l, b, e, x->v[4]);
+	Shape qs = m->val[q].sh, ks = m->val[k].sh, vs = m->val[v].sh;
+	if (qs.rank != 2 || !shape_eq(&qs, &ks) || vs.rank != 2 || vs.dim[0] != qs.dim[0])
+		die(l->file, x->line, "'attention' needs Q and K of one shape (T, d) and V (T, e)");
+	int T = qs.dim[0];
+	float *mk = xmalloc((size_t)T * (size_t)T * sizeof *mk);
+	for (int t = 0; t < T; t++)
+		for (int s = 0; s < T; s++) mk[t * T + s] = s <= t && t - s < W ? 0.0f : -1e9f;
+	Shape ms = { 2, { T, T } };
+	snprintf(name, sizeof name, "__causal_%d_%d", T, W);
+	int mv = const_param(l, name, &ms, mk);
+	xfree(mk);
+	int sc = OP2(OP_ADD, OP2(OP_MUL, OP2(OP_MATMUL, q, OP2(OP_TRANSPOSE, k, -1)), ir_k(m, b, (float)(1.0 / sqrt((double)qs.dim[1])))), mv);
+	return OP2(OP_MATMUL, OP2(OP_SOFTMAX, sc, -1), v);
+#undef OP2
 }
 
 /* scan C1, C2 over X1 in E1, X2 in E2: body
@@ -606,6 +682,28 @@ static float *materialize(L *l, Sx *init, const Shape *sh, const char *pname)
 		xfree(full);
 		return d;
 	}
+	if (strcmp(k, "env") == 0) { /* read when the model is compiled; TGIR and C carry the values */
+		const char *var = init->v[1]->s, *val = getenv(var);
+		if (!val) {
+			if (init->len < 3) die(l->file, init->line, "environment variable %s is not set (param '%s'; give a default: env(\"%s\", 0))", var, pname, var);
+			for (int i = 0; i < n; i++) d[i] = (float)init->v[2]->n;
+			return d;
+		}
+		const char *bad;
+		int got = io_parse_row(val, d, n, &bad);
+		if (got < 0) die(l->file, init->line, "environment variable %s: bad number near '%.20s'", var, bad);
+		if (got == 1)
+			for (int i = 1; i < n; i++) d[i] = d[0];
+		else if (got != n)
+			die(l->file, init->line, "environment variable %s has %d values, param '%s' needs %d (or 1 to fill)", var, got, pname, n);
+		if (tr_on(1)) {
+			tr_begin(1, "env");
+			tr_str("variable", var);
+			tr_str("param", pname);
+			tr_end("param %s from environment variable %s", pname, var);
+		}
+		return d;
+	}
 	die(l->file, init->line, "bad initializer '%s'", k);
 	return NULL;
 }
@@ -728,7 +826,7 @@ Module *lower(Sx *ast, const char *file)
 		} else if (sx_issym(d->v[0], "def")) {
 			const char *dn = d->v[1]->s;
 			if (find_def(&l, dn)) die(file, d->line, "duplicate def '%s'", dn);
-			if (op_lookup(dn) >= 0 || strcmp(dn, "dot") == 0 || strcmp(dn, "grad") == 0 || !strcmp(dn, "mse") || !strcmp(dn, "bce") || !strcmp(dn, "xent")) die(file, d->line, "'%s' shadows a builtin", dn);
+			if (op_lookup(dn) >= 0 || strcmp(dn, "dot") == 0 || strcmp(dn, "grad") == 0 || !strcmp(dn, "mse") || !strcmp(dn, "bce") || !strcmp(dn, "xent") || !strcmp(dn, "rope") || !strcmp(dn, "attention") || !strcmp(dn, "reshape")) die(file, d->line, "'%s' shadows a builtin", dn);
 			l.defs = xrealloc(l.defs, (size_t)(l.ndefs + 1) * sizeof *l.defs);
 			l.defs[l.ndefs++] = d;
 			if (strcmp(dn, "forward") == 0) entry = d;

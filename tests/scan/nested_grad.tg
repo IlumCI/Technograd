@@ -1,0 +1,26 @@
+# Gradients through loops of every kind at once: a fixed-budget think loop
+# (differentiated as a scan through time; it still reports its step count),
+# a think loop with `until` (implicit differentiation) nested in a scan, and
+# a scan nested in a scan.
+model nested
+
+param W : f32[2, 2] = rand(8, 0.6)
+param S : f32[3, 2] = [[1, 0], [0.5, -1], [-0.3, 0.8]]
+param h0 : f32[2] = [0.1, -0.2]
+
+def forward(x: f32[4, 2]) -> f32[2]:
+    h = h0
+    scan h over xt in x:
+        q = h
+        think q for 100 until 0.000001:
+            q = tanh(W @ q + xt) * 0.5
+        r = q
+        scan r over st in S:
+            r = tanh(W @ r + st)
+        h = r
+        emit hs = h
+    z = h
+    think z for 3:
+        z = tanh(W @ z + h0)
+    loss = sum(hs * hs) + sum(z * z)
+    return z + grad(loss, W) @ h0 + sum(grad(loss, x))

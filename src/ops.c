@@ -40,6 +40,7 @@ const OpInfo tg_ops[OP_COUNT] = {
 	[OP_SIN]       = { "sin",       1, CLS_UN },
 	[OP_COS]       = { "cos",       1, CLS_UN },
 	[OP_RESHAPE]   = { "reshape",   1, CLS_RESHAPE },
+	[OP_FLOOR]     = { "floor",     1, CLS_UN },
 	[OP_THINK]     = { "think",     0, CLS_THINK },
 	[OP_SCAN]      = { "scan",      0, CLS_SCAN },
 };

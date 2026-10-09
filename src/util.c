@@ -101,7 +101,7 @@ char *xstrdup(const char *s)
 
 char *read_file(const char *path, size_t *len)
 {
-	FILE *f = fopen(path, "rb");
+	FILE *f = strcmp(path, "-") ? fopen(path, "rb") : stdin; /* "-": standard input */
 	if (!f) die(NULL, 0, "cannot open '%s'", path);
 	size_t cap = 4096, n = 0;
 	char *buf = xmalloc(cap);
@@ -111,7 +111,7 @@ char *read_file(const char *path, size_t *len)
 		if (r == 0) break;
 		n += r;
 	}
-	fclose(f);
+	if (f != stdin) fclose(f);
 	buf[n] = 0;
 	if (len) *len = n;
 	return buf;
@@ -335,6 +335,7 @@ Scan *scan_new(int T, int reverse)
 	Scan *s = xmalloc(sizeof *s);
 	s->T = T;
 	s->reverse = reverse;
+	s->tid = -1;
 	return s;
 }
 

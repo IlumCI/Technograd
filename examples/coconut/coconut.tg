@@ -1,0 +1,27 @@
+# Coconut-style latent reasoning (Hao et al., arXiv:2412.06769), trained in
+# the language. Each example is a graph given in the input (A[i, j] = 1 for
+# an edge i -> j; every node has one successor) and a start node s; the
+# answer is the node reached after HOPS hops. The model never sees the
+# intermediate nodes: it reasons in a continuous latent state h for HOPS
+# think steps, and only h after the last step is read out. The think loop
+# has a fixed budget, so `train` differentiates it by backpropagation
+# through time.
+#
+# curriculum.sh trains it in stages, as Coconut does: stage k uses k latent
+# steps on k-hop answers and starts from the weights of stage k-1.
+model coconut
+
+state W1 : f32[16, 16] = INIT_W1
+state W2 : f32[16, 16] = INIT_W2
+state E : f32[16, 8] = INIT_E
+state R : f32[8, 16] = INIT_R
+state b : f32[16] = INIT_B
+
+def forward(A: f32[8, 8], s: f32[8], target: f32[8]) -> f32[8]:
+    h = tanh(E @ s)
+    think h for HOPS:
+        node = softmax(R @ h * 4)
+        h = tanh(W1 @ h + W2 @ (E @ (transpose(A) @ node)) + b)
+    logits = R @ h * 4
+    train xent(logits, target) with adamw(lr=0.003)
+    return softmax(logits)

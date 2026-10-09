@@ -1,0 +1,14 @@
+# The training form of examples/kv_attention.tg: all positions at once,
+# causal attention within a window of 4 (row t sees rows t-3 .. t).
+model window
+
+param Wq : f32[8, 8] = rand(61, 0.5)
+param Wk : f32[8, 8] = rand(62, 0.5)
+param Wv : f32[8, 8] = rand(63, 0.5)
+param P : f32[7] = [0, 1, 2, 3, 4, 5, 6]
+
+def forward(x: f32[7, 8]) -> f32[7, 8]:
+    q = rope(x @ transpose(Wq), P)
+    k = rope(x @ transpose(Wk), P)
+    v = x @ transpose(Wv)
+    return attention(q, k, v, 4)

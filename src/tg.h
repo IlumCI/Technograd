@@ -76,7 +76,7 @@ typedef enum {
 	OP_STEP,
 	OP_SPMM, OP_SPMM_T, OP_SPMM_DX,
 	OP_ACTIVE, OP_TAKE, OP_TAKE_T, OP_SPMM_TC,
-	OP_SIN, OP_COS, OP_RESHAPE,
+	OP_SIN, OP_COS, OP_RESHAPE, OP_FLOOR,
 	OP_THINK,
 	OP_SCAN,
 	OP_COUNT
@@ -123,6 +123,7 @@ typedef struct Block Block;
  * value y[m] (read before the carries advance). reverse runs t = T-1 .. 0. */
 typedef struct {
 	int T, reverse;
+	int tid; /* >= 0: a fixed-budget think loop turned into a scan reports T in this steps slot */
 	int nc, *c, *init, *next;
 	int nx, *x, *xt;
 	int ny, *y, *ys;
@@ -249,5 +250,12 @@ char *autofix(const char *src, const char *path, int verbose, int *nfixed); /* N
 int fixer_train(const char *out, char **corpus, int n);
 int fixer_eval(char **corpus, int n);
 int autotrain_main(int argc, char **argv); /* autotrain.c: train, predict, data */
+
+/* host I/O (serve.c): streams, sockets, signals */
+void tg_signals(void);  /* SIGINT/SIGTERM request a clean stop; SIGPIPE ignored */
+int tg_exit_status(void); /* 0, or 128 + the signal that requested a stop */
+int tg_stopping(void);
+int stream_main(const Module *m, const char *src, const char *dst);
+int serve_main(const Module *m, const char *listen_spec);
 
 #endif

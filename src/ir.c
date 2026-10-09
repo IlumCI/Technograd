@@ -10,7 +10,7 @@
  *     (%N (f32 d...) (think INIT MAX EPS|none
  *        ...body instructions...
  *        (yield V)))
- *     (scan T forward|reverse
+ *     (scan T forward|reverse [steps]           ; steps: report T in the next steps slot
  *       (carry C (f32 d...) INIT) ...      ; C: the carry in the body, the final value after
  *       (in XT (f32 d...) SEQ) ...         ; XT: row t of SEQ, visible in the body only
  *       (body ...instructions...)
@@ -69,7 +69,7 @@ static void write_block(const Module *m, const Block *b, FILE *f, int d)
 		indent(f, d);
 		if (in->op == OP_SCAN) {
 			const Scan *s = in->sc;
-			fprintf(f, "(scan %d %s\n", s->T, s->reverse ? "reverse" : "forward");
+			fprintf(f, "(scan %d %s%s\n", s->T, s->reverse ? "reverse" : "forward", s->tid >= 0 ? " steps" : "");
 			for (int k = 0; k < s->nc; k++) {
 				vname(m, s->c[k], n0, sizeof n0);
 				vname(m, s->init[k], n1, sizeof n1);
@@ -238,6 +238,10 @@ static void r_scan(R *r, Block *b, const Sx *x)
 	need(r, x, sx_issym(x->v[2], "forward") || sx_issym(x->v[2], "reverse"), "scan (direction)");
 	Scan *s = scan_new((int)x->v[1]->n, sx_issym(x->v[2], "reverse"));
 	int i = 3, mark = r->n;
+	if (i < x->len && sx_issym(x->v[i], "steps")) { /* a fixed-budget think loop: reports T in a steps slot */
+		s->tid = r->m->nthink++;
+		i++;
+	}
 	const Sx **cname = xmalloc((size_t)x->len * sizeof *cname);
 	for (; i < x->len && x->v[i]->k == SX_LIST && x->v[i]->len == 4 && sx_issym(x->v[i]->v[0], "carry"); i++) {
 		const Sx *c = x->v[i];
@@ -263,7 +267,6 @@ static void r_scan(R *r, Block *b, const Sx *x)
 		xname[nx++] = c->v[1];
 		scan_seq(s, q, mod_value(m, V_TMP, &sh, NULL));
 	}
-	need(r, x, nx >= 1, "scan (needs a sequence)");
 	for (int k = 0; k < s->nc; k++) r_def(r, cname[k], s->c[k]); /* body scope: carries and slices */
 	for (int j = 0; j < nx; j++) r_def(r, xname[j], s->xt[j]);
 	need(r, x, i < x->len && x->v[i]->k == SX_LIST && x->v[i]->len >= 1 && sx_issym(x->v[i]->v[0], "body"), "scan (body)");
