@@ -76,12 +76,13 @@ typedef enum {
 	OP_STEP,
 	OP_SPMM, OP_SPMM_T, OP_SPMM_DX,
 	OP_ACTIVE, OP_TAKE, OP_TAKE_T, OP_SPMM_TC,
+	OP_SIN, OP_COS, OP_RESHAPE,
 	OP_THINK,
 	OP_SCAN,
 	OP_COUNT
 } Op;
 
-typedef enum { CLS_CONST, CLS_BIN, CLS_UN, CLS_MATMUL, CLS_ROW, CLS_RED, CLS_TRANS, CLS_OUTER, CLS_SPMM, CLS_ROWS, CLS_THINK, CLS_SCAN } OpClass;
+typedef enum { CLS_CONST, CLS_BIN, CLS_UN, CLS_MATMUL, CLS_ROW, CLS_RED, CLS_TRANS, CLS_OUTER, CLS_SPMM, CLS_ROWS, CLS_RESHAPE, CLS_THINK, CLS_SCAN } OpClass;
 
 typedef struct {
 	const char *name;
@@ -196,6 +197,7 @@ int ad_depends(Module *m, Block *b, int y, int x, const char *file, int line);
 int ir_op(Module *m, Block *b, Op op, int p, int q, const char *file, int line); /* emit, shape-checked */
 int ir_op3(Module *m, Block *b, Op op, int p, int q, int r, const char *file, int line);
 int ir_k(Module *m, Block *b, float k);
+int ir_reshape(Module *m, Block *b, int x, const Shape *to); /* same data, new shape (equal element count) */
 void optim_train(Module *m, Block *b, int loss, const char *opt, const char **keys, const double *vals, int nkv,
 		 const int *over, int nover, const char *file, int line); /* optim.c */
 void value_name(const Module *m, int v, char *buf, size_t n);

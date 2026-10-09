@@ -122,6 +122,8 @@ static void exec(VM *vm, const Block *b)
 			case OP_SOFTPLUS: tg_softplus(o, a, n); break;
 			case OP_LOG: tg_log(o, a, n); break;
 			case OP_STEP: tg_step(o, a, n); break;
+			case OP_SIN: tg_sin(o, a, n); break;
+			case OP_COS: tg_cos(o, a, n); break;
 			default: abort();
 			}
 			break;
@@ -180,6 +182,9 @@ static void exec(VM *vm, const Block *b)
 			tg_transpose(o, a, s->dim[0], s->dim[1]);
 			break;
 		}
+		case CLS_RESHAPE:
+			tg_copy(o, a, n);
+			break;
 		case CLS_SCAN: {
 			const Scan *s = in->sc;
 			for (int k = 0; k < s->nc; k++) tg_copy(ptr(vm, s->c[k]), ptr(vm, s->init[k]), shape_numel(&m->val[s->c[k]].sh));

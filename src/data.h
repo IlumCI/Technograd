@@ -59,6 +59,9 @@ int data_drop_leaks(Table *t, int target);
 void data_describe(const Table *t, int target, FILE *f);
 Spec *spec_fit(const Table *t, int target, const int *rows, int nrows, int text_dim);
 int spec_apply(const Spec *s, const Table *t, int row, float *x, float *y, int *label);
+/* Word buckets of text feature f (index into s->f) in reading order: writes
+ * up to max ids, returns the number of words. */
+int spec_tokens(const Spec *s, const Table *t, int row, int f, int *ids, int max);
 void spec_save(const Spec *s, const char *path);
 Spec *spec_load(const char *path);
 

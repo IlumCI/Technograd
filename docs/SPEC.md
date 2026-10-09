@@ -88,6 +88,8 @@ and parentheses. All binary operators are left associative.
 | `-a`, `neg tanh relu sigmoid exp sqrt gelu silu` | elementwise, shape preserved; `gelu` uses the tanh approximation |
 | `a @ b` (`matmul`, `dot`) | `(m,k)@(k)->(m)`, `(m,k)@(k,n)->(m,n)`, `(k)@(k,n)->(n)`, `(k)@(k)->()` |
 | `softplus(x)`, `log(x)` | elementwise; softplus is overflow-free: `max(x,0) + log1p(exp(-|x|))` |
+| `sin(x)`, `cos(x)` | elementwise |
+| `reshape(x, d0, d1, ...)` | the same elements in row-major order with new dimensions (integer literals, same element count); TGIR `(reshape X)` with the target as the declared type |
 | `softmax(x)`, `rmsnorm(x)` | over the last axis, shape preserved, rank >= 1; rmsnorm eps = 1e-6, no gain |
 | `sum(x)`, `mean(x)` | reduce to scalar |
 | `transpose(x)` | rank 2 only |
@@ -489,7 +491,7 @@ model itself also compiles to C (about 11.5 KB for the XOR MLP, using only
 
 `tests/gradcheck.pl` compares every derivative rule, including both
 implicit-differentiation cases and both second-order `spmm` cases, against
-central finite differences (37 cases, worst relative error 4.3e-4). A planted bug in one rule makes 9 cases fail.
+central finite differences (38 cases, worst relative error 4.3e-4). A planted bug in one rule makes 9 cases fail.
 
 ## 17. Training statement and optimizers
 
@@ -602,7 +604,8 @@ A step's cost is paid once per mini-batch: a model whose input is a batch
 
 ```
 tgc train SOURCE [-o DIR] [--target COL] [--epochs N] [--hidden H] [--lr X]
-                 [--batch B] [--text-dim N] [--optimizer NAME] [--val FRACTION] [--max-rows N] [--seed S]
+                 [--batch B] [--text-dim N] [--model bow|ssm] [--optimizer NAME] [--val FRACTION]
+                 [--max-rows N] [--seed S]
 tgc predict DIR SOURCE [-o OUT.csv]
 tgc data inspect SOURCE [--target COL]
 tgc data prep SOURCE -o OUT.csv [--target COL]
@@ -693,6 +696,59 @@ Two further rules:
    | `infer.c` | the inference model compiled to a freestanding C unit |
    | `features.tgf` | the featurization, as plain text |
    | `report.txt` | the run summary |
+
+### Sequence model (`--model ssm`)
+
+`--model ssm` adds a selective state-space layer over the words of the first
+text column, in reading order, next to the bag of words:
+
+```python
+h1 = gelu(x @ w1 + spmm(s, wt) + rmsnorm(ssm(tok)) @ wp + b1)
+```
+
+- **Input.** `tok : f32[T B, 1, 2]` holds one `(word bucket, 1)` pair per
+  position, time-major, `(0, 0)` for padding. `T` is the longest training
+  row (at most 64 words); `predict` reads the first `T` words of longer
+  rows and says how many were cut.
+- **Embedding.** `spmm(tok, E)` over the same 32768 hashed buckets, so `E`
+  takes row-sparse optimizer steps (section 17).
+- **Layer** (32 state channels, Mamba-3-style, arXiv:2603.15569). All
+  projections are computed for every position at once, outside the scan:
+  step size `dt = softplus(e Wdt + bdt)`, trapezoid weight
+  `lam = sigmoid(e Wl + bl)`, rotation angle `th = dt (e Wth)` shared by each
+  channel pair, value `v = e Wv`, readout `c = e Wc + bc`, gate
+  `z = silu(e Wz)`. The scan then runs the exponential-trapezoidal
+  recurrence with the state rotated by `th` (a complex-valued state written
+  as 2x2 rotations of channel pairs):
+
+  ```
+  h  = al R(th) h + (1 - lam) dt al R(th) v[t-1] + lam dt v,   al = exp(-dt softplus(la))
+  y  = (h c + dk v) z
+  ```
+
+  Padding sets `dt = 0`, which leaves the state unchanged. The output is
+  the mean of `y` over the real words. `bdt` starts with step sizes
+  log-spaced in [0.001, 0.1] and `la` with decay rates log-spaced in
+  [0.05, 2], as in Mamba.
+- **Training** is backpropagation through time (section 19) inside the same
+  `train ... with adamw` step; `infer.tg` and `infer.c` run the layer over
+  one row.
+
+Measured:
+
+| Task | `--model bow` | `--model ssm` |
+|------|---------------|---------------|
+| order of two words decides the label (synthetic, regression-tested) | 52.67% (chance: a bag cannot see order) | 100% |
+| SST-2, 3 seeds | 77.48% in 7 s | 76.52% in 80 s |
+| SST-2, the sequence layer alone (no bag), seed 1 | | 76.45% |
+
+On SST-2 (6,920 sentences, no pretrained embeddings) the layer learns word
+order from scratch, and alone it comes within a point of the bag of words,
+but combined with it does not beat it: the embedding table memorizes the
+training set by the second epoch (training loss 0.02 by epoch 10), and
+weight decay (0.1, 0.5) and word dropout (0.1, 0.3) did not change that by
+more than the seed-to-seed spread. `bow` therefore stays the default;
+`ssm` is for data where order carries the label.
 
 `tgc predict DIR SOURCE` applies `features.tgf` to new raw data, matching
 columns by name in any order. A missing column counts as missing values. It
@@ -840,11 +896,12 @@ Ordered by importance for latent-reasoning models on embedded targets:
 
 1. int8/int4 weights with per-channel scales, and fixed-point kernels for
    targets without an FPU.
-2. Token-level sequence models: a Mamba-3 layer (arXiv:2603.15569:
-   exponential-trapezoidal discretization, complex-valued transitions as 2x2
-   rotations) on `scan`, and `tgc train --model ssm` feeding hashed word ids
-   through `spmm` embeddings, against the bag-of-words baseline. Causal
-   attention over a fixed-size KV ring only where a hybrid needs it.
+2. Sequence models beyond one layer: stacked Mamba-3 blocks with BCNorm
+   and MIMO, a fused scan kernel (the VM spends 10x the bag-of-words time
+   on SST-2), and pretraining of the embeddings and layer on unlabeled text
+   (next-token prediction with the same scan), which a 7k-sentence task
+   cannot replace. Causal attention over a fixed-size KV ring only where a
+   hybrid needs it.
 3. Autodiff through fixed-budget think loops (as a scan with a stored
    history) and through loops nested in scan and think bodies.
 4. Learned halting heads (`until` driven by a predicate value) in addition to

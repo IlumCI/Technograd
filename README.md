@@ -30,8 +30,9 @@ file is the black box you ship to the target.
 ```sh
 make            # builds build/tgc (C11, no dependencies beyond libm; perl at build time)
 build/tgc train hf:scikit-learn/iris            # any dataset, no configuration: detect, featurize, train, export
+build/tgc train reviews.csv --model ssm         # adds a Mamba-3-style sequence layer over the words
 build/tgc predict iris_model new_flowers.csv     # predictions on raw new data
-make test       # 189 checks (offline; TG_TEST_NETWORK=1 adds a Hugging Face run)
+make test       # 195 checks (offline; TG_TEST_NETWORK=1 adds a Hugging Face run)
 make fixer      # retrain the auto-fix forest (deterministic, ~15 s) and evaluate it on held-out programs
 
 build/tgc run  examples/latent_reasoner.tg 1,0,0,1,0,1,1,0

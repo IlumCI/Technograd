@@ -140,6 +140,24 @@ static int lower_expr(L *l, Block *b, Env *e, Sx *x)
 			die(l->file, x->line, "'grad' needs a scalar objective; reduce it with sum(...) or mean(...)");
 		return ad_grad(l->m, b, yv, xv, l->file, x->line);
 	}
+	if (strcmp(fn->s, "reshape") == 0) { /* reshape(x, d0, d1, ...): literal dimensions */
+		Shape to = { 0 };
+		if (x->len < 4 || x->len - 3 > TG_MAXRANK) die(l->file, x->line, "'reshape' takes a tensor and 1 to %d dimensions", TG_MAXRANK);
+		for (int i = 3; i < x->len; i++) {
+			Sx *d = x->v[i];
+			if (!sx_issym(d->v[0], "num") || d->v[1]->n < 1 || d->v[1]->n != (double)(int)d->v[1]->n)
+				die(l->file, x->line, "'reshape' dimensions must be positive integer literals");
+			to.dim[to.rank++] = (int)d->v[1]->n;
+		}
+		int v = lower_expr(l, b, e, x->v[2]);
+		if (shape_numel(&to) != shape_numel(&l->m->val[v].sh)) {
+			char s0[64], s1[64];
+			shape_str(&l->m->val[v].sh, s0, sizeof s0);
+			shape_str(&to, s1, sizeof s1);
+			die(l->file, x->line, "'reshape' from %s to %s changes the element count", s0, s1);
+		}
+		return ir_reshape(l->m, b, v, &to);
+	}
 	int nargs = x->len - 2;
 	int args[16];
 	if (nargs > 16) die(l->file, x->line, "too many arguments");

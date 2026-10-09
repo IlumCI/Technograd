@@ -893,6 +893,57 @@ static uint32_t fnv(const unsigned char *s, int n)
 	return h;
 }
 
+/* Calls fn(ctx, h) for each word of a text cell: lowercase alphanumerics and
+ * apostrophes, at most 64 bytes, hashed with FNV-1a. */
+static void words(const char *p, void (*fn)(void *, uint32_t), void *ctx)
+{
+	while (*p) {
+		while (*p && !isalnum((unsigned char)*p)) p++;
+		if (!*p) break;
+		unsigned char w[64];
+		int n = 0;
+		while (*p && (isalnum((unsigned char)*p) || *p == '\'')) {
+			if (n < 64) w[n++] = (unsigned char)tolower((unsigned char)*p);
+			p++;
+		}
+		fn(ctx, fnv(w, n));
+	}
+}
+
+typedef struct {
+	float *x;
+	int dim;
+} Bag;
+
+static void bag_word(void *ctx, uint32_t h)
+{
+	Bag *b = ctx;
+	b->x[h % (uint32_t)b->dim] += (h >> 31) ? -1.0f : 1.0f;
+}
+
+typedef struct {
+	int *ids, max, n;
+	uint32_t dim;
+} Seq;
+
+static void seq_word(void *ctx, uint32_t h)
+{
+	Seq *q = ctx;
+	if (q->n < q->max) q->ids[q->n] = (int)(h % q->dim);
+	q->n++;
+}
+
+int spec_tokens(const Spec *s, const Table *t, int row, int f, int *ids, int max)
+{
+	int ci = -1;
+	for (int i = 0; i < t->ncols; i++)
+		if (!strcmp(t->col[i].name, s->f[f].name)) ci = i;
+	if (ci < 0 || t->col[ci].cell[row].t != CELL_STR) return 0;
+	Seq q = { ids, max, 0, (uint32_t)s->f[f].dim };
+	words(t->col[ci].cell[row].s, seq_word, &q);
+	return q.n;
+}
+
 /* Featurize one row; x has s->dim floats. Returns 0 if a target is required
  * but missing/unknown, otherwise 1; y (if non-NULL) gets the target encoding. */
 int spec_apply(const Spec *s, const Table *t, int row, float *x, float *y, int *label)
@@ -922,18 +973,8 @@ int spec_apply(const Spec *s, const Table *t, int row, float *x, float *y, int *
 				/* words (lowercase alphanumerics and apostrophes) are hashed into dim
 				 * buckets with a hash-derived sign (feature hashing), then L2-normalized.
 				 * Unigrams only: bigrams measured worse at these data sizes. */
-				for (const char *p = c->s; *p;) {
-					while (*p && !isalnum((unsigned char)*p)) p++;
-					if (!*p) break;
-					unsigned char w[64];
-					int n = 0;
-					while (*p && (isalnum((unsigned char)*p) || *p == '\'')) {
-						if (n < 64) w[n++] = (unsigned char)tolower((unsigned char)*p);
-						p++;
-					}
-					uint32_t h = fnv(w, n);
-					x[o + h % (uint32_t)f->dim] += (h >> 31) ? -1.0f : 1.0f;
-				}
+				Bag bg = { x + o, f->dim };
+				words(c->s, bag_word, &bg);
 				double norm = 0;
 				for (int d = 0; d < f->dim; d++) norm += x[o + d] * x[o + d];
 				if (norm > 0)

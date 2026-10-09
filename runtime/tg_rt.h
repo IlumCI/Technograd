@@ -62,6 +62,10 @@ TG_FN void tg_softplus(float *o, const float *a, int n)
 { for (int i = 0; i < n; i++) o[i] = (a[i] > 0.0f ? a[i] : 0.0f) + log1pf(expf(-fabsf(a[i]))); }
 TG_FN void tg_log(float *o, const float *a, int n)
 { for (int i = 0; i < n; i++) o[i] = logf(a[i]); }
+TG_FN void tg_sin(float *o, const float *a, int n)
+{ for (int i = 0; i < n; i++) o[i] = sinf(a[i]); }
+TG_FN void tg_cos(float *o, const float *a, int n)
+{ for (int i = 0; i < n; i++) o[i] = cosf(a[i]); }
 /* Heaviside step, x > 0. The derivative of relu, max and min. */
 TG_FN void tg_step(float *o, const float *a, int n)
 { for (int i = 0; i < n; i++) o[i] = a[i] > 0.0f ? 1.0f : 0.0f; }

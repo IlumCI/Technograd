@@ -314,6 +314,7 @@ static int bcast_rows(AD *a, int v, int cols) /* (r) -> (r,c) */
 /* ---- vector-Jacobian products ------------------------------------------- */
 
 static void think_vjp(AD *a, Ins t, int g, Adj *adj);
+static int RESHAPE(AD *a, int x, const Shape *to);
 static void scan_vjp(AD *a, Ins t, Adj *adj);
 
 static int scan_has_adj(const Ins *in, const Adj *adj)
@@ -436,6 +437,15 @@ static void vjp(AD *a, const Ins *in, int g, Adj *adj)
 		if (w2) acc(a, adj, x2, E(a, OP_SPMM, z, x1));
 		return;
 	}
+	case OP_RESHAPE:
+		acc(a, adj, x0, RESHAPE(a, g, SH(a, x0)));
+		return;
+	case OP_SIN:
+		acc(a, adj, x0, E(a, OP_MUL, g, E1(a, OP_COS, x0)));
+		return;
+	case OP_COS:
+		acc(a, adj, x0, E1(a, OP_NEG, E(a, OP_MUL, g, E1(a, OP_SIN, x0))));
+		return;
 	case OP_ACTIVE: /* row indices: piecewise constant */
 		return;
 	case OP_TAKE: /* rows are piecewise constant */
@@ -534,6 +544,7 @@ static Clone clone_block(AD *a, const Block *body, const int *from, const int *t
 	for (int i = 0; i < body->len; i++) {
 		Ins in = body->v[i];
 		c.map[in.out] = in.op == OP_CONST ? K(a, in.k)
+			      : in.op == OP_RESHAPE ? RESHAPE(a, cl_get(&c, in.a[0]), &a->m->val[in.out].sh)
 			      : E3(a, in.op, cl_get(&c, in.a[0]), in.na > 1 ? cl_get(&c, in.a[1]) : -1, in.na > 2 ? cl_get(&c, in.a[2]) : -1);
 	}
 	return c;
@@ -547,6 +558,20 @@ static int clone_body(AD *a, const Ins *t, int h)
 	int y = cl_get(&c, t->yield);
 	xfree(c.map);
 	return y;
+}
+
+static int RESHAPE(AD *a, int x, const Shape *to)
+{
+	Shape s = *to;
+	if (shape_numel(&s) != shape_numel(SH(a, x))) die(a->file, a->line, "reshape: element counts differ");
+	int o = mod_value(a->m, V_TMP, &s, NULL);
+	Ins *ins = block_push(a->b);
+	ins->op = OP_RESHAPE;
+	ins->out = o;
+	ins->na = 1;
+	ins->a[0] = x;
+	mod_note_def(a->m, o, a->b, a->b->len - 1);
+	return o;
 }
 
 static int ZEROS(AD *a, const Shape *sp)
@@ -906,6 +931,12 @@ int ir_op3(Module *m, Block *b, Op op, int p, int q, int r, const char *file, in
 {
 	AD a = { m, b, file, line, -1, NULL, 0, 0, 0, -1, -1, 1, 1 };
 	return E3(&a, op, p, q, r);
+}
+
+int ir_reshape(Module *m, Block *b, int x, const Shape *to)
+{
+	AD a = { m, b, "", 0, -1, NULL, 0, 0, 0, -1, -1, 1, 1 };
+	return RESHAPE(&a, x, to);
 }
 
 int ir_k(Module *m, Block *b, float k)

@@ -138,7 +138,7 @@ $TGC ir examples/delta_memory.tg | grep -q "(update mem %" && ok || bad "TGIR lo
 #     on-device training in generated C matching the VM bit for bit
 mkdir -p "$TMP/gc"
 if perl tests/gradcheck.pl "$TGC" "$TMP/gc" > "$TMP/gc.out"; then ok; else bad "gradcheck: $(grep FAIL "$TMP/gc.out")"; fi
-[ "$(grep -c "^ok" "$TMP/gc.out")" -ge 37 ] && ok || bad "gradcheck ran too few cases"
+[ "$(grep -c "^ok" "$TMP/gc.out")" -ge 38 ] && ok || bad "gradcheck ran too few cases"
 perl -e 'srand(3); my @d=([0,0,0],[0,1,1],[1,0,1],[1,1,0]); for (1..1500) { for my $r (sort { rand() <=> 0.5 } @d) { print join(",", @$r), "\n" } }' > "$TMP/xt.csv"
 $TGC batch examples/train_xor.tg "$TMP/xt.csv" --save-state "$TMP/xor" -o "$TMP/xp.csv"
 paste -d, "$TMP/xt.csv" "$TMP/xp.csv" | tail -8 | awk -F, '{ if ($3 == 1 && $4 < 0.9 || $3 == 0 && $4 > 0.1) bad = 1 } END { exit bad }' && ok || bad "XOR not learned"
@@ -177,6 +177,16 @@ $TGC c examples/selective_ssm.tg -o "$TMP/ssm.c" && $CC -std=c99 -O2 -Wall -Wext
 head -100 "$TMP/ssm.csv" > "$TMP/ssm100.csv"
 [ "$("$TMP/ssmb" $(awk -F, '{ x = $1; for (i = 2; i <= 24; i++) x = x "," $i; t = $25; for (i = 26; i <= 36; i++) t = t "," $i; printf "%s %s ", x, t }' "$TMP/ssm100.csv") | tr ' ' ',')" = "$($TGC batch examples/selective_ssm.tg "$TMP/ssm100.csv")" ] && ok || bad "on-device BPTT training differs from VM"
 [ "$($TGC check examples/selective_ssm.tg -vv 2>&1 | grep -c 'backpropagation through a 12-step scan')" = 1 ] && ok || bad "BPTT trace"
+# word order: a label set by the order of two words; bag of words cannot see it, the SSM layer can
+perl -e 'srand(11); my @f=qw(the a film plot actor story it was and very quite); print "text,label\n"; for (1..1500) { my $k = int rand 2; my @w = map { $f[int rand @f] } 1..(2 + int rand 6); my @pair = $k ? ("not", "bad") : ("bad", "not"); my $at = int rand(@w + 1); splice @w, $at, 0, $pair[0]; my $at2 = $at + 1 + int rand(@w - $at); splice @w, $at2, 0, $pair[1]; printf "\"%s\",%s\n", join(" ", @w), $k ? "pos" : "neg" }' > "$TMP/order.csv"
+$TGC train "$TMP/order.csv" --epochs 10 -o "$TMP/ord_bow" > "$TMP/ob.log" 2>&1
+awk '/best epoch/ { gsub("%)", ""); exit !($NF < 65) }' "$TMP/ob.log" && ok || bad "bag of words should not see word order: $(grep 'best epoch' "$TMP/ob.log")"
+$TGC train "$TMP/order.csv" --model ssm --epochs 10 -o "$TMP/ord_ssm" > "$TMP/os.log" 2>&1
+grep -q "accuracy 100.00%" "$TMP/os.log" && ok || bad "SSM did not learn word order: $(grep 'best epoch' "$TMP/os.log")"
+grep -q "selective SSM over 'text'" "$TMP/os.log" && grep -q "scan h, pv, p, n over" "$TMP/ord_ssm/infer.tg" && ok || bad "ssm model text"
+printf 'text\nthe film was not bad\nthe film was bad not\n' > "$TMP/onew.csv"
+[ "$($TGC predict "$TMP/ord_ssm" "$TMP/onew.csv" 2>/dev/null | cut -d, -f1 | tr '\n' ' ')" = 'prediction "pos" "neg" ' ] && ok || bad "ssm predict"
+$CC -std=c99 -Wall -Werror -c -o "$TMP/oinfer.o" "$TMP/ord_ssm/infer.c" && ok || bad "ssm infer.c does not compile"
 # row-sparse (lazy) optimizer steps on spmm tables
 lz() { sed "s/OPT/$1/" > "$TMP/lz.tg" <<'TG'
 model lz

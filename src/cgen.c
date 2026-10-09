@@ -118,6 +118,9 @@ static void block(G *g, const Block *b, int d)
 			fprintf(g->f, "tg_transpose(%s, %s, %d, %d);\n", o, a, s->dim[0], s->dim[1]);
 			break;
 		}
+		case CLS_RESHAPE:
+			fprintf(g->f, "tg_copy(%s, %s, %d);\n", o, a, n);
+			break;
 		case CLS_SCAN: {
 			const Scan *s = in->sc;
 			char p[64], q[64];

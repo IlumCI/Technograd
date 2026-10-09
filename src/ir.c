@@ -358,6 +358,15 @@ static void r_block(R *r, Block *b, const Sx *forms, int from, int to)
 		} else {
 			int op = op_lookup(head->s);
 			if (op < 0) die(r->file, head->line, "unknown op '%s'", head->s);
+			if (op == OP_RESHAPE) { /* the declared type is the target; only the element count is checked */
+				need(r, e, e->len == 2, "reshape");
+				tmp.op = OP_RESHAPE;
+				tmp.na = 1;
+				tmp.a[0] = r_get(r, e->v[1]);
+				if (shape_numel(&r->m->val[tmp.a[0]].sh) != shape_numel(&decl)) die(r->file, e->line, "reshape changes the element count");
+				got = decl;
+				goto checked;
+			}
 			tmp.op = (Op)op;
 			tmp.na = e->len - 1;
 			if (tmp.na > TG_MAXARGS) die(r->file, e->line, "too many operands");
@@ -368,6 +377,7 @@ static void r_block(R *r, Block *b, const Sx *forms, int from, int to)
 			}
 			if (!op_infer(tmp.op, in, tmp.na, &got, err, sizeof err)) die(r->file, e->line, "%s", err);
 		}
+	checked:
 		if (!shape_eq(&got, &decl)) {
 			shape_str(&decl, s0, sizeof s0);
 			shape_str(&got, s1, sizeof s1);

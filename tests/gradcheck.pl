@@ -53,6 +53,7 @@ my @cases = (
 	  "SETUP h = h0\n    scan h over xt in x:\n        dt = softplus(xt @ Wd + bd)\n        h = exp(-(dt * A)) * h + dt * (B @ xt)\n        emit ys = dot(h, C @ xt)\n    OBJ sum(ys * ys)" ],
 	[ 'scan: second order', 'f32[3, 3]', "param S : f32[4, 2] = [[1, 0], [0.5, -1], [-0.3, 0.8], [0.2, 0.2]]\nparam U : f32[3, 2] = rand(22, 0.8)\nparam h0 : f32[3] = [0.1, -0.2, 0.3]\nparam P : f32[3, 3] = rand(27, 1)",
 	  "SETUP h = h0\n    scan h over st in S:\n        h = tanh(x @ h + U @ st)\n    OBJ sum(grad(sum(h * h), x) * P)" ],
+	[ 'sin/cos/reshape', 'f32[2, 6]', "param M : f32[3, 4] = rand(28, 1)", 'sum(reshape(sin(x) * cos(2 * x), 3, 4) * M)' ],
 	[ 'think: sqrt fixed point', 'f32[3]', '',
 	  "SETUP h = x * 0.5 + 0.5\n    think h for 200 until 0.0000001:\n        h = 0.5 * (h + x / h)\n    OBJ sum(h)" ],
 	[ 'think: contraction with input', 'f32[4]', "param W : f32[4, 4] = rand(9, 0.3)\nparam c : f32[4] = [1, -1, 2, 0.5]",

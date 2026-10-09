@@ -1,0 +1,4 @@
+# expect: 'reshape' from (f32 2 3) to (f32 4) changes the element count
+model e
+def forward(x: f32[2, 3]) -> f32[4]:
+    return reshape(x, 4)

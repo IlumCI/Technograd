@@ -37,6 +37,9 @@ const OpInfo tg_ops[OP_COUNT] = {
 	[OP_TAKE]      = { "take",      2, CLS_ROWS },
 	[OP_TAKE_T]    = { "take_t",    3, CLS_ROWS },
 	[OP_SPMM_TC]   = { "spmm_tc",   3, CLS_ROWS },
+	[OP_SIN]       = { "sin",       1, CLS_UN },
+	[OP_COS]       = { "cos",       1, CLS_UN },
+	[OP_RESHAPE]   = { "reshape",   1, CLS_RESHAPE },
 	[OP_THINK]     = { "think",     0, CLS_THINK },
 	[OP_SCAN]      = { "scan",      0, CLS_SCAN },
 };
@@ -214,6 +217,9 @@ int op_infer(Op op, const Shape *a, int na, Shape *out, char *err, size_t errn)
 		out->dim[1] = g->dim[g->rank - 1];
 		return 1;
 	}
+	case CLS_RESHAPE: /* the target shape is not a function of the operand: see ir_reshape */
+		snprintf(err, errn, "'reshape' takes a tensor and its new dimensions, e.g. reshape(x, 4, 8)");
+		return 0;
 	case CLS_THINK:
 	case CLS_SCAN:
 		break;
