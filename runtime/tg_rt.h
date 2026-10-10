@@ -75,15 +75,44 @@ TG_FN void tg_step(float *o, const float *a, int n)
 { for (int i = 0; i < n; i++) o[i] = a[i] > 0.0f ? 1.0f : 0.0f; }
 
 #ifndef TG_ASM_MATMUL /* a native backend supplies its own */
-/* o[m,n] = a[m,k] @ b[k,n]. o must not alias a or b. */
+/* o[m,n] = a[m,k] @ b[k,n]. o must not alias a or b. Each output sums its k
+ * products in order p = 0..k-1; rows of b are streamed (i-p-j order), so the
+ * inner loop is contiguous and vectorizes. */
 TG_FN void tg_matmul(float *o, const float *a, const float *b, int m, int k, int n)
 {
-	for (int i = 0; i < m; i++)
-		for (int j = 0; j < n; j++) {
+	if (n == 1) {
+		for (int i = 0; i < m; i++) {
 			float s = 0.0f;
-			for (int p = 0; p < k; p++) s += a[i * k + p] * b[p * n + j];
-			o[i * n + j] = s;
+			for (int p = 0; p < k; p++) s += a[i * k + p] * b[p];
+			o[i] = s;
 		}
+		return;
+	}
+#define TG_MM_NARROW(W) /* n == W: the row of outputs stays in registers */ \
+	if (n == W) { \
+		for (int i = 0; i < m; i++) { \
+			float s[W] = { 0.0f }; \
+			for (int p = 0; p < k; p++) { \
+				const float aip = a[(long)i * k + p]; \
+				for (int j = 0; j < W; j++) s[j] += aip * b[(long)p * W + j]; \
+			} \
+			for (int j = 0; j < W; j++) o[(long)i * W + j] = s[j]; \
+		} \
+		return; \
+	}
+	TG_MM_NARROW(2)
+	TG_MM_NARROW(3)
+	TG_MM_NARROW(4)
+	TG_MM_NARROW(8)
+#undef TG_MM_NARROW
+	for (int i = 0; i < m; i++) {
+		float *restrict oi = o + (long)i * n;
+		for (int j = 0; j < n; j++) oi[j] = 0.0f;
+		for (int p = 0; p < k; p++) {
+			const float aip = a[(long)i * k + p], *restrict bp = b + (long)p * n;
+			for (int j = 0; j < n; j++) oi[j] += aip * bp[j];
+		}
+	}
 }
 #else
 TG_FN void tg_matmul(float *o, const float *a, const float *b, int m, int k, int n);

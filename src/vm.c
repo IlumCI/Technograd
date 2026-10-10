@@ -3,6 +3,7 @@
 #include "tg.h"
 #include "../runtime/tg_rt.h"
 
+#include <stdint.h>
 #include <stdlib.h>
 
 typedef struct {
@@ -30,6 +31,20 @@ static void mm_rows(void *ctx, int lo, int hi, int tid)
 	(void)tid;
 	MMJob *j = ctx;
 	tg_matmul(j->o + (size_t)lo * (size_t)j->n, j->a + (size_t)lo * (size_t)j->k, j->b, hi - lo, j->k, j->n);
+}
+
+typedef struct {
+	float *o;
+	const float *a, *b;
+	int m, k, n;
+} BMMJob;
+
+static void bmm_groups(void *ctx, int lo, int hi, int tid)
+{
+	(void)tid;
+	BMMJob *j = ctx;
+	size_t mn = (size_t)j->m * (size_t)j->n, mk = (size_t)j->m * (size_t)j->k, kn = (size_t)j->k * (size_t)j->n;
+	tg_bmm(j->o + (size_t)lo * mn, j->a + (size_t)lo * mk, j->b + (size_t)lo * kn, hi - lo, j->m, j->k, j->n);
 }
 
 void (*vm_matmul_hook)(void *ctx, const Module *m, const Ins *in, const float *a, const float *b);
@@ -83,11 +98,120 @@ static float *ptr(VM *vm, int v)
 	return vm->arena + x->off;
 }
 
+/* --profile: self time per instruction (loops excluded: their bodies are
+ * counted), printed at exit. Single-threaded runs only. */
+int tg_profile;
+typedef struct {
+	const Module *m;
+	const Ins *in;
+	double ns;
+	long calls;
+} Prof;
+static Prof *prof;
+static int nprof, cprof;
+
+static double now_ns(void) { return tr_now_ms() * 1e6; }
+
+static void prof_add(const Module *m, const Ins *in, double ns)
+{
+	unsigned h = (unsigned)(((uintptr_t)in >> 4) * 2654435761u);
+	if (nprof * 2 >= cprof) { /* grow and rehash */
+		int oc = cprof;
+		Prof *op = prof;
+		cprof = cprof ? 2 * cprof : 1024;
+		prof = calloc((size_t)cprof, sizeof *prof);
+		if (!prof) die(NULL, 0, "out of memory");
+		nprof = 0;
+		for (int i = 0; i < oc; i++)
+			if (op[i].in) {
+				unsigned g = (unsigned)(((uintptr_t)op[i].in >> 4) * 2654435761u);
+				int j = (int)(g & (unsigned)(cprof - 1));
+				while (prof[j].in) j = (j + 1) & (cprof - 1);
+				prof[j] = op[i];
+				nprof++;
+			}
+		free(op);
+	}
+	int j = (int)(h & (unsigned)(cprof - 1));
+	while (prof[j].in && prof[j].in != in) j = (j + 1) & (cprof - 1);
+	if (!prof[j].in) { prof[j].in = in; prof[j].m = m; nprof++; }
+	prof[j].ns += ns;
+	prof[j].calls++;
+}
+
+static int prof_cmp(const void *x, const void *y)
+{
+	double a = ((const Prof *)x)->ns, b = ((const Prof *)y)->ns;
+	return a < b ? 1 : a > b ? -1 : 0;
+}
+
+void vm_profile_report(void)
+{
+	if (!nprof) return;
+	Prof *v = malloc((size_t)nprof * sizeof *v);
+	int n = 0;
+	double tot = 0;
+	for (int i = 0; i < cprof; i++)
+		if (prof[i].in) { v[n++] = prof[i]; tot += prof[i].ns; }
+	qsort(v, (size_t)n, sizeof *v, prof_cmp);
+	double byop[OP_COUNT] = { 0 };
+	for (int i = 0; i < n; i++) byop[v[i].in->op] += v[i].ns;
+	fputs("profile by operation:", stderr);
+	for (int k = 0; k < 8; k++) {
+		int best = -1;
+		for (int o = 0; o < OP_COUNT; o++)
+			if (byop[o] > 0 && (best < 0 || byop[o] > byop[best])) best = o;
+		if (best < 0) break;
+		fprintf(stderr, " %s %.0f%%", tg_ops[best].name, 100 * byop[best] / tot);
+		byop[best] = 0;
+	}
+	fputc('\n', stderr);
+	for (int i = 0; i < n; i++) { /* per module */
+		int seen = 0;
+		for (int k = 0; k < i; k++) seen |= v[k].m == v[i].m;
+		if (seen) continue;
+		double t = 0;
+		for (int k = i; k < n; k++) t += v[k].m == v[i].m ? v[k].ns : 0;
+		fprintf(stderr, "profile: module %s %.1f ms\n", v[i].m->name, t / 1e6);
+	}
+	fprintf(stderr, "profile: %.1f ms in %d instruction(s); the 25 slowest:\n%8s %6s %10s  %s\n", tot / 1e6, n, "ms", "%", "calls", "instruction");
+	for (int i = 0; i < n && i < 25; i++) {
+		const Module *m = v[i].m;
+		const Ins *in = v[i].in;
+		char sh[256], t[64];
+		size_t q = 0;
+		shape_str(&m->val[in->out].sh, t, sizeof t);
+		q += (size_t)snprintf(sh + q, sizeof sh - q, "%s %s(", t, tg_ops[in->op].name);
+		for (int k = 0; k < in->na && q < sizeof sh; k++) {
+			shape_str(&m->val[in->a[k]].sh, t, sizeof t);
+			q += (size_t)snprintf(sh + q, sizeof sh - q, "%s%s", k ? ", " : "", t);
+		}
+		if (q < sizeof sh) snprintf(sh + q, sizeof sh - q, ")");
+		fprintf(stderr, "%8.1f %5.1f%% %10ld  %s: %s\n", v[i].ns / 1e6, 100 * v[i].ns / tot, v[i].calls, m->name, sh);
+	}
+	free(v);
+}
+
+static void exec_one(VM *vm, const Ins *in);
+
 static void exec(VM *vm, const Block *b)
 {
-	const Module *m = vm->m;
 	for (int i = 0; i < b->len; i++) {
 		const Ins *in = &b->v[i];
+		if (tg_profile && in->op != OP_THINK && in->op != OP_SCAN) {
+			double t0 = now_ns();
+			exec_one(vm, in);
+			prof_add(vm->m, in, now_ns() - t0);
+		} else {
+			exec_one(vm, in);
+		}
+	}
+}
+
+static void exec_one(VM *vm, const Ins *in)
+{
+	const Module *m = vm->m;
+	{
 		const Shape *os = &m->val[in->out].sh;
 		float *o = ptr(vm, in->out);
 		int n = shape_numel(os);
@@ -140,7 +264,13 @@ static void exec(VM *vm, const Block *b)
 			matmul_dims(&m->val[in->a[0]].sh, &m->val[in->a[1]].sh, &mm, &kk, &nn);
 			int gg = matmul_groups(&m->val[in->a[0]].sh, &m->val[in->a[1]].sh);
 			if (gg > 1) {
-				tg_bmm(o, a, c, gg, mm, kk, nn);
+				if (par_threads() > 1 && gg >= 2 && (long)gg * mm * kk * nn >= 16 * PAR_MATMUL_MIN) { /* many small products: dispatch costs more */
+					BMMJob j = { o, a, c, mm, kk, nn };
+					int grain = gg / (4 * par_threads());
+					par_for(gg, grain > 0 ? grain : 1, bmm_groups, &j);
+				} else {
+					tg_bmm(o, a, c, gg, mm, kk, nn);
+				}
 				break;
 			}
 			if (vm_matmul_hook) vm_matmul_hook(vm_hook_ctx, m, in, a, c);

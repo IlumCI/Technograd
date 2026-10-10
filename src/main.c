@@ -21,6 +21,7 @@ static void usage(void)
 	      "  fix   <file> [-o out.tg]  repair compile errors with the neural-forest fixer\n"
 	      "  train SOURCE [-o DIR] [--target COL] ...  train a model on a dataset file or hf:OWNER/NAME\n"
 	      "  predict DIR SOURCE [-o out.csv]           predict with a model from `tgc train`\n"
+	      "  pretrain SOURCE [-o DIR] [--column C] ... next-token pretraining of the sequence model on unlabeled text\n"
 	      "  data inspect|prep SOURCE ...              show what a dataset contains / write numeric features\n"
 	      "  fixer-train -o forest.tg <corpus.tg>...   train the fixer (self-supervised)\n"
 	      "  fixer-eval <corpus.tg>...                 measure repair rates on corrupted programs\n"
@@ -29,7 +30,8 @@ static void usage(void)
 	      "  -v, --verbose   trace compiler stages and think loops to stderr; -vv adds every VM value\n"
 	      "  --log FILE  append a JSON Lines log of all events and errors (debug events need -vv)\n"
 	      "  -j N, --threads N   worker threads for batch rows and large matmuls (N=0 or auto: one per CPU)\n"
-	      "  --save-state P      after run/batch, write each state to P.<name>.bin (loadable with file())\n",
+	      "  --save-state P      after run/batch, write each state to P.<name>.bin (loadable with file())\n"
+	      "  --profile   at exit, print the VM instructions that took the most time (single thread)\n",
 	      stderr);
 	exit(2);
 }
@@ -294,6 +296,10 @@ int main(int argc, char **argv)
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--autofix") == 0) fix = 1;
 		else if (strcmp(argv[i], "--fixed") == 0) fixed = 1;
+		else if (strcmp(argv[i], "--profile") == 0) {
+			tg_profile = 1;
+			atexit(vm_profile_report);
+		}
 		else if (is_asm && strcmp(argv[i], "--support") == 0) support = 1;
 		else if (is_asm && strcmp(argv[i], "--target") == 0) { /* train has its own --target */
 			if (++i == argc) usage();
@@ -323,7 +329,7 @@ int main(int argc, char **argv)
 	par_init(threads);
 	const char *cmd = argv[1];
 
-	if (!strcmp(cmd, "train") || !strcmp(cmd, "predict") || !strcmp(cmd, "data")) return autotrain_main(argc, argv);
+	if (!strcmp(cmd, "train") || !strcmp(cmd, "predict") || !strcmp(cmd, "data") || !strcmp(cmd, "pretrain")) return autotrain_main(argc, argv);
 	if (!strcmp(cmd, "quantize")) return quantize_main(argc, argv);
 	if (strcmp(cmd, "fixer-train") == 0) {
 		if (argc < 5 || strcmp(argv[2], "-o") != 0) usage();

@@ -241,6 +241,8 @@ void par_for(int n, int grain, void (*fn)(void *ctx, int lo, int hi, int tid), v
 void cgen(const Module *m, FILE *f);
 void cgen_mode(const Module *m, FILE *f, int fixed); /* fixed: Q16.16 integer unit (runtime/tg_rtq.h) */
 int cgen_needs_f32(const Module *m, int v);
+extern int tg_profile; /* --profile: per-instruction VM time */
+void vm_profile_report(void);
 void cgen_support(const Module *m, FILE *f, int fixed); /* runtime + driver for a native unit */
 void asmgen(const Module *m, FILE *f, const char *target); /* tgc asm: cortex-m3, cortex-m4f, rv64gcv */
 int asm_target_fixed(const char *target);

@@ -27,8 +27,8 @@
 #include <sys/stat.h>
 
 typedef struct {
-	const char *source, *target, *out, *optimizer;
-	int epochs, hidden, max_rows, seed, text_dim, batch, ssm;
+	const char *source, *target, *out, *optimizer, *init, *column;
+	int epochs, hidden, max_rows, seed, text_dim, batch, ssm, layers, mimo, steps;
 	double lr, val;
 } Opts;
 
@@ -39,7 +39,10 @@ static void usage_data(void)
 	      "  tgc data prep SOURCE -o OUT.csv [--target COL]\n"
 	      "  tgc train SOURCE [-o DIR] [--target COL] [--epochs N] [--hidden H] [--lr X]\n"
 	      "                   [--optimizer sgd|momentum|adam|adamw|muon] [--val FRACTION] [--max-rows N]\n"
-	      "                   [--batch N] [--text-dim N] [--model bow|ssm] [--seed S]\n"
+	      "                   [--batch N] [--text-dim N] [--model bow|ssm] [--layers N] [--mimo R] [--seed S]\n"
+	      "                   [--init PRETRAINED_DIR]\n"
+	      "  tgc pretrain SOURCE [-o DIR] [--column COL] [--epochs N] [--steps N] [--batch N] [--lr X]\n"
+	      "                   [--layers N] [--mimo R] [--max-rows N] [--seed S]\n"
 	      "  tgc predict DIR SOURCE [-o OUT.csv] [--model QUANTIZED.tgir] [--inputs ROWS.csv]\n"
 	      "SOURCE: a .csv/.tsv/.json/.jsonl/.npy file, or hf:OWNER/NAME[/CONFIG[/SPLIT]]\n",
 	      stderr);
@@ -63,6 +66,11 @@ static void parse_opts(int argc, char **argv, int first, Opts *o)
 		else if (!strcmp(a, "--seed")) o->seed = atoi(v);
 		else if (!strcmp(a, "--text-dim")) o->text_dim = atoi(v);
 		else if (!strcmp(a, "--batch")) o->batch = atoi(v);
+		else if (!strcmp(a, "--layers")) o->layers = atoi(v);
+		else if (!strcmp(a, "--mimo")) o->mimo = atoi(v);
+		else if (!strcmp(a, "--init")) o->init = v;
+		else if (!strcmp(a, "--column")) o->column = v;
+		else if (!strcmp(a, "--steps")) o->steps = atoi(v);
 		else if (!strcmp(a, "--model")) {
 			if (strcmp(v, "bow") && strcmp(v, "ssm")) die(NULL, 0, "--model is 'bow' (bag of words) or 'ssm' (bag of words + selective state-space sequence layer)");
 			o->ssm = !strcmp(v, "ssm");
@@ -125,12 +133,13 @@ enum { GEN_TRAIN, GEN_INFER, GEN_EVAL };
  * in a dense row of dd floats. */
 typedef struct {
 	int dd, ds, k;
-	int sf, T, V, hs; /* sequence path: text feature index (-1: none), steps, vocabulary, state channels */
+	int sf, T, V, hs; /* sequence path: text feature index (-1: none), steps, vocabulary, model width */
+	int layers, mimo; /* Mamba-3 blocks, MIMO rank */
 } Layout;
 
 static Layout layout_of(const Spec *s)
 {
-	Layout l = { 0, 0, 0, -1, 0, 0, 0 };
+	Layout l = { 0, 0, 0, -1, 0, 0, 0, 0, 0 };
 	for (int i = 0; i < s->nf; i++) {
 		if (s->f[i].kind == COL_TEXT) l.ds += s->f[i].dim;
 		else l.dd += s->f[i].dim;
@@ -172,6 +181,169 @@ static int split_row(const Spec *s, const Layout *l, const float *x, float *xd, 
 	return nnz;
 }
 
+/* ---- the sequence path: stacked Mamba-3 blocks ------------------------------
+ * Per block, with u = rmsnorm(e) * g1 (model width D, time-major rows TB):
+ *   x = u Wx (heads Hh x P)   dt = softplus(u Wdt + bdt)   lam = sigmoid(u Wl + bl)
+ *   B, C = BCNorm(u WB, u WC) + per-head biases (rank R x state N)
+ *   rotation angles: cumulative sum over time of dt * (u Wth), applied to B and
+ *   C (the complex state of Mamba-3 as data-dependent RoPE)
+ *   h_t = al h_{t-1} + be B_{t-1} X_{t-1}^T + ga B_t X_t^T   (exponential-trapezoidal;
+ *   al = exp(-dt A), be = (1 - lam) dt al, ga = lam dt), X = x scaled per rank (MIMO)
+ *   y_t = C_t^T h_t, mixed over ranks, + dk x, gated by silu(u Wz), projected by Wo
+ *   e += that; then e += SwiGLU(rmsnorm(e) * g2)
+ * The products B X^T for all positions are computed before the scan; the scan
+ * carries only the state and the previous product. */
+#define SSM_HEADS 4
+#define SSM_N 16
+#define PW(...) (*o += (size_t)snprintf(b + *o, cap - *o, __VA_ARGS__))
+
+static void ssm_w(char *b, size_t cap, size_t *o, int mode, const char *n, int l, const char *shape, const char *init)
+{
+	if (mode == GEN_INFER) PW("param %s_%d : %s = file(\"weights.%s_%d.bin\")\n", n, l, shape, n, l);
+	else if (mode == GEN_EVAL) PW("param %s_%d : %s = zeros\n", n, l, shape);
+	else PW("state %s_%d : %s = %s\n", n, l, shape, init);
+}
+
+static void gen_ssm_weights(char *b, size_t cap, size_t *o, const Layout *l, int Bm, int H, int mode)
+{ /* H: width of the classifier the pooled sequence feeds (wp), 0 for none */
+	int D = l->hs, Di = 2 * D, Hh = SSM_HEADS, P = Di / Hh, N = SSM_N, R = l->mimo, F = 2 * D, L = l->layers, T = l->T;
+	char sh[64], in[64];
+	if (mode == GEN_INFER) PW("param E : f32[%d, %d] = file(\"weights.E.bin\")\n", l->V, D);
+	else if (mode == GEN_EVAL) PW("param E : f32[%d, %d] = zeros\n", l->V, D);
+	else PW("state E : f32[%d, %d] = rand(31, 1)\n", l->V, D);
+	for (int k = 1; k <= L; k++) {
+		int sd = 100 * k;
+		double a = sqrt(3.0 / D), ao = sqrt(3.0 / Di) / sqrt(2.0 * L), a2 = sqrt(3.0 / F) / sqrt(2.0 * L);
+		struct { const char *n; int r, c; double s; } w[] = {
+			{ "Wx", D, Di, a }, { "Wz", D, Di, a }, { "WB", D, R * N, a }, { "WC", D, R * N, a }, { "Wdt", D, Hh, a },
+			{ "Wl", D, Hh, a }, { "Wth", D, Hh * N / 2, a }, { "Wo", Di, D, ao }, { "W1", D, F, a }, { "W3", D, F, a }, { "W2", F, D, a2 },
+		};
+		for (int i = 0; i < (int)(sizeof w / sizeof *w); i++) {
+			snprintf(sh, sizeof sh, "f32[%d, %d]", w[i].r, w[i].c);
+			snprintf(in, sizeof in, "rand(%d, %.6g)", sd + i, w[i].s);
+			ssm_w(b, cap, o, mode, w[i].n, k, sh, in);
+		}
+		snprintf(sh, sizeof sh, "f32[%d]", D);
+		ssm_w(b, cap, o, mode, "g1", k, sh, "ones");
+		ssm_w(b, cap, o, mode, "g2", k, sh, "ones");
+		snprintf(sh, sizeof sh, "f32[%d]", N);
+		ssm_w(b, cap, o, mode, "gB", k, sh, "ones");
+		ssm_w(b, cap, o, mode, "gC", k, sh, "ones");
+		snprintf(sh, sizeof sh, "f32[%d, 1, %d]", Hh, N);
+		ssm_w(b, cap, o, mode, "bB", k, sh, "ones");
+		ssm_w(b, cap, o, mode, "bC", k, sh, "ones");
+		snprintf(sh, sizeof sh, "f32[%d, %d, %d]", Hh, R, P);
+		ssm_w(b, cap, o, mode, "Wxr", k, sh, "ones");
+		{ /* output mix over ranks: 1/R */
+			if (mode == GEN_TRAIN) PW("state Wyr_%d : %s = [", k, sh);
+			else ssm_w(b, cap, o, mode, "Wyr", k, sh, "");
+			if (mode == GEN_TRAIN) {
+				for (int h = 0; h < Hh; h++) {
+					PW("%s[", h ? ", " : "");
+					for (int r = 0; r < R; r++) {
+						PW("%s[", r ? ", " : "");
+						for (int p = 0; p < P; p++) PW("%s%.6g", p ? ", " : "", 1.0 / R);
+						PW("]");
+					}
+					PW("]");
+				}
+				PW("]\n");
+			}
+		}
+		snprintf(sh, sizeof sh, "f32[%d]", Di);
+		ssm_w(b, cap, o, mode, "dk", k, sh, "ones");
+		snprintf(sh, sizeof sh, "f32[%d]", Hh);
+		ssm_w(b, cap, o, mode, "bl", k, sh, "zeros");
+		for (int which = 0; which < 2; which++) { /* log-spaced step sizes [0.001, 0.1] and decay rates [1, 16] per head, as in Mamba-2 */
+			char v[512];
+			size_t q = (size_t)snprintf(v, sizeof v, "[");
+			for (int h = 0; h < Hh; h++) {
+				double f = Hh > 1 ? (double)h / (Hh - 1) : 0;
+				double x = which == 0 ? exp(log(0.001) + f * (log(0.1) - log(0.001))) : exp(f * log(16.0));
+				q += (size_t)snprintf(v + q, sizeof v - q, "%s%.6g", h ? ", " : "", log(expm1(x))); /* softplus^-1 */
+			}
+			snprintf(v + q, sizeof v - q, "]");
+			ssm_w(b, cap, o, mode, which == 0 ? "bdt" : "la", k, sh, v);
+		}
+	}
+	snprintf(sh, sizeof sh, "f32[%d]", D);
+	if (mode == GEN_INFER) PW("param gf : %s = file(\"weights.gf.bin\")\n", sh);
+	else if (mode == GEN_EVAL) PW("param gf : %s = zeros\n", sh);
+	else PW("state gf : %s = ones\n", sh);
+	/* constants */
+	PW("param sel2 : f32[2] = [0, 1]\nparam onesT : f32[%d] = ones\nparam Ltri : f32[%d, %d] = [", T, T, T);
+	for (int i = 0; i < T; i++) {
+		PW("%s[", i ? ", " : "");
+		for (int j = 0; j < T; j++) PW("%s%d", j ? ", " : "", j <= i);
+		PW("]");
+	}
+	PW("]\nparam dup : f32[%d, %d] = [", N / 2, N); /* one angle per channel pair */
+	for (int i = 0; i < N / 2; i++) {
+		PW("%s[", i ? ", " : "");
+		for (int j = 0; j < N; j++) PW("%s%d", j ? ", " : "", j / 2 == i);
+		PW("]");
+	}
+	PW("]\nparam J : f32[2, 2] = [[0, 1], [-1, 0]]\n"); /* (v0, v1) @ J = (-v1, v0): a quarter turn of each channel pair */
+	PW("param h0 : f32[%d, %d, %d] = zeros\n", Bm * Hh, N, P);
+	if (!H) return;
+	snprintf(sh, sizeof sh, "f32[%d, %d]", D, H);
+	snprintf(in, sizeof in, "rand(29, %.6g)", sqrt(6.0 / (D + H)));
+	if (mode == GEN_INFER) PW("param wp : %s = file(\"weights.wp.bin\")\n", sh);
+	else if (mode == GEN_EVAL) PW("param wp : %s = zeros\n", sh);
+	else PW("state wp : %s = %s\n", sh, in);
+}
+
+static void gen_ssm_def(char *b, size_t cap, size_t *o, const Layout *l, int Bm, int pool)
+{
+	int D = l->hs, Di = 2 * D, Hh = SSM_HEADS, P = Di / Hh, N = SSM_N, R = l->mimo, T = l->T, TB = T * Bm, G = TB * Hh, BH = Bm * Hh;
+	if (pool) PW("def ssm(tok: f32[%d, 1, 2]) -> f32[%d, %d]:\n", TB, Bm, D);
+	else PW("def states(tok: f32[%d, 1, 2]) -> f32[%d, %d]:\n", TB, TB, D);
+	PW("    m = reshape(reshape(tok, %d, 2) @ sel2, %d, 1)\n", TB, TB);
+	PW("    e0 = spmm(tok, E)\n");
+	for (int k = 1; k <= l->layers; k++) {
+		int p = k - 1;
+		PW("    # block %d: Mamba-3 mixer\n", k);
+		PW("    u = rmsnorm(e%d) * g1_%d\n", p, k);
+		PW("    x = u @ Wx_%d\n", k);
+		PW("    dt = softplus(u @ Wdt_%d + bdt_%d) * m\n", k, k);
+		PW("    lam = sigmoid(u @ Wl_%d + bl_%d)\n", k, k);
+		PW("    al = exp(-(dt * softplus(la_%d)))\n", k);
+		PW("    th = reshape(u @ Wth_%d, %d, %d, %d) * reshape(dt, %d, %d, 1)\n", k, TB, Hh, N / 2, TB, Hh);
+		PW("    ph = reshape(reshape(Ltri @ reshape(th, %d, %d), %d, %d) @ dup, %d, 1, %d)\n", T, BH * N / 2, G, N / 2, G, N);
+		PW("    co = cos(ph)\n    si = sin(ph)\n");
+		PW("    Bg = reshape(reshape(rmsnorm(reshape(u @ WB_%d, %d, %d, %d)) * gB_%d, %d, 1, %d, %d) + bB_%d, %d, %d, %d)\n", k, TB, R, N, k, TB, R, N, k, G, R, N);
+		PW("    Cg = reshape(reshape(rmsnorm(reshape(u @ WC_%d, %d, %d, %d)) * gC_%d, %d, 1, %d, %d) + bC_%d, %d, %d, %d)\n", k, TB, R, N, k, TB, R, N, k, G, R, N);
+		PW("    Bt = Bg * co + reshape(reshape(Bg, %d, 2) @ J, %d, %d, %d) * si\n", G * R * N / 2, G, R, N);
+		PW("    Ct = Cg * co + reshape(reshape(Cg, %d, 2) @ J, %d, %d, %d) * si\n", G * R * N / 2, G, R, N);
+		PW("    X = reshape(reshape(x, %d, %d, 1, %d) * Wxr_%d, %d, %d, %d)\n", TB, Hh, P, k, G, R, P);
+		PW("    U = reshape(transpose(Bt) @ X, %d, %d, %d, %d)\n", T, BH, N, P);
+		PW("    Cs = reshape(Ct, %d, %d, %d, %d)\n", T, BH, R, N);
+		PW("    As = reshape(al, %d, %d, 1, 1)\n", T, BH);
+		PW("    Bs = reshape((1 - lam) * dt * al, %d, %d, 1, 1)\n", T, BH);
+		PW("    Gs = reshape(lam * dt, %d, %d, 1, 1)\n", T, BH);
+		PW("    h = h0\n    up = h0\n");
+		PW("    scan h, up over a in As, be in Bs, ga in Gs, ut in U, ct in Cs:\n");
+		PW("        h = a * h + be * up + ga * ut\n");
+		PW("        up = ut\n");
+		PW("        emit ys = ct @ h\n");
+		PW("    xr = reshape(x, %d, %d, 1, %d)\n", TB, Hh, P);
+		PW("    y = reshape(sum_to(reshape(ys, %d, %d, %d, %d) * Wyr_%d, xr), %d, %d) + x * dk_%d\n", TB, Hh, R, P, k, TB, Di, k);
+		PW("    e%dm = e%d + (y * silu(u @ Wz_%d)) @ Wo_%d\n", k, p, k, k);
+		PW("    # block %d: SwiGLU MLP\n", k);
+		PW("    v = rmsnorm(e%dm) * g2_%d\n", k, k);
+		PW("    e%d = e%dm + (silu(v @ W1_%d) * (v @ W3_%d)) @ W2_%d\n", k, k, k, k, k);
+	}
+	PW("    ef = rmsnorm(e%d) * gf * m\n", l->layers);
+	if (!pool) {
+		PW("    return ef\n\n");
+		return;
+	}
+	PW("    tot = onesT @ reshape(ef, %d, %d)\n", T, Bm * D);
+	PW("    cnt = onesT @ reshape(m, %d, %d)\n", T, Bm);
+	PW("    return reshape(tot, %d, %d) / reshape(cnt + 0.000001, %d, 1)\n\n", Bm, D, Bm);
+}
+#undef PW
+
 /* The generated models. Plain Technograd: the user can read and edit them.
  * Weights are stored (in, out), so `x @ w1` serves a (B, D) batch in training
  * and a single (D) row in inference with the same weight files. */
@@ -197,54 +369,14 @@ static char *gen_model(const char *name, const Spec *s, const Layout *l, int H, 
 		  K, Ds, K, H, Ds, H);
 	int Hs = l->hs, T = l->T, Bm = mode == GEN_TRAIN ? B : 1;
 	if (l->sf >= 0)
-		P("# Word order enters through a selective state-space layer (ssm below) over\n"
-		  "# up to %d tokens: Mamba-3-style exponential-trapezoidal recurrence with\n"
-		  "# data-dependent rotations (complex-valued state as 2x2 rotations of channel\n"
-		  "# pairs), trained by backpropagation through time. tok holds one\n"
-		  "# (word bucket, 1) pair per position, time-major; padding is (0, 0).\n", T);
+		P("# Word order enters through %d stacked Mamba-3 blocks (ssm below) over up to\n"
+		  "# %d tokens (arXiv:2603.15569): exponential-trapezoidal recurrence, complex\n"
+		  "# state as data-dependent rotations of B and C, MIMO rank %d, BCNorm, each\n"
+		  "# block followed by a SwiGLU MLP, pre-norm residual. Trained by\n"
+		  "# backpropagation through time. tok holds one (word bucket, 1) pair per\n"
+		  "# position, time-major; padding is (0, 0).\n", l->layers, T, l->mimo);
 	P("model %s%s\n\n", name, mode == GEN_INFER ? "_infer" : mode == GEN_EVAL ? "_eval" : "");
-	if (l->sf >= 0) { /* sequence-layer weights and constants */
-		struct { const char *n; int r, c; double init; } w[] = {
-			{ "E", l->V, Hs, 1.0 }, { "Wdt", Hs, Hs, sqrt(3.0 / Hs) }, { "Wl", Hs, Hs, sqrt(3.0 / Hs) },
-			{ "Wth", Hs, Hs / 2, sqrt(3.0 / Hs) }, { "Wv", Hs, Hs, sqrt(3.0 / Hs) }, { "Wc", Hs, Hs, sqrt(3.0 / Hs) },
-			{ "Wz", Hs, Hs, sqrt(3.0 / Hs) }, { "wp", Hs, H, sqrt(6.0 / (Hs + H)) },
-			{ "bl", 0, Hs, 0 }, { "bc", 0, Hs, 1 }, { "dk", 0, Hs, 1 }, { "bdt", 0, Hs, -1 }, { "la", 0, Hs, -2 },
-		};
-		for (int i = 0; i < (int)(sizeof w / sizeof *w); i++) {
-			char shape[48];
-			if (w[i].r) snprintf(shape, sizeof shape, "f32[%d, %d]", w[i].r, w[i].c);
-			else snprintf(shape, sizeof shape, "f32[%d]", w[i].c);
-			if (mode == GEN_INFER) { P("param %s : %s = file(\"weights.%s.bin\")\n", w[i].n, shape, w[i].n); continue; }
-			if (mode == GEN_EVAL) { P("param %s : %s = zeros\n", w[i].n, shape); continue; }
-			if (w[i].r) { P("state %s : %s = rand(%d, %.6g)\n", w[i].n, shape, 31 + i, w[i].init); continue; }
-			if (w[i].init == 0) { P("state %s : %s = zeros\n", w[i].n, shape); continue; }
-			if (w[i].init == 1) { P("state %s : %s = ones\n", w[i].n, shape); continue; }
-			P("state %s : %s = [", w[i].n, shape); /* log-spaced initial step sizes and decay rates, as in Mamba */
-			for (int j = 0; j < Hs; j++) {
-				double f = Hs > 1 ? (double)j / (Hs - 1) : 0;
-				double v = w[i].init == -1 ? exp(log(0.001) + f * (log(0.1) - log(0.001))) : exp(log(0.05) + f * (log(2.0) - log(0.05)));
-				P("%s%.6g", j ? ", " : "", log(expm1(v))); /* softplus^-1 */
-			}
-			P("]\n");
-		}
-		P("param sel : f32[2, %d] = [[", Hs); /* picks the value of a (bucket, value) pair: 1 for a word, 0 for padding */
-		for (int j = 0; j < Hs; j++) P("%s0", j ? ", " : "");
-		P("], [");
-		for (int j = 0; j < Hs; j++) P("%s1", j ? ", " : "");
-		P("]]\nparam dup : f32[%d, %d] = [", Hs / 2, Hs); /* one angle per channel pair */
-		for (int i = 0; i < Hs / 2; i++) {
-			P("%s[", i ? ", " : "");
-			for (int j = 0; j < Hs; j++) P("%s%d", j ? ", " : "", j / 2 == i);
-			P("]");
-		}
-		P("]\nparam swp : f32[%d, %d] = [", Hs, Hs); /* h @ swp = (-h1, h0, -h3, h2, ...) */
-		for (int i = 0; i < Hs; i++) {
-			P("%s[", i ? ", " : "");
-			for (int j = 0; j < Hs; j++) P("%s%d", j ? ", " : "", (i % 2 == 0 && j == i + 1) ? 1 : (i % 2 == 1 && j == i - 1) ? -1 : 0);
-			P("]");
-		}
-		P("]\nparam z0 : f32[%d, %d] = zeros\n", Bm, Hs);
-	}
+	if (l->sf >= 0) gen_ssm_weights(b, cap, &o, l, Bm, H, mode);
 	const char *wn[4] = { "w1", "wt", "b1", "w2" };
 	int rows[4] = { Dd, Ds, 0, H }, cols[4] = { H, H, H, C };
 	for (int i = 0; i < 5; i++) {
@@ -260,25 +392,7 @@ static char *gen_model(const char *name, const Spec *s, const Layout *l, int H, 
 		else P("state %s : %s = rand(%d, %.6g)\n", n, shape, 11 + i, i == 3 ? sqrt(6.0 / (H + C)) : g1);
 	}
 	P("\n");
-	if (l->sf >= 0) {
-		int TB = T * Bm;
-		P("def ssm(tok: f32[%d, 1, 2]) -> f32[%d, %d]:\n", TB, Bm, Hs);
-		P("    m = reshape(reshape(tok, %d, 2) @ sel, %d, %d, %d)\n", TB, T, Bm, Hs);
-		P("    e = spmm(tok, E)\n");
-		P("    dts = reshape(softplus(e @ Wdt + bdt), %d, %d, %d) * m\n", T, Bm, Hs);
-		P("    lams = reshape(sigmoid(e @ Wl + bl), %d, %d, %d)\n", T, Bm, Hs);
-		P("    ths = reshape((e @ Wth) @ dup, %d, %d, %d) * dts\n", T, Bm, Hs);
-		P("    vs = reshape(e @ Wv, %d, %d, %d)\n", T, Bm, Hs);
-		P("    cs = reshape(e @ Wc + bc, %d, %d, %d)\n", T, Bm, Hs);
-		P("    zs = reshape(silu(e @ Wz), %d, %d, %d)\n", T, Bm, Hs);
-		P("    a = softplus(la)\n    h = z0\n    pv = z0\n    p = z0\n    n = z0\n");
-		P("    scan h, pv, p, n over dt in dts, lam in lams, th in ths, v in vs, c in cs, z in zs, mt in m:\n");
-		P("        co = cos(th)\n        si = sin(th)\n        al = exp(-(dt * a))\n");
-		P("        h = al * (h * co + (h @ swp) * si) + (1 - lam) * dt * al * (pv * co + (pv @ swp) * si) + lam * dt * v\n");
-		P("        y = (h * c + dk * v) * z\n");
-		P("        pv = pv + mt * (v - pv)\n        p = p + y * mt\n        n = n + mt\n");
-		P("    return p / (n + 0.000001)\n\n");
-	}
+	if (l->sf >= 0) gen_ssm_def(b, cap, &o, l, Bm, 1);
 	/* argument lists and the first layer, for a batch (train) or one row */
 	char args[200] = "", call[32] = "", pre[160] = "";
 	size_t ao = 0;
@@ -421,6 +535,8 @@ static void prepare(Opts *o, Table **tp, int *target)
 	*tp = t;
 }
 
+static void init_weights(Module *m, const char *dir);
+
 static int cmd_train(Opts *o)
 {
 	Table *t;
@@ -473,6 +589,8 @@ static int cmd_train(Opts *o)
 		if (L.sf < 0) die(NULL, 0, "--model ssm needs a text column");
 		L.V = s->f[L.sf].dim;
 		L.hs = 32;
+		L.layers = o->layers > 0 ? o->layers : 2;
+		L.mimo = o->mimo > 0 ? o->mimo : 4;
 		int *ids = xmalloc(65 * sizeof *ids);
 		for (int i = 0; i < ntr; i++) {
 			int w = spec_tokens(s, t, rows[i], L.sf, ids, 64);
@@ -504,6 +622,7 @@ static int cmd_train(Opts *o)
 	write_text(mpath, src);
 	Module *m = lower(surface_parse(src, mpath), mpath);
 	plan(m);
+	if (o->init) init_weights(m, o->init);
 	/* evaluation: the single-row network reading the training weights in place */
 	char *esrc = gen_model(name, s, &L, H, B, opt, lr, o->source, GEN_EVAL);
 	Module *em = lower(surface_parse(esrc, "<eval>"), "<eval>");
@@ -586,7 +705,7 @@ static int cmd_train(Opts *o)
 	if (fclose(cf)) die(NULL, 0, "write failed '%s'", cpath);
 
 	char rep[2048], ssm_note[160] = "";
-	if (L.sf >= 0) snprintf(ssm_note, sizeof ssm_note, "\n            + selective SSM over '%s': %d steps, %d state channels", s->f[L.sf].name, L.T, L.hs);
+	if (L.sf >= 0) snprintf(ssm_note, sizeof ssm_note, "\n            + %d Mamba-3 block(s) over '%s': %d steps, width %d, MIMO rank %d", L.layers, s->f[L.sf].name, L.T, L.hs, L.mimo);
 	double metric = s->classify ? bv.acc * 100 : sqrt(bv.loss) * s->tstd;
 	snprintf(rep, sizeof rep,
 		 "source      %s (%s, %d rows)\ntask        %s of '%s'%s\nfeatures    %d (%d dense, %d sparse text buckets, <= %d active per row)\nmodel       %d -> %d -> %d, %s(lr=%g)%s\n"
@@ -681,6 +800,195 @@ static int cmd_predict(int argc, char **argv)
 	return 0;
 }
 
+/* --init DIR: start every weight that DIR holds (weights.<name>.bin with the
+ * same element count) from there; the rest keep their initialization. */
+static void init_weights(Module *m, const char *dir)
+{
+	int n = 0, tot = 0;
+	for (int v = 0; v < m->nval; v++) {
+		Value *x = &m->val[v];
+		if (x->kind != V_STATE || !strncmp(x->name, "__", 2)) continue;
+		tot++;
+		char fn[160];
+		snprintf(fn, sizeof fn, "weights.%s.bin", x->name);
+		char *p = join(dir, fn);
+		FILE *f = fopen(p, "rb");
+		xfree(p);
+		if (!f) continue;
+		size_t want = (size_t)shape_numel(&x->sh);
+		fseek(f, 0, SEEK_END);
+		long sz = ftell(f);
+		fseek(f, 0, SEEK_SET);
+		if (sz != (long)(want * sizeof(float)) || fread(x->data, sizeof(float), want, f) != want) {
+			fclose(f);
+			die(NULL, 0, "--init: %s/%s has %ld bytes, the model's '%s' needs %zu", dir, fn, sz, x->name, want * sizeof(float));
+		}
+		fclose(f);
+		n++;
+	}
+	if (!n) die(NULL, 0, "--init: no weights of this model in '%s' (pretrain with the same --layers and --mimo)", dir);
+	fprintf(stderr, "init     %d of %d weights from %s\n", n, tot, dir);
+}
+
+/* ---- tgc pretrain: next-token prediction on unlabeled text ----------------
+ * Windows of T + 1 tokens; the model reads tokens 0..T-1 and predicts 1..T.
+ * The softmax runs over the distinct target buckets of the batch (in-batch
+ * sampled softmax), with the embedding table tied between input and output
+ * and logits soft-capped at 15 (c tanh(z / c)) so exp cannot overflow. */
+static char *gen_lm(const char *name, const Layout *l, int Bm, double lr, int mode, const char *src)
+{
+	size_t cap = (size_t)1 << 21;
+	char *b = xmalloc(cap);
+	size_t o = 0;
+#define P(...) o += (size_t)snprintf(b + o, cap - o, __VA_ARGS__)
+	int D = l->hs, TB = l->T * Bm;
+	P("# Generated by `tgc pretrain %s`: next-token prediction with %d Mamba-3 block(s)\n"
+	  "# over windows of %d tokens hashed into %d buckets, in batches of %d windows.\n"
+	  "# Softmax over the distinct target buckets of the batch (in-batch sampled\n"
+	  "# softmax), tied embeddings, logits soft-capped at 15.\n", src, l->layers, l->T, l->V, Bm);
+	P("model %s_lm%s\n\n", name, mode == GEN_EVAL ? "_eval" : "");
+	gen_ssm_weights(b, cap, &o, l, Bm, 0, mode);
+	P("param onesD : f32[%d] = ones\nparam onesN : f32[%d] = ones\n\n", D, TB);
+	gen_ssm_def(b, cap, &o, l, Bm, 0);
+	P("def forward(tok: f32[%d, 1, 2], nxt: f32[%d, 1, 2]) -> f32:\n", TB, TB);
+	P("    h = states(tok)\n");
+	P("    r = active(nxt, E)\n");
+	P("    L = 15 * tanh((h @ transpose(take(E, r))) / 15) - step(0 - r) * 10000\n");
+	P("    pos = 15 * tanh(((h * spmm(nxt, E)) @ onesD) / 15)\n");
+	P("    mk = reshape(nxt, %d, 2) @ sel2\n", TB);
+	P("    loss = sum((log(exp(L) @ onesN) - pos) * mk) / (sum(mk) + 0.000001)\n");
+	if (mode == GEN_TRAIN) P("    train loss with adamw(lr=%g, clip=1)\n", lr);
+	P("    return loss\n");
+#undef P
+	return b;
+}
+
+static int cmd_pretrain(Opts *o)
+{
+	Table *t = data_load(o->source, o->max_rows);
+	data_analyze(t);
+	int col = -1;
+	for (int i = 0; i < t->ncols && col < 0; i++)
+		if (o->column ? !strcmp(t->col[i].name, o->column) : t->col[i].kind == COL_TEXT) col = i;
+	if (col < 0) die(NULL, 0, o->column ? "pretrain: no column '%s'" : "pretrain: %s has no text column (name one with --column)", o->column ? o->column : o->source);
+	Layout L = { 0, 0, 0, 0, 64, o->text_dim, 32, o->layers > 0 ? o->layers : 2, o->mimo > 0 ? o->mimo : 4 };
+	int T = L.T, Bm = o->batch > 0 ? o->batch : 16;
+	/* rows are packed into one token stream (as in GPT pretraining), cut into
+	 * windows of T + 1 tokens that overlap by one */
+	long cap = 1 << 16, ntok = 0;
+	int *ids = xmalloc(4096 * sizeof *ids), *stream = xmalloc((size_t)cap * sizeof *stream);
+	for (int r = 0; r < t->nrows; r++) {
+		const Cell *c = &t->col[col].cell[r];
+		if (c->t != CELL_STR) continue;
+		int n = text_tokens(c->s, L.V, ids, 4096);
+		if (n > 4096) n = 4096;
+		if (ntok + n > cap) { while (ntok + n > cap) cap *= 2; stream = xrealloc(stream, (size_t)cap * sizeof *stream); }
+		memcpy(stream + ntok, ids, (size_t)n * sizeof *ids);
+		ntok += n;
+	}
+	int nw = ntok > T ? (int)((ntok - 1) / T) : 0;
+	int *W = xmalloc((size_t)(nw ? nw : 1) * (size_t)(T + 1) * sizeof *W);
+	for (int k = 0; k < nw; k++) memcpy(W + (size_t)k * (size_t)(T + 1), stream + (size_t)k * (size_t)T, (size_t)(T + 1) * sizeof *W);
+	xfree(stream);
+	if (nw < 2 * Bm) die(NULL, 0, "pretrain: %d windows of text; need at least %d", nw, 2 * Bm);
+	rs = (uint32_t)(o->seed ? o->seed : 1) * 2654435761u + 1;
+	int *ord = xmalloc((size_t)nw * sizeof *ord);
+	for (int i = 0; i < nw; i++) ord[i] = i;
+	shuffle(ord, nw);
+	int nval = nw / 50 < Bm ? Bm : nw / 50 > 64 * Bm ? 64 * Bm : nw / 50, ntr = nw - nval;
+	double lr = o->lr > 0 ? o->lr : 0.003;
+	int epochs = o->epochs > 0 ? o->epochs : 1;
+	char name[64], dflt[128];
+	model_name(o->source, name, sizeof name);
+	snprintf(dflt, sizeof dflt, "%s_lm", name);
+	const char *dir = o->out ? o->out : dflt;
+	mkdir(dir, 0755);
+	char *src = gen_lm(name, &L, Bm, lr, GEN_TRAIN, o->source);
+	char *mpath = join(dir, "lm.tg");
+	write_text(mpath, src);
+	Module *m = lower(surface_parse(src, mpath), mpath);
+	plan(m);
+	if (o->init) init_weights(m, o->init);
+	char *esrc = gen_lm(name, &L, Bm, lr, GEN_EVAL, o->source);
+	Module *em = lower(surface_parse(esrc, "<eval>"), "<eval>");
+	for (int v = 0; v < em->nval; v++)
+		if (em->val[v].kind == V_PARAM)
+			for (int w = 0; w < m->nval; w++)
+				if (m->val[w].kind == V_STATE && !strcmp(m->val[w].name, em->val[v].name)) em->val[v].data = m->val[w].data;
+	plan(em);
+	fprintf(stderr, "pretrain %ld words in %d rows of '%s' -> %d windows of %d tokens (%d training, %d validation)\n"
+			"model    %d Mamba-3 block(s), width %d, MIMO rank %d, %d hashed buckets; batch %d, adamw(lr=%g, clip=1), %d epoch(s)%s\n\n",
+		ntok, t->nrows, t->col[col].name, nw, T, ntr, nval, L.layers, L.hs, L.mimo, L.V, Bm, lr, epochs,
+		o->steps ? ", step limit" : "");
+	float *arena = xmalloc((size_t)(m->arena ? m->arena : 1) * sizeof(float));
+	float *earena = xmalloc((size_t)(em->arena ? em->arena : 1) * sizeof(float));
+	float *tok = xmalloc((size_t)T * (size_t)Bm * 2 * sizeof(float)), *nxt = xmalloc((size_t)T * (size_t)Bm * 2 * sizeof(float));
+	int *steps = xmalloc(sizeof(int) * (size_t)(m->nthink + 1));
+	double t0 = tr_now_ms();
+	long step = 0;
+#define FILL(first)                                                                                      \
+	for (int i = 0; i < Bm; i++) {                                                                       \
+		const int *w = W + (size_t)ord[(first) + i] * (size_t)(T + 1);                                   \
+		for (int p = 0; p < T; p++) {                                                                    \
+			float *a = tok + ((size_t)p * (size_t)Bm + (size_t)i) * 2, *z = nxt + ((size_t)p * (size_t)Bm + (size_t)i) * 2; \
+			int ok = w[p] >= 0 && w[p + 1] >= 0;                                                         \
+			a[0] = ok ? (float)w[p] : 0; a[1] = ok ? 1 : 0;                                              \
+			z[0] = ok ? (float)w[p + 1] : 0; z[1] = ok ? 1 : 0;                                          \
+		}                                                                                                \
+	}
+	double val0 = 0;
+	for (int ep = 0; ep <= epochs; ep++) {
+		double tl = 0;
+		int nb = 0;
+		if (ep > 0) {
+			shuffle(ord, ntr);
+			for (int b0 = 0; b0 + Bm <= ntr && (!o->steps || step < o->steps); b0 += Bm) {
+				FILL(b0);
+				const float *in[2] = { tok, nxt };
+				float loss;
+				vm_run_into(m, in, &loss, steps, arena, NULL);
+				tl += loss;
+				nb++;
+				step++;
+				if (step % 500 == 0) fprintf(stderr, "  step %ld: training loss %.4f (%.0f s)\n", step, tl / nb, (tr_now_ms() - t0) / 1e3);
+			}
+		}
+		double vl = 0;
+		int vb = 0;
+		for (int b0 = ntr; b0 + Bm <= nw; b0 += Bm, vb++) {
+			FILL(b0);
+			const float *in[2] = { tok, nxt };
+			float loss;
+			vm_run_into(em, in, &loss, steps, earena, NULL);
+			vl += loss;
+		}
+		vl /= vb ? vb : 1;
+		if (ep == 0) val0 = vl;
+		fprintf(stderr, "epoch %d: %s%.4f, validation loss %.4f (in-batch softmax over <= %d candidates)\n", ep, ep ? "training loss " : "initial, ",
+			ep ? tl / (nb ? nb : 1) : vl, vl, T * Bm);
+		if (o->steps && step >= o->steps) break;
+	}
+#undef FILL
+	for (int v = 0; v < m->nval; v++) {
+		const Value *x = &m->val[v];
+		if (x->kind != V_STATE || !strncmp(x->name, "__", 2)) continue;
+		char fn[128];
+		snprintf(fn, sizeof fn, "weights.%s.bin", x->name);
+		char *p = join(dir, fn);
+		FILE *f = fopen(p, "wb");
+		if (!f) die(NULL, 0, "cannot write '%s'", p);
+		io_write_row(f, 1, x->data, shape_numel(&x->sh), NULL, 0);
+		if (fclose(f)) die(NULL, 0, "write failed '%s'", p);
+	}
+	char rep[1024];
+	snprintf(rep, sizeof rep, "source      %s (%d rows, column '%s', %ld words)\nmodel       %d Mamba-3 block(s), width %d, MIMO rank %d, %d buckets\n"
+		 "steps       %ld (batch %d windows of %d tokens)\nvalidation  next-token loss %.4f -> last %s\ntime        %.1f s\n",
+		 o->source, t->nrows, t->col[col].name, ntok, L.layers, L.hs, L.mimo, L.V, step, Bm, T, val0, "see log", (tr_now_ms() - t0) / 1e3);
+	write_text(join(dir, "report.txt"), rep);
+	fprintf(stderr, "\nwrote %s/: lm.tg, weights.*.bin, report.txt\nnext:  tgc train LABELED_DATA --model ssm --init %s\n", dir, dir);
+	return 0;
+}
+
 int autotrain_main(int argc, char **argv)
 {
 	Opts o = { 0 };
@@ -689,6 +997,10 @@ int autotrain_main(int argc, char **argv)
 	o.text_dim = 32768;
 	const char *cmd = argv[1];
 	if (!strcmp(cmd, "predict")) return cmd_predict(argc, argv);
+	if (!strcmp(cmd, "pretrain")) {
+		parse_opts(argc, argv, 2, &o);
+		return cmd_pretrain(&o);
+	}
 	if (!strcmp(cmd, "train")) {
 		parse_opts(argc, argv, 2, &o);
 		if (o.val < 0 || o.val >= 1) die(NULL, 0, "--val must be in [0, 1)");

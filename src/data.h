@@ -62,6 +62,8 @@ int spec_apply(const Spec *s, const Table *t, int row, float *x, float *y, int *
 /* Word buckets of text feature f (index into s->f) in reading order: writes
  * up to max ids, returns the number of words. */
 int spec_tokens(const Spec *s, const Table *t, int row, int f, int *ids, int max);
+/* Bucket ids of the words of any text, hashed exactly as spec_tokens hashes a text column of dim buckets. */
+int text_tokens(const char *text, int dim, int *ids, int max);
 void spec_save(const Spec *s, const char *path);
 Spec *spec_load(const char *path);
 

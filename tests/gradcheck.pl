@@ -29,6 +29,8 @@ my @cases = (
 	[ 'softmax rows',    'f32[2, 3]', 'param D : f32[2, 3] = [[1, 2, 3], [-1, 0, 2]]', 'sum(softmax(x) * D)' ],
 	[ 'rmsnorm vec',     'f32[4]', 'param c : f32[4] = [1, 2, 3, 4]', 'sum(rmsnorm(x) * c)' ],
 	[ 'rmsnorm rows',    'f32[2, 3]', 'param D : f32[2, 3] = [[1, 2, 3], [-1, 0, 2]]', 'sum(rmsnorm(x) * D)' ],
+	[ 'softmax rank 3',  'f32[2, 2, 3]', 'param D : f32[2, 2, 3] = rand(39, 1)', 'sum(softmax(x) * D)' ],
+	[ 'rmsnorm rank 3',  'f32[2, 2, 3]', 'param D : f32[2, 2, 3] = rand(40, 1)', 'sum(rmsnorm(x) * D)' ],
 	[ 'sum/mean',        'f32[4]', '', 'mean(x * x) * sum(x)' ],
 	[ 'scalar input',    'f32', '', 'tanh(x * x) + x' ],
 	[ 'reuse via def',   'f32[4]', "def sq(z: f32[4]) -> f32[4]:\n    return z * z", 'sum(sq(x) * x + sq(tanh(x)))' ],

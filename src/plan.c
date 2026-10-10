@@ -5,7 +5,13 @@
  * inside it stays live until the loop ends. Offsets are assigned with the
  * greedy-by-size strategy of Pisarchyk & Lee (arXiv:2001.03288): largest
  * tensors first, each placed at the lowest offset that does not collide with
- * an already-placed tensor whose lifetime overlaps. */
+ * an already-placed tensor whose lifetime overlaps.
+ *
+ * A reshape of a temporary shares its operand's storage (the layout is the
+ * same): both take one slot whose lifetime covers both, and the copy becomes
+ * a no-op. Values a loop writes in place (scan carries, slices and stacks,
+ * think states) are excluded, since their contents change while an alias
+ * could still be read. */
 #include "tg.h"
 
 #include <stdlib.h>
@@ -80,6 +86,39 @@ static void live(Module *m, Block *b, Ins **loops, int nl)
 	}
 }
 
+static void mark_loop_values(const Block *b, char *lw)
+{
+	for (int i = 0; i < b->len; i++) {
+		const Ins *in = &b->v[i];
+		if (in->op == OP_SCAN) {
+			const Scan *s = in->sc;
+			for (int k = 0; k < s->nc; k++) lw[s->c[k]] = 1;
+			for (int j = 0; j < s->nx; j++) lw[s->xt[j]] = 1;
+			for (int y = 0; y < s->ny; y++) lw[s->ys[y]] = 1;
+		}
+		if (in->op == OP_THINK) lw[in->out] = 1;
+		if (in->op == OP_THINK || in->op == OP_SCAN) mark_loop_values(in->body, lw);
+	}
+}
+
+static int root_of(const int *al, int v)
+{
+	while (al[v] != v) v = al[v];
+	return v;
+}
+
+static void find_aliases(const Module *m, const Block *b, const char *lw, int *al)
+{
+	for (int i = 0; i < b->len; i++) {
+		const Ins *in = &b->v[i];
+		if (in->op == OP_RESHAPE) {
+			int x = in->a[0], y = in->out;
+			if (m->val[x].kind == V_TMP && m->val[y].kind == V_TMP && !lw[x] && !lw[y]) al[y] = root_of(al, x);
+		}
+		if (in->op == OP_THINK || in->op == OP_SCAN) find_aliases(m, in->body, lw, al);
+	}
+}
+
 static int depth(const Block *b)
 {
 	int d = 0;
@@ -125,9 +164,23 @@ void plan(Module *m)
 	}
 	xfree(loops);
 
+	int *al = xmalloc((size_t)(m->nval ? m->nval : 1) * sizeof *al);
+	char *lw = xmalloc((size_t)(m->nval ? m->nval : 1));
+	memset(lw, 0, (size_t)m->nval);
+	for (int v = 0; v < m->nval; v++) al[v] = v;
+	mark_loop_values(&m->top, lw);
+	find_aliases(m, &m->top, lw, al);
+	for (int v = 0; v < m->nval; v++) { /* the shared slot lives as long as any alias */
+		int r = root_of(al, v);
+		if (r == v || m->val[v].def < 0) continue;
+		Value *x = &m->val[r], *y = &m->val[v];
+		if (y->def < x->def) x->def = y->def;
+		if (y->last > x->last) x->last = y->last;
+	}
+
 	int *order = xmalloc((size_t)m->nval * sizeof *order), n = 0;
 	for (int v = 0; v < m->nval; v++)
-		if (m->val[v].kind == V_TMP && m->val[v].def >= 0) order[n++] = v;
+		if (m->val[v].kind == V_TMP && m->val[v].def >= 0 && al[v] == v) order[n++] = v;
 	sort_m = m;
 	qsort(order, (size_t)n, sizeof *order, by_size);
 
@@ -153,6 +206,10 @@ void plan(Module *m)
 		if (off + sz > m->arena) m->arena = off + sz;
 		placed[np++] = order[i];
 	}
+	for (int v = 0; v < m->nval; v++)
+		if (al[v] != v && m->val[v].def >= 0) m->val[v].off = m->val[root_of(al, v)].off;
+	xfree(al);
+	xfree(lw);
 	/* Commit staging: every update source is copied here first, then into its
 	 * state, so an update reading another state sees the start-of-run value. */
 	m->stage = m->arena;

@@ -439,7 +439,8 @@ static void load_npy(Table *t, const char *path)
 /* ---- Hugging Face ------------------------------------------------------- */
 
 /* Run curl without a shell; returns the response body or dies with a hint. */
-static char *http_get(const char *url, const char *what, int hf)
+/* NULL on failure when soft (the caller retries), otherwise dies. */
+static char *http_fetch(const char *url, const char *what, int hf, int soft)
 {
 	int fd[2];
 	if (pipe(fd)) die(NULL, 0, "pipe failed");
@@ -484,11 +485,17 @@ static char *http_get(const char *url, const char *what, int hf)
 	close(fd[0]);
 	int st;
 	waitpid(pid, &st, 0);
+	if ((!WIFEXITED(st) || WEXITSTATUS(st)) && soft) {
+		xfree(buf);
+		return NULL;
+	}
 	if (!WIFEXITED(st) || WEXITSTATUS(st))
 		die(NULL, 0, "fetching %s failed (curl exit %d); check the %s, network access%s", what, WIFEXITED(st) ? WEXITSTATUS(st) : -1,
 		    hf ? "dataset id" : "URL", hf && !tok ? ", or set HF_TOKEN for gated datasets" : "");
 	return buf;
 }
+
+static char *http_get(const char *url, const char *what, int hf) { return http_fetch(url, what, hf, 0); }
 
 static void url_part(char *o, size_t n, const char *s)
 {
@@ -578,13 +585,43 @@ static void load_hf(Table *t, const char *spec, int max_rows)
 	url_part(es, sizeof es, split);
 	char part[2100];
 	snprintf(part, sizeof part, "%s.part", cache); /* renamed into place only when complete */
-	FILE *out = *cache ? fopen(part, "wb") : NULL;
-	long total = -1;
-	for (long off = 0; off < max_rows && (total < 0 || off < total); off += 100) {
+	long total = -1, start = 0;
+	if (*cache) { /* resume an interrupted fetch: whole pages only */
+		FILE *pf = fopen(part, "rb");
+		if (pf) {
+			fclose(pf);
+			char *text = read_file(part, NULL);
+			size_t keep = 0;
+			for (char *line = text; *line;) {
+				char *nl = strchr(line, '\n');
+				if (!nl) break; /* a page cut off mid-write */
+				*nl = 0;
+				JP j = { line, part, 1 };
+				J *page = jvalue(&j, 0);
+				J *rows = jget(page, "rows"), *tot = jget(page, "num_rows_total");
+				if (!rows || rows->k != J_ARR) break;
+				if (tot && tot->k == J_NUM) total = (long)tot->n;
+				for (int i = 0; i < rows->len; i++) add_object(t, rows->v[i]);
+				keep = (size_t)(nl + 1 - text);
+				line = nl + 1;
+			}
+			start = t->nrows;
+			if (truncate(part, (off_t)keep)) start = 0;
+			if (start) fprintf(stderr, "data: resuming %s/%s/%s at row %ld (%s)\n", id, config, split, start, part);
+		}
+	}
+	FILE *out = *cache ? fopen(part, start ? "ab" : "wb") : NULL;
+	if (!start) t->nrows = 0;
+	for (long off = start; off < max_rows && (total < 0 || off < total); off += 100) {
 		long want = max_rows - off < 100 ? max_rows - off : 100;
 		snprintf(url, sizeof url, "https://datasets-server.huggingface.co/rows?dataset=%s&config=%s&split=%s&offset=%ld&length=%ld",
 			 eid, ec, es, off, want);
-		char *body = http_get(url, id, 1);
+		char *body = NULL;
+		for (int wait = 30; !(body = http_fetch(url, id, 1, wait <= 480)); wait *= 2) { /* rate limits: back off for minutes */
+			if (out) fflush(out);
+			fprintf(stderr, "\ndata: %s: request failed at row %ld; retrying in %d s (progress is kept in %s)\n", id, off, wait, *cache ? part : "memory");
+			sleep((unsigned)wait);
+		}
 		JP j = { body, "rows", 1 };
 		J *page = jvalue(&j, 0);
 		J *rows = jget(page, "rows"), *tot = jget(page, "num_rows_total");
@@ -952,6 +989,13 @@ int spec_tokens(const Spec *s, const Table *t, int row, int f, int *ids, int max
 	if (ci < 0 || t->col[ci].cell[row].t != CELL_STR) return 0;
 	Seq q = { ids, max, 0, (uint32_t)s->f[f].dim };
 	words(t->col[ci].cell[row].s, seq_word, &q);
+	return q.n;
+}
+
+int text_tokens(const char *text, int dim, int *ids, int max)
+{
+	Seq q = { ids, max, 0, (uint32_t)dim };
+	words(text, seq_word, &q);
 	return q.n;
 }
 

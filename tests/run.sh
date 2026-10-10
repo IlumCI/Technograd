@@ -183,10 +183,16 @@ $TGC train "$TMP/order.csv" --epochs 10 -o "$TMP/ord_bow" > "$TMP/ob.log" 2>&1
 awk '/best epoch/ { gsub("%)", ""); exit !($NF < 65) }' "$TMP/ob.log" && ok || bad "bag of words should not see word order: $(grep 'best epoch' "$TMP/ob.log")"
 $TGC train "$TMP/order.csv" --model ssm --epochs 10 -o "$TMP/ord_ssm" > "$TMP/os.log" 2>&1
 grep -q "accuracy 100.00%" "$TMP/os.log" && ok || bad "SSM did not learn word order: $(grep 'best epoch' "$TMP/os.log")"
-grep -q "selective SSM over 'text'" "$TMP/os.log" && grep -q "scan h, pv, p, n over" "$TMP/ord_ssm/infer.tg" && ok || bad "ssm model text"
+grep -q "2 Mamba-3 block(s) over 'text'" "$TMP/os.log" && grep -q "scan h, up over" "$TMP/ord_ssm/infer.tg" && grep -q "sum_to(" "$TMP/ord_ssm/infer.tg" && ok || bad "ssm model text"
 printf 'text\nthe film was not bad\nthe film was bad not\n' > "$TMP/onew.csv"
 [ "$($TGC predict "$TMP/ord_ssm" "$TMP/onew.csv" 2>/dev/null | cut -d, -f1 | tr '\n' ' ')" = 'prediction "pos" "neg" ' ] && ok || bad "ssm predict"
 $CC -std=c99 -Wall -Werror -c -o "$TMP/oinfer.o" "$TMP/ord_ssm/infer.c" && ok || bad "ssm infer.c does not compile"
+# pretraining: next-token prediction on the unlabeled text, then --init for the classifier
+$TGC pretrain "$TMP/order.csv" -o "$TMP/ord_lm" --batch 8 --epochs 2 > "$TMP/olm.log" 2>&1
+sed -n 's/^epoch \([02]\):.*validation loss \([0-9.]*\).*/\2/p' "$TMP/olm.log" | tr '\n' ' ' | awk '{ exit !(NF == 2 && $2 > 0 && $2 < $1 - 2) }' && ok || bad "pretraining did not lower the next-token loss: $(grep '^epoch' "$TMP/olm.log" | tr '\n' ' ')"
+$TGC train "$TMP/order.csv" --model ssm --epochs 2 --init "$TMP/ord_lm" -o "$TMP/ord_init" > "$TMP/oi.log" 2>&1
+grep -q "^init     48 of 53 weights" "$TMP/oi.log" && grep -q "accuracy 100.00%" "$TMP/oi.log" && ok || bad "--init: $(grep -E '^init|best epoch' "$TMP/oi.log" | tr '\n' ' ')"
+$TGC train "$TMP/order.csv" --model ssm --mimo 2 --epochs 1 --init "$TMP/ord_lm" -o "$TMP/ord_bad" 2>&1 | grep -q "the model's 'WB_1' needs" && ok || bad "--init accepted a different MIMO rank"
 # attention: streaming over a KV ring (one token per run) equals the windowed parallel form
 perl -e 'srand(3); for (1..7) { print join(",", map { sprintf("%.3f", 2*rand()-1) } 1..8), "\n" }' > "$TMP/seq.csv"
 $TGC batch examples/kv_attention.tg "$TMP/seq.csv" | tr ',' '\n' > "$TMP/stream.out"

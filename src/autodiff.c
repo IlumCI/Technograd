@@ -485,14 +485,22 @@ static void vjp(AD *a, const Ins *in, int g, Adj *adj)
 		return;
 	case OP_SOFTMAX:
 	case OP_RMSNORM: {
-		int rank = SH(a, x0)->rank;
-		if (rank > 2) die(a->file, a->line, "autodiff of %s supports rank 1 and 2", tg_ops[in->op].name);
-		int cols = SH(a, x0)->dim[rank - 1];
+		Shape xs = *SH(a, x0);
+		int rank = xs.rank, cols = xs.dim[rank - 1], X = x0, Y = y;
+		if (rank > 2) { /* over the last axis: work on (rows, cols) */
+			Shape flat = { 2, { shape_numel(&xs) / cols, cols } };
+			X = RESHAPE(a, x0, &flat);
+			Y = RESHAPE(a, y, &flat);
+			g = RESHAPE(a, g, &flat);
+			rank = 2;
+		}
+		int dx;
 		if (in->op == OP_SOFTMAX) { /* dx = s*g - s*rowsum(s*g) */
-			int t = E(a, OP_MUL, g, y);
+			int t = E(a, OP_MUL, g, Y);
 			int rs = rank == 1 ? E1(a, OP_SUM, t) : bcast_rows(a, rowsum(a, t), cols);
-			acc(a, adj, x0, E(a, OP_SUB, t, E(a, OP_MUL, y, rs)));
+			dx = E(a, OP_SUB, t, E(a, OP_MUL, Y, rs));
 		} else { /* dx = inv * (g - y * rowmean(g*y)), inv = 1/sqrt(rowmean(x^2) + 1e-6) */
+			int x0 = X, y = Y;
 			int x2 = E(a, OP_MUL, x0, x0), gy = E(a, OP_MUL, g, y), inv, mg;
 			if (rank == 1) {
 				inv = E(a, OP_DIV, K(a, 1), E1(a, OP_SQRT, E(a, OP_ADD, E1(a, OP_MEAN, x2), K(a, 1e-6f))));
@@ -502,8 +510,9 @@ static void vjp(AD *a, const Ins *in, int g, Adj *adj)
 				inv = bcast_rows(a, E(a, OP_DIV, K(a, 1), E1(a, OP_SQRT, E(a, OP_ADD, ms, K(a, 1e-6f)))), cols);
 				mg = bcast_rows(a, E(a, OP_DIV, rowsum(a, gy), K(a, (float)cols)), cols);
 			}
-			acc(a, adj, x0, E(a, OP_MUL, inv, E(a, OP_SUB, g, E(a, OP_MUL, y, mg))));
+			dx = E(a, OP_MUL, inv, E(a, OP_SUB, g, E(a, OP_MUL, y, mg)));
 		}
+		acc(a, adj, x0, xs.rank > 2 ? RESHAPE(a, dx, &xs) : dx);
 		return;
 	}
 	case OP_SPMM_TC: /* optimizer-internal compact gradient */

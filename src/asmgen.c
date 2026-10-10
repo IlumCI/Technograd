@@ -48,7 +48,7 @@ typedef struct {
 	int kind;
 	int v;          /* ARG_VAL / ARG_VALT */
 	long imm;       /* ARG_IMM; ARG_VALT: bytes per step of t */
-	char sym[96];   /* ARG_SYM */
+	char sym[192];  /* ARG_SYM */
 	int tslot;      /* ARG_VALT: frame slot holding t */
 } Arg;
 
