@@ -770,8 +770,8 @@ Two further rules:
 
 ### Sequence model (`--model ssm`)
 
-`--model ssm` adds a selective state-space layer over the words of the first
-text column, in reading order, next to the bag of words:
+`--model ssm` adds a stack of Mamba-3 blocks (arXiv:2603.15569) over the
+words of the first text column, in reading order, next to the bag of words:
 
 ```python
 h1 = gelu(x @ w1 + spmm(s, wt) + rmsnorm(ssm(tok)) @ wp + b1)
@@ -781,45 +781,102 @@ h1 = gelu(x @ w1 + spmm(s, wt) + rmsnorm(ssm(tok)) @ wp + b1)
   position, time-major, `(0, 0)` for padding. `T` is the longest training
   row (at most 64 words); `predict` reads the first `T` words of longer
   rows and says how many were cut.
-- **Embedding.** `spmm(tok, E)` over the same 32768 hashed buckets, so `E`
-  takes row-sparse optimizer steps (section 17).
-- **Layer** (32 state channels, Mamba-3-style, arXiv:2603.15569). All
-  projections are computed for every position at once, outside the scan:
-  step size `dt = softplus(e Wdt + bdt)`, trapezoid weight
-  `lam = sigmoid(e Wl + bl)`, rotation angle `th = dt (e Wth)` shared by each
-  channel pair, value `v = e Wv`, readout `c = e Wc + bc`, gate
-  `z = silu(e Wz)`. The scan then runs the exponential-trapezoidal
-  recurrence with the state rotated by `th` (a complex-valued state written
-  as 2x2 rotations of channel pairs):
+- **Embedding.** `spmm(tok, E)`, `E` of width D = 32 over the same 32768
+  hashed buckets; `E` takes row-sparse optimizer steps (section 17).
+- **Blocks** (`--layers`, default 2), each a Mamba-3 mixer and a SwiGLU MLP
+  with pre-norm residuals, as in the paper's Llama-style stack. The mixer has
+  4 heads of P = 16 channels (inner width 2D) and a state of N = 16 by P per
+  head. With u = rmsnorm(e) g1:
 
   ```
-  h  = al R(th) h + (1 - lam) dt al R(th) v[t-1] + lam dt v,   al = exp(-dt softplus(la))
-  y  = (h c + dk v) z
+  x = u Wx    dt = softplus(u Wdt + bdt)    lam = sigmoid(u Wl + bl)    al = exp(-dt softplus(la))
+  B, C = rmsnorm(u WB), rmsnorm(u WC) (BCNorm, gains gB, gC) + per-head biases bB, bC
+  phi_t = sum_{s<=t} dt_s (u_s Wth)          (cumulative rotation angles, one per channel pair)
+  B~, C~ = B, C rotated by phi               (the complex state of Mamba-3, as data-dependent RoPE)
+  X = x scaled per rank (Wxr)                (MIMO rank R, --mimo, default 4)
+  h_t = al_t h_{t-1} + (1 - lam_t) dt_t al_t B~_{t-1} X_{t-1}^T + lam_t dt_t B~_t X_t^T
+  y_t = C~_t^T h_t, mixed over ranks (Wyr), + dk x
+  e  += (y silu(u Wz)) Wo;     e += SwiGLU(rmsnorm(e) g2)
   ```
 
-  Padding sets `dt = 0`, which leaves the state unchanged. The output is
-  the mean of `y` over the real words. `bdt` starts with step sizes
-  log-spaced in [0.001, 0.1] and `la` with decay rates log-spaced in
-  [0.05, 2], as in Mamba.
+  The cumulative sum is a lower-triangular matmul over time; every product
+  B~ X^T is formed for all positions at once by a batched matmul
+  (section 6), so the scan only carries the state and the previous product.
+  Padding sets `dt = 0`, which leaves the state and the angles unchanged.
+  The output is the mean of the final-normed `e` over the real words.
+  `bdt` starts with step sizes log-spaced in [0.001, 0.1] and `la` with
+  decay rates in [1, 16] per head, as in Mamba-2; output projections are
+  scaled by 1/sqrt(2 L) (GPT-2 style residual scaling).
 - **Training** is backpropagation through time (section 19) inside the same
-  `train ... with adamw` step; `infer.tg` and `infer.c` run the layer over
+  `train ... with adamw` step; `infer.tg` and `infer.c` run the stack over
   one row.
+
+### Pretraining (`tgc pretrain`)
+
+```
+tgc pretrain SOURCE [-o DIR] [--column COL] [--epochs N] [--steps N] [--batch N] [--lr X]
+                    [--layers N] [--mimo R] [--max-rows N] [--seed S]
+tgc train LABELED --model ssm --init DIR
+```
+
+`pretrain` trains the embedding table and the blocks by next-token
+prediction on unlabeled text. The rows of the text column are packed into
+one token stream (hashed exactly as `train` hashes text) and cut into
+windows of 64 + 1 tokens. The generated model (`DIR/lm.tg`, plain
+Technograd) ends in:
+
+```python
+h = states(tok)                                   # the stack, per position
+r = active(nxt, E)                                # distinct target buckets of the batch
+L = 15 * tanh((h @ transpose(take(E, r))) / 15) - step(0 - r) * 10000
+pos = 15 * tanh(((h * spmm(nxt, E)) @ onesD) / 15)
+loss = sum((log(exp(L) @ onesN) - pos) * mk) / sum(mk)
+train loss with adamw(lr=0.003, clip=1)
+```
+
+The softmax runs over the batch's distinct targets (in-batch sampled
+softmax; a full softmax over 32768 buckets would cost 32x more), the table
+is tied between input and output, and logits are soft-capped at 15 so `exp`
+cannot overflow. 2% of the windows are held out; the loss on them is
+printed before training and after every epoch. `--init DIR` then starts
+every weight of a classifier that `DIR/weights.<name>.bin` holds with the
+same size; the bag of words and the head start fresh. A size mismatch (a
+different `--mimo`) is an error.
 
 Measured:
 
-| Task | `--model bow` | `--model ssm` |
-|------|---------------|---------------|
-| order of two words decides the label (synthetic, regression-tested) | 52.67% (chance: a bag cannot see order) | 100% |
-| SST-2, 3 seeds | 77.48% in 7 s | 76.52% in 80 s |
-| SST-2, the sequence layer alone (no bag), seed 1 | | 76.45% |
+| Task (seed 1 unless noted) | `--model bow` | `--model ssm` | `--model ssm --init` |
+|------|---------------|---------------|---------------|
+| order of two words decides the label (synthetic, regression-tested) | 52.67% (a bag cannot see order) | 100% | 100% |
+| SST-2 (6,920 sentences) | 77.48% (3 seeds) | 77.38% in 296 s | |
+| ATT&CK tactic of a procedure example (14,787 rows, 15 classes) | 82.45% in 5 s | 81.91% in 790 s | **82.65%** in 808 s |
 
-On SST-2 (6,920 sentences, no pretrained embeddings) the layer learns word
-order from scratch, and alone it comes within a point of the bag of words,
-but combined with it does not beat it: the embedding table memorizes the
-training set by the second epoch (training loss 0.02 by epoch 10), and
-weight decay (0.1, 0.5) and word dropout (0.1, 0.3) did not change that by
-more than the seed-to-seed spread. `bow` therefore stays the default;
-`ssm` is for data where order carries the label.
+The tactic task and its pretraining corpus come from
+`examples/military_purple/` (`build.sh`, `run.sh`). The corpus (12.7 MB, 1.96M
+words) joins two domains:
+
+- **Military science**: 13 public-domain works from Project Gutenberg (Sun
+  Tzu; Clausewitz, *On War*, and Murray's companion to it; Jomini; du Picq;
+  Halleck; Mahan on sea power and the War of 1812; *Lectures on Land
+  Warfare*; Lippitt on the three arms; Napoleon's maxims; the Naval War
+  College's *Sound Military Decision*), one row per paragraph.
+- **Purple teaming**: one document per MITRE ATT&CK technique (858 in
+  v18, 741 live) that puts the red side (what the adversary does) next to
+  the blue side (its detection strategies with their analytics, and every
+  mitigation with its technique-specific guidance), plus the mitigations
+  themselves and 4,835 MITRE D3FEND defensive definitions.
+
+The labeled task uses ATT&CK's procedure examples (an intrusion set,
+campaign or tool using a technique), labeled with the technique's tactic
+where it has only one; they never enter the corpus. Pretraining took 4
+epochs (1,876 steps each, 16 minutes); the held-out next-token loss fell
+from 10.24 to 4.35 and was still falling. Fine-tuning from it gained 0.7
+points over the same model from scratch and 0.2 over the bag of words, the
+first configuration where the sequence model leads; with one seed this is
+within run-to-run spread, and the from-scratch and pretrained runs both
+overfit after epoch 2 (a lower fine-tuning rate, 0.003, reached 81.81%).
+Longer pretraining is the open lever: the corpus is 2M words, three orders
+of magnitude below what pretraining normally uses.
 
 `tgc predict DIR SOURCE` applies `features.tgf` to new raw data, matching
 columns by name in any order. A missing column counts as missing values. It
@@ -1201,11 +1258,10 @@ kernels: [arXiv:2311.05284](https://arxiv.org/abs/2311.05284).
 
 Ordered by importance for latent-reasoning models on embedded targets:
 
-1. Sequence models beyond one layer: stacked Mamba-3 blocks with BCNorm
-   and MIMO, a fused scan kernel (the VM spends 10x the bag-of-words time
-   on SST-2), and pretraining of the embeddings and layer on unlabeled text
-   (next-token prediction with the same scan), which a 7k-sentence task
-   cannot replace.
+1. Sequence models at scale: the chunked (SSD) form of the recurrence, which
+   turns the per-step scan into batched matmuls over chunks, and pretraining
+   on corpora of 10^8 words or more; at about 8,000 tokens a second on 4
+   cores the VM is the limit (section 18).
 2. Distributed execution: multiple processes over `serve`/`stream`
    transports, then data-parallel training with gradients and optimizer
    state partitioned across them (ZeRO, arXiv:1910.02054).
