@@ -32,7 +32,7 @@ int tg_qget_host(const signed char *q, int bits, int i)
 {
 	if (bits == 8) return q[i];
 	int b = q[i >> 1];
-	return (i & 1) ? (b >> 4) : (int)(signed char)(unsigned char)(b << 4) >> 4;
+	return (i & 1) ? (b >> 4) : (int)(signed char)(unsigned char)((unsigned)b << 4) >> 4;
 }
 
 /* ---- writer ------------------------------------------------------------- */
@@ -473,7 +473,7 @@ Module *ir_read(Sx *forms, const char *file)
 				need(&r, cd, cd->v[j + 1]->k == SX_NUM && cd->v[j + 1]->n == (double)(int)cd->v[j + 1]->n && fabs(cd->v[j + 1]->n) <= lim, "code");
 				int c = (int)cd->v[j + 1]->n;
 				if (bits == 8) x->q[j] = (signed char)c;
-				else x->q[j / 2] = (signed char)(j % 2 ? (unsigned char)((unsigned char)x->q[j / 2] & 0x0f) | (unsigned char)(c << 4)
+				else x->q[j / 2] = (signed char)(j % 2 ? (unsigned char)((unsigned char)x->q[j / 2] & 0x0f) | (unsigned char)((unsigned)c << 4)
 							       : (unsigned char)((unsigned char)x->q[j / 2] & 0xf0) | (unsigned char)(c & 0x0f));
 				int ch = axis == 0 ? j / sh.dim[1] : j % sh.dim[1];
 				x->data[j] = (float)c * x->qs[ch];

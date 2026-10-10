@@ -170,7 +170,7 @@ TG_FN int tg_qget(const signed char *q, int bits, int i)
 {
 	if (bits == 8) return q[i];
 	int b = q[i >> 1];
-	return (i & 1) ? (b >> 4) : (int)(signed char)(unsigned char)(b << 4) >> 4;
+	return (i & 1) ? (b >> 4) : (int)(signed char)(unsigned char)((unsigned)b << 4) >> 4;
 }
 
 /* Quantized weights: integer codes times Q7.24 scales, 64-bit accumulation. */

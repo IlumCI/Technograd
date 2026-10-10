@@ -169,7 +169,7 @@ static void set_code(Value *x, const QP *q, int c, int j, int code)
 		return;
 	}
 	unsigned char b = (unsigned char)x->q[i / 2];
-	b = i % 2 ? (unsigned char)((b & 0x0f) | (unsigned char)(code << 4)) : (unsigned char)((b & 0xf0) | (code & 0x0f));
+	b = i % 2 ? (unsigned char)((b & 0x0f) | (unsigned char)((unsigned)code << 4)) : (unsigned char)((b & 0xf0) | (code & 0x0f));
 	x->q[i / 2] = (signed char)b;
 }
 
