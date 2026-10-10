@@ -938,6 +938,28 @@ have headroom a wider model or a longer run would reach. These are
 classical/educational transforms; the toolchain learns a known cipher from
 its own input/output examples and does not attack modern cryptography.
 
+### Importing open-weight models
+
+Because TGIR is an explicit, checkable IR, a trained open model can be
+lowered into it and become an ordinary program: every operation is visible
+and editable, it runs in the reference VM, and it emits to the C and
+fixed-point backends like any other unit. `examples/qwen3/import.py`
+imports Qwen3-0.6B (arXiv:2505.09388) this way -- a 28-layer dense
+transformer with grouped-query attention, per-head query/key RMSNorm,
+rotate-half RoPE at theta 1e6, and SwiGLU -- into a single `qwen3.tg` plus
+f32 weight files the `file()` params load. No operation was added: the 16
+query heads are emitted as rank-2 matmuls and each head's output projection
+is summed (grouped-query attention falls out of baking per-head weight
+slices), and RoPE is baked as exact cos/sin tables rather than relying on
+the `rope` op's interleaved convention. At a fixed sequence length the VM
+reproduces Hugging Face's float32 logits to 4.1e-5 (max abs; relative
+3.0e-6), identical argmax and top-5 -- float32 reassociation, not a
+modelling gap. The reference VM is CPU and single-arena, so this is an
+importer and inspection/editing substrate for small open models
+(Qwen3-0.6B is ~2.4 GB as f32), not a runtime for multi-billion-parameter
+ones. It is the base for IR-level edit passes (head and layer ablation,
+activation dumps, steering-vector injection, localized weight edits).
+
 `tgc predict DIR SOURCE` applies `features.tgf` to new raw data, matching
 columns by name in any order. A missing column counts as missing values. It
 prints `prediction,confidence` (classification) or `prediction` (regression,
