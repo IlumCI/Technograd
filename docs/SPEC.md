@@ -878,6 +878,61 @@ overfit after epoch 2 (a lower fine-tuning rate, 0.003, reached 81.81%).
 Longer pretraining is the open lever: the corpus is 2M words, three orders
 of magnitude below what pretraining normally uses.
 
+### Byte-level transforms (`tgc gen-train` / `tgc generate`)
+
+```
+tgc gen-train SOURCE [-o DIR] [--in COL] [--out COL] [--aligned] [--maxlen N] ...
+tgc generate DIR (--input STRING | --inputs FILE [--in COL] [--out COL]) [-o OUT]
+```
+
+`gen-train` learns a map from an input string to an output string from
+`(in, out)` example pairs, as raw bytes: the vocabulary is the 256 byte
+values plus a separator and an end-of-string marker, so the output is an
+exact byte string, not a label. This is the shape of a cryptography CTF
+challenge -- a deterministic, fixed-key transform (a classical cipher or a
+reversible encoding) recovered from examples and scored by exact match on
+held-out inputs. The model is the same Mamba-3 stack, with a full softmax
+over the 258-token byte vocabulary (tied embedding, logits soft-capped at
+15) and the cross-entropy taken only on the output region.
+
+Two modes:
+
+- **Autoregressive** (default). The stream is `[input] SEP [output] EOS`;
+  the model predicts each output byte from the input and the output so far,
+  and `generate` decodes greedily (the transforms are deterministic), one
+  model run per byte, stopping at EOS. This is general -- it handles
+  length-changing transforms (base64, hex, Morse) and permutations
+  (reverse) -- but a width-32 model must learn to count emitted bytes and
+  index back into the input, which it learns only slowly.
+- **Aligned** (`--aligned`, length-preserving transforms only). The stream
+  is just the input, and the target at position i is output byte i; the
+  model maps each input byte in context to its output byte in a single
+  pass. No counting, no separator, and `generate` decodes in one run. A
+  pair whose input and output lengths differ is rejected.
+
+Measured (`examples/crypto_ctf/`, fixed-key classical ciphers, 5,000
+training pairs, exact match on 500 held-out inputs from a disjoint seed,
+width 32, 3 blocks):
+
+| Transform | Mode | Exact match | Validation byte-loss |
+|-----------|------|------------:|---------------------:|
+| ROT-13 (fixed) | aligned | 100.00% | 0.0002 |
+| Caesar +5 (fixed) | aligned | 100.00% | 0.00008 |
+| Vigenere (fixed key) | aligned | 100.00% | 0.0025 |
+| substitution (fixed permutation) | aligned | 100.00% | 0.00008 |
+| base64 (3 bytes -> 4 chars) | autoregressive | 29.00% | 0.50 |
+
+For comparison, ROT-13 in the general autoregressive mode reaches 93% at 40
+epochs, against 100% for aligned at 12 -- the gap is the cost of the
+copy-with-offset the general mode has to learn.
+
+Aligned mode reaches exact recovery on the position-wise ciphers. The
+length-changing ones use autoregressive mode and are the hard case for a
+model this small: the limit is the autoregressive copy-with-offset, not the
+substitution. These are classical/educational transforms; the toolchain
+learns a known cipher from its own input/output examples and does not
+attack modern cryptography.
+
 `tgc predict DIR SOURCE` applies `features.tgf` to new raw data, matching
 columns by name in any order. A missing column counts as missing values. It
 prints `prediction,confidence` (classification) or `prediction` (regression,

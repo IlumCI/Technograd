@@ -34,8 +34,11 @@ build/tgc train reviews.csv --model ssm         # adds stacked Mamba-3 blocks (M
 build/tgc pretrain corpus.jsonl -o lm             # next-token pretraining on unlabeled text ...
 build/tgc train labeled.jsonl --model ssm --init lm   # ... then fine-tune from it
 sh examples/military_purple/run.sh build/tgc work  # military science + purple teaming corpus, ATT&CK tactic task
+build/tgc gen-train pairs.jsonl --aligned -o cipher   # learn a byte transform from (in,out) pairs; emit exact strings
+build/tgc generate cipher --input hello               # -> the transformed string
+sh examples/crypto_ctf/run.sh build/tgc work          # learn fixed-key classical ciphers, exact-match on held-out
 build/tgc predict iris_model new_flowers.csv     # predictions on raw new data
-make test       # 287 checks (offline; TG_TEST_NETWORK=1 adds a Hugging Face run)
+make test       # 291 checks (offline; TG_TEST_NETWORK=1 adds a Hugging Face run)
 make fixer      # retrain the auto-fix forest (deterministic, ~15 s) and evaluate it on held-out programs
 
 build/tgc run  examples/latent_reasoner.tg 1,0,0,1,0,1,1,0
@@ -234,6 +237,7 @@ every failure.
 - Sparse rows: feature hashing, Weinberger et al., [arXiv:0902.2206](https://arxiv.org/abs/0902.2206); sparse embedding-bag layers over hashed ids as in DLRM, [arXiv:1906.00091](https://arxiv.org/abs/1906.00091). This is the basis for `spmm` and the text path of `tgc train`. Row-sparse (lazy) optimizer steps on the touched rows follow the lazy Adam used for sparse embeddings (TensorFlow's TPU embedding optimizers, MXNet `lazy_update`), with a closed-form catch-up of the skipped steps.
 - Sequence loops: `scan` follows the carry/sequence/stack form of JAX's `lax.scan`; its gradient is backpropagation through time (Werbos, 1990) as a reverse scan over a statically planned activation store. Selective state-space models: Mamba, [arXiv:2312.00752](https://arxiv.org/abs/2312.00752); Mamba-3, [arXiv:2603.15569](https://arxiv.org/abs/2603.15569). This is the basis for `scan`, `examples/selective_ssm.tg` and the blocks of `tgc train --model ssm` (exponential-trapezoidal recurrence, complex state as data-dependent RoPE, MIMO, BCNorm, SwiGLU stacking).
 - Pretraining then fine-tuning (`tgc pretrain`, `--init`): ULMFiT, Howard and Ruder, [arXiv:1801.06146](https://arxiv.org/abs/1801.06146); logit soft-capping as in Gemma 2, [arXiv:2408.00118](https://arxiv.org/abs/2408.00118).
+- Byte-level sequence-to-sequence (`tgc gen-train`, `tgc generate`): a conditional byte transform over a 258-token vocabulary, greedy decoding, exact-match scoring. `examples/crypto_ctf/` learns fixed-key classical ciphers (the deterministic-transform shape of a cryptography CTF); classical/educational ciphers only, not attacks on modern cryptography.
 - Self-updating state: test-time training layers, [arXiv:2407.04620](https://arxiv.org/abs/2407.04620); Titans, [arXiv:2501.00663](https://arxiv.org/abs/2501.00663); DeltaNet, [arXiv:2406.06484](https://arxiv.org/abs/2406.06484); Gated DeltaNet, [arXiv:2412.06464](https://arxiv.org/abs/2412.06464); test-time regression as the unifying view, [arXiv:2501.12352](https://arxiv.org/abs/2501.12352). This is the basis for `state` and `update`.
 - Optimizers: Muon, [arXiv:2502.16982](https://arxiv.org/abs/2502.16982); optimizer comparison for tabular MLPs, [arXiv:2604.15297](https://arxiv.org/abs/2604.15297). Text features: feature hashing, Weinberger et al., [arXiv:0902.2206](https://arxiv.org/abs/0902.2206).
 - Automatic differentiation through `think` loops: Deep Equilibrium Models, [arXiv:1909.01377](https://arxiv.org/abs/1909.01377) (implicit differentiation at the fixed point); truncated adjoints are the Neumann-series phantom gradients related to Jacobian-free backpropagation, [arXiv:2103.12803](https://arxiv.org/abs/2103.12803).

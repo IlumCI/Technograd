@@ -329,7 +329,7 @@ int main(int argc, char **argv)
 	par_init(threads);
 	const char *cmd = argv[1];
 
-	if (!strcmp(cmd, "train") || !strcmp(cmd, "predict") || !strcmp(cmd, "data") || !strcmp(cmd, "pretrain")) return autotrain_main(argc, argv);
+	if (!strcmp(cmd, "train") || !strcmp(cmd, "predict") || !strcmp(cmd, "data") || !strcmp(cmd, "pretrain") || !strcmp(cmd, "gen-train") || !strcmp(cmd, "generate")) return autotrain_main(argc, argv);
 	if (!strcmp(cmd, "quantize")) return quantize_main(argc, argv);
 	if (strcmp(cmd, "fixer-train") == 0) {
 		if (argc < 5 || strcmp(argv[2], "-o") != 0) usage();

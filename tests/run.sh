@@ -193,6 +193,16 @@ sed -n 's/^epoch \([02]\):.*validation loss \([0-9.]*\).*/\2/p' "$TMP/olm.log" |
 $TGC train "$TMP/order.csv" --model ssm --epochs 2 --init "$TMP/ord_lm" -o "$TMP/ord_init" > "$TMP/oi.log" 2>&1
 grep -q "^init     48 of 53 weights" "$TMP/oi.log" && grep -q "accuracy 100.00%" "$TMP/oi.log" && ok || bad "--init: $(grep -E '^init|best epoch' "$TMP/oi.log" | tr '\n' ' ')"
 $TGC train "$TMP/order.csv" --model ssm --mimo 2 --epochs 1 --init "$TMP/ord_lm" -o "$TMP/ord_bad" 2>&1 | grep -q "the model's 'WB_1' needs" && ok || bad "--init accepted a different MIMO rank"
+# byte-level sequence-to-sequence: learn a fixed-key cipher from (in, out) pairs and emit exact strings
+perl examples/crypto_ctf/gen.pl caesar5 1500 1 > "$TMP/cae.jsonl"
+perl examples/crypto_ctf/gen.pl caesar5 300 999 > "$TMP/cae_test.jsonl"   # disjoint seed: unseen inputs
+$TGC gen-train "$TMP/cae.jsonl" -o "$TMP/cae" --aligned --epochs 12 --layers 2 --maxlen 24 > "$TMP/cae.log" 2>&1
+em=$($TGC generate "$TMP/cae" --inputs "$TMP/cae_test.jsonl" -o /dev/null 2>&1 | sed -n 's/.*exact-match \([0-9.]*\)%.*/\1/p')
+awk -v e="$em" 'BEGIN { exit !(e >= 90) }' && ok || bad "aligned seq2seq caesar5 exact-match $em% (want >= 90)"
+[ "$($TGC generate "$TMP/cae" --input hello 2>/dev/null)" = mjqqt ] && ok || bad "aligned decode hello -> $($TGC generate "$TMP/cae" --input hello 2>/dev/null) (want mjqqt)"
+$TGC c "$TMP/cae/seq2seq_infer.tg" -o "$TMP/seqinfer.c" && $CC -std=c99 -O2 -Wall -Wextra -Werror -pedantic -c -o "$TMP/seqinfer.o" "$TMP/seqinfer.c" && ok || bad "seq2seq inference unit does not compile"
+for i in $(seq 70); do echo '{"in":"abc","out":"abcd"}'; done > "$TMP/bad.jsonl"
+$TGC gen-train "$TMP/bad.jsonl" --aligned 2>&1 | grep -q "equal input and output lengths" && ok || bad "--aligned accepted a length-changing pair"
 # attention: streaming over a KV ring (one token per run) equals the windowed parallel form
 perl -e 'srand(3); for (1..7) { print join(",", map { sprintf("%.3f", 2*rand()-1) } 1..8), "\n" }' > "$TMP/seq.csv"
 $TGC batch examples/kv_attention.tg "$TMP/seq.csv" | tr ',' '\n' > "$TMP/stream.out"
