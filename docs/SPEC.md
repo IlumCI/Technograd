@@ -914,24 +914,29 @@ Measured (`examples/crypto_ctf/`, fixed-key classical ciphers, 5,000
 training pairs, exact match on 500 held-out inputs from a disjoint seed,
 width 32, 3 blocks):
 
-| Transform | Mode | Exact match | Validation byte-loss |
-|-----------|------|------------:|---------------------:|
-| ROT-13 (fixed) | aligned | 100.00% | 0.0002 |
-| Caesar +5 (fixed) | aligned | 100.00% | 0.00008 |
-| Vigenere (fixed key) | aligned | 100.00% | 0.0025 |
-| substitution (fixed permutation) | aligned | 100.00% | 0.00008 |
-| base64 (3 bytes -> 4 chars) | autoregressive | 29.00% | 0.50 |
+| Transform | Length | Mode | Exact match | Validation byte-loss |
+|-----------|--------|------|------------:|---------------------:|
+| ROT-13 (fixed) | preserving | aligned | 100.00% | 0.0002 |
+| Caesar +5 (fixed) | preserving | aligned | 100.00% | 0.00008 |
+| Atbash (fixed) | preserving | aligned | 100.00% | 0.00008 |
+| Vigenere (fixed key) | preserving | aligned | 100.00% | 0.0025 |
+| substitution (fixed permutation) | preserving | aligned | 100.00% | 0.00008 |
+| reverse | preserving (permuted) | autoregressive | 95.20% | 0.037 |
+| XOR 0x2a, hex out | 1 byte -> 2 chars | autoregressive | 33.80% | 0.24 |
+| Morse | variable | autoregressive | 30.60% | 0.16 |
+| base64 | 3 bytes -> 4 chars | autoregressive | 29.00% | 0.50 |
 
-For comparison, ROT-13 in the general autoregressive mode reaches 93% at 40
-epochs, against 100% for aligned at 12 -- the gap is the cost of the
-copy-with-offset the general mode has to learn.
-
-Aligned mode reaches exact recovery on the position-wise ciphers. The
-length-changing ones use autoregressive mode and are the hard case for a
-model this small: the limit is the autoregressive copy-with-offset, not the
-substitution. These are classical/educational transforms; the toolchain
-learns a known cipher from its own input/output examples and does not
-attack modern cryptography.
+The split is by whether the output length tracks the input. Every
+length-preserving transform is recovered exactly: the five position-wise
+ciphers in a single aligned pass, and `reverse` (a permutation, which needs
+the whole input before the first output byte) at 95% in autoregressive
+mode. The length-changing transforms plateau near 30% for a width-32 model
+in 14 epochs -- the limit there is capacity and training, not the cipher:
+ROT-13 in the same autoregressive mode climbs from a similar start to 93%
+by 40 epochs (against 100% aligned at 12), so the length-changing ciphers
+have headroom a wider model or a longer run would reach. These are
+classical/educational transforms; the toolchain learns a known cipher from
+its own input/output examples and does not attack modern cryptography.
 
 `tgc predict DIR SOURCE` applies `features.tgf` to new raw data, matching
 columns by name in any order. A missing column counts as missing values. It
