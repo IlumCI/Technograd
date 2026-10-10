@@ -52,17 +52,15 @@ void *xrealloc(void *p, size_t n)
 	if (!p) return xmalloc(n);
 	Hdr *b = (Hdr *)p - 1;
 	int linked = b->h.linked;
+	Hdr *prev = linked ? b->h.prev : NULL; /* neighbours keep their place: re-link there (seq order, O(1)) */
 	unlink_hdr(b);
 	Hdr *nb = realloc(b, sizeof(Hdr) + n);
 	if (!nb) die(NULL, 0, "out of memory");
 	if (linked) {
-		/* re-insert in seq order so release-from-tail stays correct */
-		Hdr *at = alloc_head.h.prev;
-		while (at != &alloc_head && at->h.seq > nb->h.seq) at = at->h.prev;
-		nb->h.prev = at;
-		nb->h.next = at->h.next;
-		at->h.next->h.prev = nb;
-		at->h.next = nb;
+		nb->h.prev = prev;
+		nb->h.next = prev->h.next;
+		prev->h.next->h.prev = nb;
+		prev->h.next = nb;
 		nb->h.linked = 1;
 	}
 	return nb + 1;
