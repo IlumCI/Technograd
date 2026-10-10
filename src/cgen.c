@@ -29,6 +29,38 @@ static void ref(G *g, int v, char *buf, size_t n)
 	}
 }
 
+/* Does any use of param v need its f32 values (not quantized codes)? */
+static int needs_f32_block(const Module *m, int v, const Block *b)
+{
+	for (int i = 0; i < b->len; i++) {
+		const Ins *in = &b->v[i];
+		if (in->op == OP_THINK) {
+			if (in->init == v || in->yield == v || needs_f32_block(m, v, in->body)) return 1;
+		} else if (in->op == OP_SCAN) {
+			const Scan *s = in->sc;
+			for (int k = 0; k < s->nc; k++)
+				if (s->init[k] == v || s->next[k] == v) return 1;
+			for (int j = 0; j < s->nx; j++)
+				if (s->x[j] == v) return 1;
+			for (int y = 0; y < s->ny; y++)
+				if (s->y[y] == v) return 1;
+			if (needs_f32_block(m, v, in->body)) return 1;
+		} else {
+			for (int j = 0; j < in->na; j++)
+				if (in->a[j] == v && q_axis_for(m, v, in) != m->val[v].qaxis) return 1;
+		}
+	}
+	return 0;
+}
+
+static int needs_f32(const Module *m, int v)
+{
+	if (!m->val[v].qbits || m->output == v) return 1;
+	for (int i = 0; i < m->nupd; i++)
+		if (m->upd_src[i] == v || m->upd_rows[i] == v) return 1;
+	return needs_f32_block(m, v, &m->top);
+}
+
 static void ind(G *g, int d)
 {
 	for (int i = 0; i < d; i++) fputc('\t', g->f);
@@ -77,7 +109,13 @@ static void block(G *g, const Block *b, int d)
 		case CLS_MATMUL: {
 			int mm, kk, nn;
 			matmul_dims(&m->val[in->a[0]].sh, &m->val[in->a[1]].sh, &mm, &kk, &nn);
-			fprintf(g->f, "tg_matmul(%s, %s, %s, %d, %d, %d);\n", o, a, c, mm, kk, nn);
+			const Value *qa = &m->val[in->a[0]], *qb = &m->val[in->a[1]];
+			if (qa->qbits && q_axis_for(m, in->a[0], in) == qa->qaxis)
+				fprintf(g->f, "tg_matmul_qa(%s, tgq_%s, %d, tgqs_%s, %s, %d, %d, %d);\n", o, qa->name, qa->qbits, qa->name, c, mm, kk, nn);
+			else if (qb->qbits && q_axis_for(m, in->a[1], in) == qb->qaxis)
+				fprintf(g->f, "tg_matmul_qb(%s, %s, tgq_%s, %d, tgqs_%s, %d, %d, %d);\n", o, a, qb->name, qb->qbits, qb->name, mm, kk, nn);
+			else
+				fprintf(g->f, "tg_matmul(%s, %s, %s, %d, %d, %d);\n", o, a, c, mm, kk, nn);
 			break;
 		}
 		case CLS_ROW: {
@@ -96,6 +134,9 @@ static void block(G *g, const Block *b, int d)
 			int r, k, dd, h;
 			spmm_dims(&m->val[in->a[0]].sh, &m->val[in->a[in->op == OP_SPMM_T ? 2 : 1]].sh, &r, &k, &dd, &h);
 			if (in->op == OP_SPMM_DX) fprintf(g->f, "tg_spmm_dx(%s, %s, %s, %s, %d, %d, %d, %d);\n", o, a, c, e, r, k, dd, h);
+			else if (in->op == OP_SPMM && m->val[in->a[1]].qbits && m->val[in->a[1]].qaxis == 0)
+				fprintf(g->f, "tg_spmm_q(%s, %s, tgq_%s, %d, tgqs_%s, %d, %d, %d, %d);\n", o, a, m->val[in->a[1]].name, m->val[in->a[1]].qbits,
+					m->val[in->a[1]].name, r, k, dd, h);
 			else fprintf(g->f, "tg_%s(%s, %s, %s, %d, %d, %d, %d);\n", tg_ops[in->op].name, o, a, c, r, k, dd, h);
 			break;
 		}
@@ -245,6 +286,19 @@ void cgen(const Module *m, FILE *f)
 		const Value *x = &m->val[v];
 		if (x->kind != V_PARAM || x->dead) continue;
 		int n = shape_numel(&x->sh);
+		if (x->qbits) { /* codes and per-channel scales */
+			int nb = x->qbits == 8 ? n : (n + 1) / 2, nch = x->sh.dim[x->qaxis];
+			fprintf(f, "static const signed char tgq_%s[%d] = { /* int%d codes */", x->name, nb, x->qbits);
+			for (int i = 0; i < nb; i++) fprintf(f, "%s%d%s", i % 16 == 0 ? "\n\t" : "", x->q[i], i + 1 < nb ? ", " : "\n");
+			fprintf(f, "};\nstatic const float tgqs_%s[%d] = {", x->name, nch);
+			for (int i = 0; i < nch; i++) {
+				if (i % 6 == 0) fputs("\n\t", f);
+				flt(&g, x->qs[i]);
+				fputs(i + 1 < nch ? ", " : "\n", f);
+			}
+			fputs("};\n", f);
+			if (!needs_f32(m, v)) continue;
+		}
 		fprintf(f, "static const float tgp_%s[%d] = {", x->name, n);
 		for (int i = 0; i < n; i++) {
 			if (i % 6 == 0) fputs("\n\t", f);

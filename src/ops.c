@@ -228,3 +228,18 @@ int op_infer(Op op, const Shape *a, int na, Shape *out, char *err, size_t errn)
 	snprintf(err, errn, "'%s' is not a value operation", oi->name);
 	return 0;
 }
+
+/* The quantization axis a param needs as an operand of instruction in:
+ * matmul left (W @ x) and spmm table -> 0 (per row), matmul right
+ * (x @ W) -> 1 (per column); -1 if this use cannot read quantized codes. */
+int q_axis_for(const Module *m, int param, const Ins *in)
+{
+	if (m->val[param].sh.rank != 2) return -1;
+	if (in->op == OP_MATMUL) {
+		if (in->a[0] == param && in->a[1] != param) return 0;
+		if (in->a[1] == param && in->a[0] != param) return 1;
+		return -1;
+	}
+	if (in->op == OP_SPMM && in->a[1] == param && in->a[0] != param) return 0;
+	return -1;
+}

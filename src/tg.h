@@ -111,6 +111,13 @@ typedef struct {
 	float *data; /* params */
 	int index;   /* inputs: position in the entry signature */
 	int dead;    /* compiler-generated param left unused after dead-code elimination */
+	/* Quantized params (tgc quantize): signed int8 or packed int4 codes with one
+	 * f32 scale per output channel; axis 0 = rows (W in W @ x, spmm tables),
+	 * 1 = columns (W in x @ W). `data` keeps the dequantized values for any
+	 * other use. */
+	int qbits, qaxis;
+	signed char *q;
+	float *qs;
 	int def, last, off; /* filled by the planner (temporaries only) */
 } Value;
 
@@ -224,6 +231,11 @@ void par_init(int threads); /* 0 = one per online CPU */
 int par_threads(void);
 void par_for(int n, int grain, void (*fn)(void *ctx, int lo, int hi, int tid), void *ctx);
 void cgen(const Module *m, FILE *f);
+int tg_qget_host(const signed char *q, int bits, int i); /* code i of a quantized param */
+int q_axis_for(const Module *m, int param, const Ins *in); /* axis a matmul/spmm operand needs, or -1 */
+int quantize_main(int argc, char **argv);              /* quant.c */
+extern void (*vm_matmul_hook)(void *ctx, const Module *m, const Ins *in, const float *a, const float *b);
+extern void *vm_hook_ctx;
 
 /* tracing and structured logs (trace.c): levels 0 error, 1 info (-v), 2 debug (-vv) */
 extern int tg_verbose;

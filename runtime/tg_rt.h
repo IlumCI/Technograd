@@ -83,6 +83,38 @@ TG_FN void tg_matmul(float *o, const float *a, const float *b, int m, int k, int
 		}
 }
 
+/* Quantized weights: signed int8 codes, or int4 codes packed two per byte
+ * (element i in byte i/2, low nibble first), times one f32 scale per output
+ * channel. Accumulation is in f32: weight-only quantization (W8A32/W4A32). */
+TG_FN int tg_qget(const signed char *q, int bits, int i)
+{
+	if (bits == 8) return q[i];
+	int b = q[i >> 1];
+	return (i & 1) ? (b >> 4) : (int)(signed char)(unsigned char)(b << 4) >> 4;
+}
+
+/* o[m,n] = diag(s) Q[m,k] @ b[k,n]: quantized left operand, a scale per row. */
+TG_FN void tg_matmul_qa(float *o, const signed char *q, int bits, const float *s, const float *b, int m, int k, int n)
+{
+	for (int i = 0; i < m; i++)
+		for (int j = 0; j < n; j++) {
+			float acc = 0.0f;
+			for (int p = 0; p < k; p++) acc += (float)tg_qget(q, bits, i * k + p) * b[p * n + j];
+			o[i * n + j] = s[i] * acc;
+		}
+}
+
+/* o[m,n] = a[m,k] @ Q[k,n] diag(s): quantized right operand, a scale per column. */
+TG_FN void tg_matmul_qb(float *o, const float *a, const signed char *q, int bits, const float *s, int m, int k, int n)
+{
+	for (int i = 0; i < m; i++)
+		for (int j = 0; j < n; j++) {
+			float acc = 0.0f;
+			for (int p = 0; p < k; p++) acc += a[i * k + p] * (float)tg_qget(q, bits, p * n + j);
+			o[i * n + j] = s[j] * acc;
+		}
+}
+
 /* Row-wise ops over the last axis. */
 TG_FN void tg_softmax(float *o, const float *a, int rows, int cols)
 {
@@ -147,6 +179,22 @@ TG_FN void tg_spmm(float *o, const float *x, const float *w, int r, int k, int d
 			int t = tg_ell_idx(e[0], d);
 			if (t < 0 || e[1] == 0.0f) continue;
 			for (int j = 0; j < h; j++) y[j] += e[1] * w[t * h + j];
+		}
+	}
+}
+
+/* spmm with a quantized table: a scale per table row. */
+TG_FN void tg_spmm_q(float *o, const float *x, const signed char *q, int bits, const float *s, int r, int k, int d, int h)
+{
+	for (int i = 0; i < r; i++) {
+		float *y = o + i * h;
+		for (int j = 0; j < h; j++) y[j] = 0.0f;
+		for (int p = 0; p < k; p++) {
+			const float *e = x + (i * k + p) * 2;
+			int t = tg_ell_idx(e[0], d);
+			if (t < 0 || e[1] == 0.0f) continue;
+			float v = e[1] * s[t];
+			for (int j = 0; j < h; j++) y[j] += v * (float)tg_qget(q, bits, t * h + j);
 		}
 	}
 }

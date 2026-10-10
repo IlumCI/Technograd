@@ -32,6 +32,9 @@ static void mm_rows(void *ctx, int lo, int hi, int tid)
 	tg_matmul(j->o + (size_t)lo * (size_t)j->n, j->a + (size_t)lo * (size_t)j->k, j->b, hi - lo, j->k, j->n);
 }
 
+void (*vm_matmul_hook)(void *ctx, const Module *m, const Ins *in, const float *a, const float *b);
+void *vm_hook_ctx;
+
 /* Final halting delta of each think loop in the last vm_run (single run at a time). */
 static float *g_delta;
 static int g_ndelta;
@@ -131,7 +134,13 @@ static void exec(VM *vm, const Block *b)
 		case CLS_MATMUL: {
 			int mm, kk, nn;
 			matmul_dims(&m->val[in->a[0]].sh, &m->val[in->a[1]].sh, &mm, &kk, &nn);
-			if (par_threads() > 1 && mm >= 2 && (long)mm * kk * nn >= PAR_MATMUL_MIN) {
+			if (vm_matmul_hook) vm_matmul_hook(vm_hook_ctx, m, in, a, c);
+			const Value *qa = &m->val[in->a[0]], *qb = &m->val[in->a[1]];
+			if (qa->qbits && q_axis_for(m, in->a[0], in) == qa->qaxis) {
+				tg_matmul_qa(o, qa->q, qa->qbits, qa->qs, c, mm, kk, nn);
+			} else if (qb->qbits && q_axis_for(m, in->a[1], in) == qb->qaxis) {
+				tg_matmul_qb(o, a, qb->q, qb->qbits, qb->qs, mm, kk, nn);
+			} else if (par_threads() > 1 && mm >= 2 && (long)mm * kk * nn >= PAR_MATMUL_MIN) {
 				MMJob j = { o, a, c, kk, nn };
 				int grain = mm / (4 * par_threads());
 				par_for(mm, grain > 0 ? grain : 1, mm_rows, &j);
@@ -159,7 +168,9 @@ static void exec(VM *vm, const Block *b)
 		case CLS_SPMM: {
 			int r, k, d, h;
 			spmm_dims(&m->val[in->a[0]].sh, &m->val[in->a[in->op == OP_SPMM_T ? 2 : 1]].sh, &r, &k, &d, &h);
-			if (in->op == OP_SPMM) tg_spmm(o, a, c, r, k, d, h);
+			const Value *qt = &m->val[in->a[1]];
+			if (in->op == OP_SPMM && qt->qbits && qt->qaxis == 0) tg_spmm_q(o, a, qt->q, qt->qbits, qt->qs, r, k, d, h);
+			else if (in->op == OP_SPMM) tg_spmm(o, a, c, r, k, d, h);
 			else if (in->op == OP_SPMM_T) tg_spmm_t(o, a, c, r, k, d, h);
 			else tg_spmm_dx(o, a, c, e, r, k, d, h);
 			break;

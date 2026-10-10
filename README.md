@@ -32,7 +32,7 @@ make            # builds build/tgc (C11, no dependencies beyond libm; perl at bu
 build/tgc train hf:scikit-learn/iris            # any dataset, no configuration: detect, featurize, train, export
 build/tgc train reviews.csv --model ssm         # adds a Mamba-3-style sequence layer over the words
 build/tgc predict iris_model new_flowers.csv     # predictions on raw new data
-make test       # 215 checks (offline; TG_TEST_NETWORK=1 adds a Hugging Face run)
+make test       # 222 checks (offline; TG_TEST_NETWORK=1 adds a Hugging Face run)
 make fixer      # retrain the auto-fix forest (deterministic, ~15 s) and evaluate it on held-out programs
 
 build/tgc run  examples/latent_reasoner.tg 1,0,0,1,0,1,1,0
@@ -214,6 +214,7 @@ every failure.
 ## Research basis
 
 - Coconut, continuous latent reasoning: Hao et al., *Training Large Language Models to Reason in a Continuous Latent Space*, [arXiv:2412.06769](https://arxiv.org/abs/2412.06769). This is the source of `think`: the hidden state is the next input. `examples/coconut/` runs its multi-stage curriculum in the language, by backpropagation through fixed-budget think loops.
+- Quantization: GPTQ, Frantar et al., [arXiv:2210.17323](https://arxiv.org/abs/2210.17323), for `tgc quantize --method gptq`; per-channel weight-only int8/int4 with clipping search for `rtn`.
 - Attention: rotary position embedding (RoFormer), [arXiv:2104.09864](https://arxiv.org/abs/2104.09864); sliding-window causal attention with a rolling key/value buffer as in Mistral 7B, [arXiv:2310.06825](https://arxiv.org/abs/2310.06825). This is the basis for `rope`, `attention` and `examples/kv_attention.tg`.
 - Recurrent depth with input re-injection: Geiping et al., *Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach*, [arXiv:2502.05171](https://arxiv.org/abs/2502.05171). This is the pattern used in `examples/latent_reasoner.tg`.
 - Convergence-based adaptive halting: AdaAnchor, [arXiv:2603.15051](https://arxiv.org/abs/2603.15051). It reports 48-60% fewer latent steps at equal budget. This is the basis for `until eps`.

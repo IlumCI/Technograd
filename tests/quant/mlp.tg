@@ -1,0 +1,12 @@
+# A model for the quantizer: matmul weights used on either side (W @ x and
+# x @ W), an spmm table, and a small param below --min-size that stays f32.
+model qmlp
+
+param W1 : f32[32, 16] = rand(91, 0.4)
+param W2 : f32[32, 8] = rand(92, 0.3)
+param T : f32[64, 8] = rand(93, 0.5)
+param b : f32[8] = rand(94, 0.1)
+
+def forward(x: f32[16], s: f32[3, 2]) -> f32[8]:
+    h = tanh(W1 @ x)
+    return softmax(h @ W2 + spmm(s, T) + b)

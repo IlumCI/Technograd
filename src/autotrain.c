@@ -40,7 +40,7 @@ static void usage_data(void)
 	      "  tgc train SOURCE [-o DIR] [--target COL] [--epochs N] [--hidden H] [--lr X]\n"
 	      "                   [--optimizer sgd|momentum|adam|adamw|muon] [--val FRACTION] [--max-rows N]\n"
 	      "                   [--batch N] [--text-dim N] [--model bow|ssm] [--seed S]\n"
-	      "  tgc predict DIR SOURCE [-o OUT.csv]\n"
+	      "  tgc predict DIR SOURCE [-o OUT.csv] [--model QUANTIZED.tgir] [--inputs ROWS.csv]\n"
 	      "SOURCE: a .csv/.tsv/.json/.jsonl/.npy file, or hf:OWNER/NAME[/CONFIG[/SPLIT]]\n",
 	      stderr);
 	exit(2);
@@ -604,13 +604,15 @@ static int cmd_train(Opts *o)
 static int cmd_predict(int argc, char **argv)
 {
 	if (argc < 4) usage_data();
-	const char *dir = argv[2], *src = argv[3], *outp = NULL;
+	const char *dir = argv[2], *src = argv[3], *outp = NULL, *mpath = NULL, *ipath = NULL;
 	for (int i = 4; i < argc; i++) {
 		if (!strcmp(argv[i], "-o") && i + 1 < argc) outp = argv[++i];
+		else if (!strcmp(argv[i], "--model") && i + 1 < argc) mpath = argv[++i]; /* e.g. a quantized infer model */
+		else if (!strcmp(argv[i], "--inputs") && i + 1 < argc) ipath = argv[++i]; /* the model's input rows, batch format */
 		else die(NULL, 0, "unexpected argument '%s'", argv[i]);
 	}
 	Spec *s = spec_load(join(dir, "features.tgf"));
-	Module *m = load_module(join(dir, "infer.tg"));
+	Module *m = load_module(mpath ? mpath : join(dir, "infer.tg"));
 	plan(m);
 	Table *t = data_load(src, 1 << 30);
 	int D = s->dim, C = s->classify ? s->nclass : 1, cut = 0;
@@ -628,6 +630,8 @@ static int cmd_predict(int argc, char **argv)
 	int *ids = xmalloc((size_t)(L.T ? L.T : 1) * sizeof *ids), longer = 0;
 	float *xd = xmalloc((size_t)(L.dd ? L.dd : 1) * sizeof *xd), *ell = xmalloc((size_t)(L.k ? L.k : 1) * 2 * sizeof *ell);
 	int *steps = xmalloc((size_t)(m->nthink ? m->nthink : 1) * sizeof *steps);
+	FILE *inf = ipath ? fopen(ipath, "w") : NULL;
+	if (ipath && !inf) die(NULL, 0, "cannot write '%s'", ipath);
 	FILE *f = outp ? fopen(outp, "w") : stdout;
 	if (!f) die(NULL, 0, "cannot write '%s'", outp);
 	fprintf(f, s->classify ? "prediction,confidence\n" : "prediction\n");
@@ -644,6 +648,11 @@ static int cmd_predict(int argc, char **argv)
 		if (L.dd) in[ni++] = xd;
 		if (L.ds) in[ni++] = ell;
 		if (L.sf >= 0) in[ni++] = tok;
+		if (inf) { /* calibration data for tgc quantize --method gptq */
+			for (int i = 0; i < ni; i++)
+				for (int j = 0; j < shape_numel(&m->val[m->inputs[i]].sh); j++) fprintf(inf, "%s%.7g", i || j ? "," : "", (double)in[i][j]);
+			fputc('\n', inf);
+		}
 		vm_run(m, in, out, steps);
 		if (s->classify) {
 			int b = 0;
@@ -662,6 +671,7 @@ static int cmd_predict(int argc, char **argv)
 			if (has) { known++; se += (out[0] - y) * (out[0] - y); }
 		}
 	}
+	if (inf && fclose(inf)) die(NULL, 0, "write failed '%s'", ipath);
 	if (outp && fclose(f)) die(NULL, 0, "write failed '%s'", outp);
 	if (longer) fprintf(stderr, "predict: %d row(s) had more than %d words; the sequence layer read the first %d\n", longer, L.T, L.T);
 	if (cut) fprintf(stderr, "predict: %d row(s) had more than %d active text buckets; the largest %d were kept\n", cut, L.k, L.k);

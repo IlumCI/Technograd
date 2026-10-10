@@ -15,6 +15,7 @@ static void usage(void)
 	      "  stream <file> [src] [-o dst]    row in, row out, flushed; src/dst: - (std), a file, or tcp://HOST:PORT\n"
 	      "  serve <file> --listen [HOST:]PORT   TCP row protocol and HTTP (GET /health, GET /, POST /run)\n"
 	      "  c     <file> [-o out.c]   emit a freestanding C unit\n"
+	      "  quantize <file> [-o out.tgir] [--bits 8|4] [--method rtn|gptq] [--calib data]   int8/int4 weights\n"
 	      "  fix   <file> [-o out.tg]  repair compile errors with the neural-forest fixer\n"
 	      "  train SOURCE [-o DIR] [--target COL] ...  train a model on a dataset file or hf:OWNER/NAME\n"
 	      "  predict DIR SOURCE [-o out.csv]           predict with a model from `tgc train`\n"
@@ -314,6 +315,7 @@ int main(int argc, char **argv)
 	const char *cmd = argv[1];
 
 	if (!strcmp(cmd, "train") || !strcmp(cmd, "predict") || !strcmp(cmd, "data")) return autotrain_main(argc, argv);
+	if (!strcmp(cmd, "quantize")) return quantize_main(argc, argv);
 	if (strcmp(cmd, "fixer-train") == 0) {
 		if (argc < 5 || strcmp(argv[2], "-o") != 0) usage();
 		return fixer_train(argv[3], argv + 4, argc - 4);

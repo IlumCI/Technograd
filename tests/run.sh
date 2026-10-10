@@ -227,6 +227,18 @@ if command -v curl > /dev/null; then
 	perl -MIO::Socket::INET -e '$s = IO::Socket::INET->new(LocalAddr => "127.0.0.1", LocalPort => $ARGV[0], Listen => 1, ReuseAddr => 1) or die; open F, "<", $ARGV[1]; { local $/; $b = <F>; } $c = $s->accept; while (<$c> =~ /\S/) {} print $c "HTTP/1.1 200 OK\r\nContent-Length: " . length($b) . "\r\nConnection: close\r\n\r\n$b"; close $c' $((PORT + 2)) tests/data/messy.csv & PP=$!
 	sleep 0.3; $TGC data inspect "http://127.0.0.1:$((PORT + 2))/messy.csv?v=1" | grep -q "rows     5" && ok || bad "dataset over http"; wait $PP
 fi
+# quantization: int8/int4 weights with per-channel scales (rtn, gptq); VM, TGIR and C agree
+perl -e 'srand(5); for (1..300) { my @x = map { sprintf("%.3f", 2*rand()-1) } 1..16; my @s = map { (int(rand 64), sprintf("%.2f", rand())) } 1..3; print join(",", @x, @s), "\n" }' > "$TMP/qcal.csv"
+qerr() { $TGC quantize tests/quant/mlp.tg --bits "$1" --method "$2" --calib "$TMP/qcal.csv" -o "$TMP/q$1$2.tgir" 2>&1 | awk '/output error/ { print $(NF - 4) }' | tr -d ,; }
+e8=$(qerr 8 rtn); e4=$(qerr 4 rtn); e4g=$(qerr 4 gptq)
+awk -v a="$e8" -v b="$e4" -v c="$e4g" 'BEGIN { exit !(a < 0.01 && c < b && b < 0.1) }' && ok || bad "quantization errors int8 $e8, int4 rtn $e4, int4 gptq $e4g"
+$TGC ir "$TMP/q4gptq.tgir" > "$TMP/q4b.tgir" && cmp -s "$TMP/q4gptq.tgir" "$TMP/q4b.tgir" && ok || bad "quantized TGIR not a fixed point"
+grep -q "(quant 4 1" "$TMP/q4gptq.tgir" && grep -q "(quant 4 0" "$TMP/q4gptq.tgir" && ok || bad "quant axes"
+$TGC c "$TMP/q4gptq.tgir" -o "$TMP/q4.c" && $CC -std=c99 -O2 -Wall -Wextra -Werror -pedantic -DTG_MAIN -o "$TMP/q4b" "$TMP/q4.c" -lm && ok || bad "quantized C unit"
+grep -q "static const signed char tgq_T" "$TMP/q4.c" && ! grep -q "tgp_W1\[" "$TMP/q4.c" && ok || bad "quantized C unit keeps f32 weights"
+head -20 "$TMP/qcal.csv" > "$TMP/qc20.csv"
+[ "$(while read r; do "$TMP/q4b" "$(echo "$r" | cut -d, -f1-16)" "$(echo "$r" | cut -d, -f17-)"; done < "$TMP/qc20.csv" | tr ' ' ',')" = "$($TGC batch "$TMP/q4gptq.tgir" "$TMP/qc20.csv")" ] && ok || bad "quantized C differs from VM"
+$TGC quantize tests/quant/mlp.tg --method gptq 2>&1 | grep -q "needs --calib" && ok || bad "gptq without calibration"
 # row-sparse (lazy) optimizer steps on spmm tables
 lz() { sed "s/OPT/$1/" > "$TMP/lz.tg" <<'TG'
 model lz

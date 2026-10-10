@@ -991,12 +991,62 @@ more than the schedule; at lr 0.003 the curriculum reached every depth
 tried, while direct training fell short at 4 hops with 1000 rows per stage
 and at 8 hops. The 4-hop curriculum is regression-tested.
 
-## 21. Roadmap
+## 21. Quantization
+
+```
+tgc quantize MODEL [-o OUT.tgir] [--bits 8|4] [--method rtn|gptq] [--calib DATA] [--min-size N]
+```
+
+Weights become signed int8 codes, or int4 codes packed two per byte, with
+one f32 scale per output channel: rows of `W` in `W @ x` and of `spmm`
+tables, columns of `W` in `x @ W` (the layout `tgc train` writes).
+Activations and accumulation stay f32 (weight-only, W8A32 / W4A32): the
+size of an embedded model is its weights. The output is self-contained
+TGIR; `tgc run`, `batch`, `c`, and `tgc predict DIR SOURCE --model
+OUT.tgir` take it directly.
+
+- **Eligible params:** rank 2, at least `--min-size` (256) elements, every
+  use a matmul or spmm operand reading codes on one axis. Others stay f32.
+- **TGIR:** `(param NAME (f32 R C) (quant BITS AXIS (scale s...) (codes q...)))`,
+  one code per element; the reader checks the code range and counts.
+- **Kernels:** `tg_matmul_qa` (quantized left operand), `tg_matmul_qb`
+  (right), `tg_spmm_q` (tables), shared by the VM and C, so a quantized model
+  gives identical outputs in both (tested). A C unit stores the codes as
+  `signed char` arrays and drops the f32 copy when no other use needs it.
+- **rtn:** round to nearest; each channel's scale is the clipping of its
+  absmax (1.0 down to 0.55) with the smallest rounding error.
+- **gptq:** GPTQ (Frantar et al., arXiv:2210.17323). For each matmul weight,
+  the calibration rows (`--calib`, the `tgc batch` format; `tgc predict DIR
+  SOURCE --inputs ROWS.csv` writes them for a trained model) give the
+  Hessian H = X X^T of its inputs. Each channel is quantized one input at a
+  time, and the rounding error is pushed onto the remaining inputs through
+  the upper Cholesky factor of H^-1 (1% dampening; unused inputs zeroed).
+  The clipping search is weighted by diag(H). spmm tables and layers wider
+  than 2048 inputs use rtn.
+- **Report:** per param the relative weight error, the size before and
+  after, and with `--calib` the relative change of the model's outputs on
+  those rows.
+
+Measured:
+
+| Model | f32 | int8 rtn | int4 rtn | int4 gptq |
+|-------|-----|----------|----------|-----------|
+| breast cancer MLP (30 -> 256 -> 2), relative output error on 569 rows | | 0.00022 | 0.00406 | 0.00222 |
+| same, accuracy | 99.12% | 99.12% | 99.12% | 99.12% |
+| SST-2 bag of words (32768 x 32 table), validation accuracy | 77.18% | 77.18% | 77.29% | (table: rtn) |
+| SST-2 weights | 4.19 MB | 1.18 MB | 0.66 MB | |
+
+GPTQ has the larger weight error (0.11 against 0.08) and half the output
+error: it trades weight fidelity for fidelity of what the layer computes on
+real inputs. The per-row scales of a 32768-row table are a fifth of its int4
+size; fp16 scales are a later step.
+
+## 22. Roadmap
 
 Ordered by importance for latent-reasoning models on embedded targets:
 
-1. int8/int4 weights with per-channel scales, and fixed-point kernels for
-   targets without an FPU.
+1. Fixed-point kernels for targets without an FPU (int8/int4 weights with
+   per-channel scales are done, section 21).
 2. Sequence models beyond one layer: stacked Mamba-3 blocks with BCNorm
    and MIMO, a fused scan kernel (the VM spends 10x the bag-of-words time
    on SST-2), and pretraining of the embeddings and layer on unlabeled text

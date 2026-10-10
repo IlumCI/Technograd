@@ -3,6 +3,7 @@
  * (tgir 1
  *   (model NAME)
  *   (param NAME (f32 d...) (data v...))
+ *   (param NAME (f32 r c) (quant BITS AXIS (scale s...) (codes q...)))   ; tgc quantize
  *   (input NAME (f32 d...))
  *   (block
  *     (%N (f32 d...) (OP ARG...))
@@ -23,8 +24,16 @@
  * defined inside a body are not visible outside it. */
 #include "tg.h"
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
+
+int tg_qget_host(const signed char *q, int bits, int i)
+{
+	if (bits == 8) return q[i];
+	int b = q[i >> 1];
+	return (i & 1) ? (b >> 4) : (int)(signed char)(unsigned char)(b << 4) >> 4;
+}
 
 /* ---- writer ------------------------------------------------------------- */
 
@@ -144,6 +153,15 @@ void ir_write(const Module *m, FILE *f)
 		const Value *x = &m->val[v];
 		if ((x->kind != V_PARAM && x->kind != V_STATE) || x->dead) continue;
 		shape_str(&x->sh, sh, sizeof sh);
+		if (x->qbits) { /* codes are written one per element (int4 unpacked) */
+			int nch = x->sh.dim[x->qaxis], k = shape_numel(&x->sh);
+			fprintf(f, "  (param %s %s\n    (quant %d %d\n      (scale", x->name, sh, x->qbits, x->qaxis);
+			for (int i = 0; i < nch; i++) fprintf(f, "%s %.9g", i && i % 8 == 0 ? "\n            " : "", (double)x->qs[i]);
+			fputs(")\n      (codes", f);
+			for (int i = 0; i < k; i++) fprintf(f, "%s %d", i && i % 24 == 0 ? "\n            " : "", tg_qget_host(x->q, x->qbits, i));
+			fputs(")))\n", f);
+			continue;
+		}
 		fprintf(f, "  (%s %s %s\n    (data", x->kind == V_STATE ? "state" : "param", x->name, sh);
 		int k = shape_numel(&x->sh);
 		for (int i = 0; i < k; i++) {
@@ -429,7 +447,39 @@ Module *ir_read(Sx *forms, const char *file)
 			continue;
 		}
 		if (!r.m) die(file, f->line, "(model ...) must come first");
-		if (strcmp(h, "param") == 0 || strcmp(h, "state") == 0) {
+		if (strcmp(h, "param") == 0 && f->len == 4 && f->v[3]->k == SX_LIST && f->v[3]->len == 5 && sx_issym(f->v[3]->v[0], "quant")) {
+			need(&r, f, !seen_block, h);
+			Shape sh = r_shape(&r, f->v[2]);
+			Sx *qd = f->v[3];
+			need(&r, qd, qd->v[1]->k == SX_NUM && (qd->v[1]->n == 8 || qd->v[1]->n == 4), "quant bits (8 or 4)");
+			need(&r, qd, qd->v[2]->k == SX_NUM && (qd->v[2]->n == 0 || qd->v[2]->n == 1) && sh.rank == 2, "quant axis (0 or 1, rank-2 param)");
+			int bits = (int)qd->v[1]->n, axis = (int)qd->v[2]->n, n = shape_numel(&sh), nch = sh.dim[axis];
+			Sx *sc = qd->v[3], *cd = qd->v[4];
+			need(&r, sc, sc->k == SX_LIST && sc->len == nch + 1 && sx_issym(sc->v[0], "scale"), "quant scales (one per channel)");
+			need(&r, cd, cd->k == SX_LIST && cd->len == n + 1 && sx_issym(cd->v[0], "codes"), "quant codes (one per element)");
+			int v = mod_value(r.m, V_PARAM, &sh, f->v[1]->s);
+			Value *x = &r.m->val[v];
+			x->qbits = bits;
+			x->qaxis = axis;
+			x->qs = xmalloc((size_t)nch * sizeof(float));
+			x->q = xmalloc((size_t)(bits == 8 ? n : (n + 1) / 2));
+			x->data = xmalloc((size_t)n * sizeof(float));
+			for (int j = 0; j < nch; j++) {
+				need(&r, sc, sc->v[j + 1]->k == SX_NUM, "scale");
+				x->qs[j] = (float)sc->v[j + 1]->n;
+			}
+			int lim = bits == 8 ? 127 : 7;
+			for (int j = 0; j < n; j++) {
+				need(&r, cd, cd->v[j + 1]->k == SX_NUM && cd->v[j + 1]->n == (double)(int)cd->v[j + 1]->n && fabs(cd->v[j + 1]->n) <= lim, "code");
+				int c = (int)cd->v[j + 1]->n;
+				if (bits == 8) x->q[j] = (signed char)c;
+				else x->q[j / 2] = (signed char)(j % 2 ? (unsigned char)((unsigned char)x->q[j / 2] & 0x0f) | (unsigned char)(c << 4)
+							       : (unsigned char)((unsigned char)x->q[j / 2] & 0xf0) | (unsigned char)(c & 0x0f));
+				int ch = axis == 0 ? j / sh.dim[1] : j % sh.dim[1];
+				x->data[j] = (float)c * x->qs[ch];
+			}
+			r_def(&r, f->v[1], v);
+		} else if (strcmp(h, "param") == 0 || strcmp(h, "state") == 0) {
 			need(&r, f, !seen_block && f->len == 4 && f->v[3]->k == SX_LIST && f->v[3]->len >= 1 && sx_issym(f->v[3]->v[0], "data"), h);
 			Shape sh = r_shape(&r, f->v[2]);
 			int n = shape_numel(&sh);
