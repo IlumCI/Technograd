@@ -1,0 +1,10 @@
+# NumPy broadcasting (column, outer, rank 3), sum_to, batched matmul and
+# transpose, a rank-3 operand times a shared matrix.
+model bc
+param W : f32[3, 4, 2] = rand(1, 0.5)
+def forward(x: f32[3, 1], y: f32[1, 4], z: f32[3, 2, 4]) -> f32[3, 4, 4]:
+    a = x * y + x
+    a3 = reshape(a, 3, 4, 1) * reshape(y, 1, 1, 4)
+    b = W @ transpose(W)
+    c = z @ transpose(a3)
+    return b + a3 * reshape(sum_to(a, y), 1, 1, 4) + transpose(transpose(z) @ c) - reshape(x, 3, 1, 1)

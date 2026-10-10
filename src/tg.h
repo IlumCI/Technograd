@@ -39,6 +39,11 @@ typedef struct {
 
 int shape_numel(const Shape *s);
 int shape_eq(const Shape *a, const Shape *b);
+int shape_broadcast(const Shape *a, const Shape *b, Shape *out); /* NumPy rules; 0 if incompatible */
+#define TG_BCAST_DESC (1 + 3 * TG_MAXRANK)
+int bcast_desc(const Shape *out, const Shape *a, const Shape *b, int *d);
+int bin_simple(const Shape *out, const Shape *a, const Shape *b); /* equal/scalar/row: tg_k_bin handles it */
+int matmul_groups(const Shape *a, const Shape *b); /* batched matmul: leading dimension of two rank-3 operands */
 int shape_suffix(const Shape *small, const Shape *big); /* row broadcasting: (H) into (B,H) */
 void shape_str(const Shape *s, char *buf, size_t n); /* "(f32 8 4)" */
 
@@ -77,12 +82,13 @@ typedef enum {
 	OP_SPMM, OP_SPMM_T, OP_SPMM_DX,
 	OP_ACTIVE, OP_TAKE, OP_TAKE_T, OP_SPMM_TC,
 	OP_SIN, OP_COS, OP_RESHAPE, OP_FLOOR,
+	OP_SUM_TO,
 	OP_THINK,
 	OP_SCAN,
 	OP_COUNT
 } Op;
 
-typedef enum { CLS_CONST, CLS_BIN, CLS_UN, CLS_MATMUL, CLS_ROW, CLS_RED, CLS_TRANS, CLS_OUTER, CLS_SPMM, CLS_ROWS, CLS_RESHAPE, CLS_THINK, CLS_SCAN } OpClass;
+typedef enum { CLS_CONST, CLS_BIN, CLS_UN, CLS_MATMUL, CLS_ROW, CLS_RED, CLS_TRANS, CLS_OUTER, CLS_SPMM, CLS_ROWS, CLS_RESHAPE, CLS_SUMTO, CLS_THINK, CLS_SCAN } OpClass;
 
 typedef struct {
 	const char *name;

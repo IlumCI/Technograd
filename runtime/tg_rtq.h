@@ -441,4 +441,58 @@ TG_FN void tg_k_bin(int op, tg_t *o, const tg_t *a, int na, const tg_t *b, int n
 	for (int r = 0; r < n / w; r++) k(o + r * w, na < n ? a : a + r * w, 1, nb < n ? b : b + r * w, 1, w);
 }
 
+/* ---- broadcasting, reduction to a broadcast operand, batched products -----
+ * d: rank r, the r dimensions of the iteration space, then the element
+ * strides of a and b (0 along broadcast axes); the innermost axis has
+ * stride 0 or 1 in each operand (see bcast_desc in the compiler). */
+TG_FN void tg_bin_bc(int op, tg_t *o, const tg_t *a, const tg_t *b, const int *d)
+{
+	void (*k)(tg_t *, const tg_t *, int, const tg_t *, int, int) = op == 0 ? tg_add : op == 1 ? tg_sub : op == 2 ? tg_mul : op == 3 ? tg_div : op == 4 ? tg_max : tg_min;
+	int r = d[0], idx[8] = { 0 };
+	const int *dim = d + 1, *sa = d + 1 + r, *sb = d + 1 + 2 * r;
+	int w = dim[r - 1];
+	long n = 1, ia = 0, ib = 0;
+	for (int i = 0; i < r - 1; i++) n *= dim[i];
+	for (long i = 0; i < n; i++) {
+		k(o + i * w, a + ia, sa[r - 1] != 0, b + ib, sb[r - 1] != 0, w);
+		for (int x = r - 2; x >= 0; x--) {
+			ia += sa[x];
+			ib += sb[x];
+			if (++idx[x] < dim[x]) break;
+			ia -= (long)sa[x] * dim[x];
+			ib -= (long)sb[x] * dim[x];
+			idx[x] = 0;
+		}
+	}
+}
+/* o (no elements) += x over the iteration space of x; d's first strides are o's */
+TG_FN void tg_sum_to(tg_t *o, const tg_t *x, int no, const int *d)
+{
+	int r = d[0], idx[8] = { 0 };
+	const int *dim = d + 1, *so = d + 1 + r;
+	int w = dim[r - 1];
+	long n = 1, io = 0;
+	for (int i = 0; i < no; i++) o[i] = 0;
+	for (int i = 0; i < r - 1; i++) n *= dim[i];
+	for (long i = 0; i < n; i++) {
+		const tg_t *p = x + i * w;
+		if (so[r - 1]) for (int j = 0; j < w; j++) o[io + j] = tg_sat((int64_t)o[io + j] + p[j]);
+		else { int64_t s = 0; for (int j = 0; j < w; j++) s += p[j]; o[io] = tg_sat((int64_t)o[io] + s); }
+		for (int q = r - 2; q >= 0; q--) {
+			io += so[q];
+			if (++idx[q] < dim[q]) break;
+			io -= (long)so[q] * dim[q];
+			idx[q] = 0;
+		}
+	}
+}
+TG_FN void tg_bmm(tg_t *o, const tg_t *a, const tg_t *b, int g, int m, int k, int n)
+{
+	for (int i = 0; i < g; i++) tg_matmul(o + (long)i * m * n, a + (long)i * m * k, b + (long)i * k * n, m, k, n);
+}
+TG_FN void tg_btranspose(tg_t *o, const tg_t *a, int g, int r, int c)
+{
+	for (int i = 0; i < g; i++) tg_transpose(o + (long)i * r * c, a + (long)i * r * c, r, c);
+}
+
 #endif

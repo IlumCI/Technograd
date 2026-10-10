@@ -151,6 +151,70 @@ int shape_suffix(const Shape *small, const Shape *big)
 	return 1;
 }
 
+/* NumPy broadcasting: dimensions align from the right; each pair is equal or
+ * one of them is 1. Returns 0 if the shapes are incompatible. */
+int shape_broadcast(const Shape *a, const Shape *b, Shape *out)
+{
+	Shape o = { 0 };
+	o.rank = a->rank > b->rank ? a->rank : b->rank;
+	for (int i = 1; i <= o.rank; i++) {
+		int x = i <= a->rank ? a->dim[a->rank - i] : 1, y = i <= b->rank ? b->dim[b->rank - i] : 1;
+		if (x != y && x != 1 && y != 1) return 0;
+		o.dim[o.rank - i] = x == 1 ? y : x;
+	}
+	*out = o;
+	return 1;
+}
+
+/* Iteration descriptor for a broadcast over out: d[0] = rank r, d[1..r] the
+ * dimensions, then the element strides of a and of b (0 along broadcast
+ * axes). Adjacent axes that are contiguous in both operands are merged, so
+ * the innermost axis is a run of stride 0 or 1. b may be NULL. Returns the
+ * number of ints written (at most TG_BCAST_DESC). */
+int bcast_desc(const Shape *out, const Shape *a, const Shape *b, int *d)
+{
+	int r = out->rank, dim[TG_MAXRANK], st[2][TG_MAXRANK];
+	const Shape *ops[2] = { a, b };
+	for (int k = 0; k < 2; k++) {
+		long acc = 1;
+		for (int i = r - 1; i >= 0; i--) {
+			const Shape *s = ops[k];
+			int j = s ? i - (r - s->rank) : -1, n = j >= 0 ? s->dim[j] : 1;
+			st[k][i] = n == 1 ? 0 : (int)acc;
+			acc *= n;
+		}
+	}
+	int nr = 0;
+	for (int i = 0; i < r; i++) {
+		if (out->dim[i] == 1) continue; /* size-1 axes iterate once */
+		if (nr > 0) {
+			int p = nr - 1, ok = 1;
+			for (int k = 0; k < 2; k++) {
+				long merged = (long)st[k][i] * out->dim[i];
+				if (!((st[k][p] == 0 && st[k][i] == 0) || (st[k][i] != 0 && st[k][p] == merged))) ok = 0;
+			}
+			if (ok) {
+				dim[p] *= out->dim[i];
+				st[0][p] = st[0][i];
+				st[1][p] = st[1][i];
+				continue;
+			}
+		}
+		dim[nr] = out->dim[i];
+		st[0][nr] = st[0][i];
+		st[1][nr] = st[1][i];
+		nr++;
+	}
+	if (nr == 0) { dim[0] = 1; st[0][0] = st[1][0] = 0; nr = 1; }
+	d[0] = nr;
+	for (int i = 0; i < nr; i++) {
+		d[1 + i] = dim[i];
+		d[1 + nr + i] = st[0][i];
+		d[1 + 2 * nr + i] = st[1][i];
+	}
+	return 1 + 3 * nr;
+}
+
 int shape_eq(const Shape *a, const Shape *b)
 {
 	if (a->rank != b->rank) return 0;

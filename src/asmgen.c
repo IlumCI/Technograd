@@ -39,6 +39,7 @@ typedef struct {
 	int in_off; /* frame offset of the input pointer slots */
 	int lp_off; /* frame offset of the loop slots */
 	int frame;
+	int *desc, ndesc; /* broadcast descriptors, TG_BCAST_DESC ints each, emitted as .rodata */
 } A;
 
 enum { ARG_VAL, ARG_SYM, ARG_IMM, ARG_NULL, ARG_VALT };
@@ -167,6 +168,16 @@ static void call(A *a, const char *fn, const Arg *x, int n)
 }
 
 static int label(A *a) { return a->label++; }
+
+/* Symbol of a new broadcast descriptor. */
+static Arg desc(A *a, const Shape *out, const Shape *x, const Shape *y)
+{
+	a->desc = xrealloc(a->desc, (size_t)(a->ndesc + 1) * TG_BCAST_DESC * sizeof(int));
+	int *d = a->desc + (size_t)a->ndesc * TG_BCAST_DESC;
+	memset(d, 0, TG_BCAST_DESC * sizeof(int));
+	bcast_desc(out, x, y, d);
+	return S("tg_%s_d%d", a->m->name, a->ndesc++);
+}
 
 /* ---- instructions ------------------------------------------------------------- */
 
@@ -327,7 +338,12 @@ static void ins(A *a, const Ins *in)
 		return;
 	}
 	case CLS_BIN: {
-		int op = in->op == OP_ADD ? 0 : in->op == OP_SUB ? 1 : in->op == OP_MUL ? 2 : in->op == OP_DIV ? 3 : in->op == OP_MAX ? 4 : 5;
+		int op = in->op - OP_ADD;
+		if (!bin_simple(&m->val[in->out].sh, s0, &m->val[in->a[1]].sh)) {
+			Arg c[5] = { I(op), V(in->out), V(in->a[0]), V(in->a[1]), desc(a, &m->val[in->out].sh, s0, &m->val[in->a[1]].sh) };
+			call(a, "tg_bin_bc", c, 5);
+			return;
+		}
 		Arg c[7] = { I(op), V(in->out), V(in->a[0]), I(numel(a, in->a[0])), V(in->a[1]), I(numel(a, in->a[1])), I(n) };
 		call(a, "tg_k_bin", c, 7);
 		return;
@@ -344,7 +360,11 @@ static void ins(A *a, const Ins *in)
 		int mm, kk, nn;
 		matmul_dims(s0, &m->val[in->a[1]].sh, &mm, &kk, &nn);
 		const Value *qa = &m->val[in->a[0]], *qb = &m->val[in->a[1]];
-		if (qa->qbits && q_axis_for(m, in->a[0], in) == qa->qaxis) {
+		int gg = matmul_groups(s0, &m->val[in->a[1]].sh);
+		if (gg > 1) {
+			Arg c[7] = { V(in->out), V(in->a[0]), V(in->a[1]), I(gg), I(mm), I(kk), I(nn) };
+			call(a, "tg_bmm", c, 7);
+		} else if (qa->qbits && q_axis_for(m, in->a[0], in) == qa->qaxis) {
 			Arg c[8] = { V(in->out), S("tgq_%s", qa->name, 0), I(qa->qbits), S("tgqs_%s", qa->name, 0), V(in->a[1]), I(mm), I(kk), I(nn) };
 			call(a, "tg_matmul_qa", c, 8);
 		} else if (qb->qbits && q_axis_for(m, in->a[1], in) == qb->qaxis) {
@@ -369,8 +389,13 @@ static void ins(A *a, const Ins *in)
 		return;
 	}
 	case CLS_TRANS: {
-		Arg c[4] = { V(in->out), V(in->a[0]), I(s0->dim[0]), I(s0->dim[1]) };
-		call(a, "tg_transpose", c, 4);
+		if (s0->rank == 3) {
+			Arg c[5] = { V(in->out), V(in->a[0]), I(s0->dim[0]), I(s0->dim[1]), I(s0->dim[2]) };
+			call(a, "tg_btranspose", c, 5);
+		} else {
+			Arg c[4] = { V(in->out), V(in->a[0]), I(s0->dim[0]), I(s0->dim[1]) };
+			call(a, "tg_transpose", c, 4);
+		}
 		return;
 	}
 	case CLS_OUTER: {
@@ -412,6 +437,11 @@ static void ins(A *a, const Ins *in)
 				call(a, "tg_spmm_tc", c, 8);
 			}
 		}
+		return;
+	}
+	case CLS_SUMTO: {
+		Arg c[4] = { V(in->out), V(in->a[0]), I(n), desc(a, s0, &m->val[in->a[1]].sh, NULL) };
+		call(a, "tg_sum_to", c, 4);
 		return;
 	}
 	case CLS_THINK:
@@ -615,7 +645,7 @@ int asm_target_fixed(const char *target) { return parse_target(target) == T_M3; 
 
 void asmgen(const Module *m, FILE *f, const char *target)
 {
-	A a = { m, f, parse_target(target), 0, 4, 0, 0, 0, 0, 0, 0 };
+	A a = { m, f, parse_target(target), 0, 4, 0, 0, 0, 0, 0, 0, NULL, 0 };
 	a.fixed = a.t == T_M3;
 	a.W = is_arm(&a) ? 4 : 8;
 	count_loops(&m->top, &a.nslots);
@@ -701,6 +731,13 @@ void asmgen(const Module *m, FILE *f, const char *target)
 	data(&a);
 	fputs("\n\t.section .rodata\n", f);
 	loop_consts(&a, &m->top);
+	for (int i = 0; i < a.ndesc; i++) {
+		const int *d = a.desc + (size_t)i * TG_BCAST_DESC;
+		fprintf(f, "\t.align 2\ntg_%s_d%d:\n\t.word ", m->name, i);
+		for (int j = 0; j < 1 + 3 * d[0]; j++) fprintf(f, "%s%d", j ? ", " : "", d[j]);
+		fputc('\n', f);
+	}
+	xfree(a.desc);
 	fputs("\n\t.bss\n", f);
 	loop_vars(&a, &m->top);
 }

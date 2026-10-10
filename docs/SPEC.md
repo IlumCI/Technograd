@@ -85,9 +85,9 @@ and parentheses. All binary operators are left associative.
 
 | Builtin | Shape rule |
 |---------|------------|
-| `a + b`, `a - b`, `a * b`, `a / b`, `max(a,b)`, `min(a,b)` | equal shapes; either operand scalar; or one operand's shape equal to the trailing dimensions of the other (row broadcast: `(B,H) + (H)` adds the vector to every row) |
+| `a + b`, `a - b`, `a * b`, `a / b`, `max(a,b)`, `min(a,b)` | NumPy broadcasting: dimensions are compared from the right, each pair equal or one of them 1, missing leading dimensions count as 1. `(B,H) + (H)` adds a vector to every row, `(G,1) * (G,K)` scales each row, `(N,1) * (1,P)` is an outer product |
 | `-a`, `neg tanh relu sigmoid exp sqrt gelu silu` | elementwise, shape preserved; `gelu` uses the tanh approximation |
-| `a @ b` (`matmul`, `dot`) | `(m,k)@(k)->(m)`, `(m,k)@(k,n)->(m,n)`, `(k)@(k,n)->(n)`, `(k)@(k)->()` |
+| `a @ b` (`matmul`, `dot`) | `(m,k)@(k)->(m)`, `(m,k)@(k,n)->(m,n)`, `(k)@(k,n)->(n)`, `(k)@(k)->()`; batched `(g,m,k)@(g,k,n)->(g,m,n)`; shared right operand `(g,m,k)@(k,n)->(g,m,n)`, `(g,m,k)@(k)->(g,m)` |
 | `softplus(x)`, `log(x)` | elementwise; softplus is overflow-free: `max(x,0) + log1p(exp(-|x|))` |
 | `sin(x)`, `cos(x)`, `floor(x)` | elementwise; `floor` has zero derivative |
 | `rope(x, pos)` | rotary position embedding (arXiv:2104.09864): x (d) at a scalar position, or the rows of x (T, d) at positions (T); channel pair (2i, 2i+1) rotates by pos * 10000^(-2i/d); d even |
@@ -95,7 +95,8 @@ and parentheses. All binary operators are left associative.
 | `reshape(x, d0, d1, ...)` | the same elements in row-major order with new dimensions (integer literals, same element count); TGIR `(reshape X)` with the target as the declared type |
 | `softmax(x)`, `rmsnorm(x)` | over the last axis, shape preserved, rank >= 1; rmsnorm eps = 1e-6, no gain |
 | `sum(x)`, `mean(x)` | reduce to scalar |
-| `transpose(x)` | rank 2 only |
+| `transpose(x)` | rank 2, or rank 3 with the last two axes swapped |
+| `sum_to(x, like)` | `x` summed over the axes along which `like` broadcasts to it; shape of `like` (the adjoint of broadcasting) |
 | `outer(a, b)` | `(m),(n)->(m,n)`, `a b^T`; the rank-1 write of delta-rule and Hebbian updates |
 | `step(x)` | elementwise `x > 0 ? 1 : 0`; the derivative of relu, max and min |
 | `spmm(s, w)` | sparse rows times a matrix: `s` is `(K, 2)` or `(B, K, 2)`, each row K `(index, value)` pairs (ELLPACK form), `w` is `(D, H)`; returns `(H)` or `(B, H)`, `sum_k value_k * w[index_k]`. Cost O(B K H), independent of D. Indices round to the nearest integer; padding has value 0; an index outside `[0, D)` is skipped, so no input can address out of bounds. With one pair `(token, 1)` per row it is an embedding gather |
@@ -503,11 +504,13 @@ model compiles to freestanding C like any other.
 **Coverage.** Every builtin has a derivative:
 
 - broadcasting operands are summed back to their shape: a scalar by `sum`,
-  a row-broadcast vector over the rows of a matrix by `ones(B) @ g`;
+  a row-broadcast vector over the rows of a matrix by `ones(B) @ g`, any
+  other broadcast by `sum_to`;
 - `max`/`min`/`relu` send the gradient through the selected operand, with ties
   going to the second;
 - `softmax` and `rmsnorm` are supported on rank 1 and 2;
-- all four `matmul` shape cases and `outer` are covered;
+- every `matmul` shape case (batched and shared right operand included),
+  `transpose` of rank 2 and 3, and `outer` are covered;
 - `spmm` sends gradients to the matrix (a scatter-add over the active rows)
   and to the values of the sparse rows; indices are piecewise constant and
   get zero. Its two derivative operations are themselves differentiable, so

@@ -88,6 +88,15 @@ static void flt(G *g, float v)
 	else fprintf(g->f, "%.9ef", (double)v);
 }
 
+/* A broadcast descriptor as a C99 compound literal. */
+static void desc(G *g, const Shape *out, const Shape *a, const Shape *b)
+{
+	int d[TG_BCAST_DESC], n = bcast_desc(out, a, b, d);
+	fputs("(const int[]){ ", g->f);
+	for (int i = 0; i < n; i++) fprintf(g->f, "%s%d", i ? ", " : "", d[i]);
+	fputs(" }", g->f);
+}
+
 static void block(G *g, const Block *b, int d)
 {
 	const Module *m = g->m;
@@ -108,7 +117,11 @@ static void block(G *g, const Block *b, int d)
 			break;
 		case CLS_BIN: {
 			int na = shape_numel(&m->val[in->a[0]].sh), nb = shape_numel(&m->val[in->a[1]].sh);
-			if ((na == n || na == 1) && (nb == n || nb == 1)) {
+			if (!bin_simple(&m->val[in->out].sh, &m->val[in->a[0]].sh, &m->val[in->a[1]].sh)) {
+				fprintf(g->f, "tg_bin_bc(%d, %s, %s, %s, ", in->op - OP_ADD, o, a, c);
+				desc(g, &m->val[in->out].sh, &m->val[in->a[0]].sh, &m->val[in->a[1]].sh);
+				fputs(");\n", g->f);
+			} else if ((na == n || na == 1) && (nb == n || nb == 1)) {
 				fprintf(g->f, "tg_%s(%s, %s, %d, %s, %d, %d);\n", tg_ops[in->op].name, o, a, na == n, c, nb == n, n);
 			} else { /* row broadcast */
 				int w = na < n ? na : nb;
@@ -126,7 +139,10 @@ static void block(G *g, const Block *b, int d)
 			int mm, kk, nn;
 			matmul_dims(&m->val[in->a[0]].sh, &m->val[in->a[1]].sh, &mm, &kk, &nn);
 			const Value *qa = &m->val[in->a[0]], *qb = &m->val[in->a[1]];
-			if (qa->qbits && q_axis_for(m, in->a[0], in) == qa->qaxis)
+			int gg = matmul_groups(&m->val[in->a[0]].sh, &m->val[in->a[1]].sh);
+			if (gg > 1)
+				fprintf(g->f, "tg_bmm(%s, %s, %s, %d, %d, %d, %d);\n", o, a, c, gg, mm, kk, nn);
+			else if (qa->qbits && q_axis_for(m, in->a[0], in) == qa->qaxis)
 				fprintf(g->f, "tg_matmul_qa(%s, tgq_%s, %d, tgqs_%s, %s, %d, %d, %d);\n", o, qa->name, qa->qbits, qa->name, c, mm, kk, nn);
 			else if (qb->qbits && q_axis_for(m, in->a[1], in) == qb->qaxis)
 				fprintf(g->f, "tg_matmul_qb(%s, %s, tgq_%s, %d, tgqs_%s, %d, %d, %d);\n", o, a, qb->name, qb->qbits, qb->name, mm, kk, nn);
@@ -172,11 +188,17 @@ static void block(G *g, const Block *b, int d)
 		}
 		case CLS_TRANS: {
 			const Shape *s = &m->val[in->a[0]].sh;
-			fprintf(g->f, "tg_transpose(%s, %s, %d, %d);\n", o, a, s->dim[0], s->dim[1]);
+			if (s->rank == 3) fprintf(g->f, "tg_btranspose(%s, %s, %d, %d, %d);\n", o, a, s->dim[0], s->dim[1], s->dim[2]);
+			else fprintf(g->f, "tg_transpose(%s, %s, %d, %d);\n", o, a, s->dim[0], s->dim[1]);
 			break;
 		}
 		case CLS_RESHAPE:
 			fprintf(g->f, "tg_copy(%s, %s, %d);\n", o, a, n);
+			break;
+		case CLS_SUMTO:
+			fprintf(g->f, "tg_sum_to(%s, %s, %d, ", o, a, n);
+			desc(g, &m->val[in->a[0]].sh, &m->val[in->a[1]].sh, NULL);
+			fputs(");\n", g->f);
 			break;
 		case CLS_SCAN: {
 			const Scan *s = in->sc;

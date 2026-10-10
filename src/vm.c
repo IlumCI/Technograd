@@ -103,7 +103,11 @@ static void exec(VM *vm, const Block *b)
 				in->op == OP_ADD ? tg_add : in->op == OP_SUB ? tg_sub : in->op == OP_MUL ? tg_mul
 				: in->op == OP_DIV ? tg_div : in->op == OP_MAX ? tg_max : tg_min;
 			int na = shape_numel(&m->val[in->a[0]].sh), nb = shape_numel(&m->val[in->a[1]].sh);
-			if ((na == n || na == 1) && (nb == n || nb == 1)) {
+			if (!bin_simple(&m->val[in->out].sh, &m->val[in->a[0]].sh, &m->val[in->a[1]].sh)) {
+				int d[TG_BCAST_DESC];
+				bcast_desc(&m->val[in->out].sh, &m->val[in->a[0]].sh, &m->val[in->a[1]].sh, d);
+				tg_bin_bc(in->op - OP_ADD, o, a, c, d);
+			} else if ((na == n || na == 1) && (nb == n || nb == 1)) {
 				k(o, a, na == n, c, nb == n, n);
 			} else { /* row broadcast: the smaller operand repeats over the rows */
 				int w = na < n ? na : nb;
@@ -134,6 +138,11 @@ static void exec(VM *vm, const Block *b)
 		case CLS_MATMUL: {
 			int mm, kk, nn;
 			matmul_dims(&m->val[in->a[0]].sh, &m->val[in->a[1]].sh, &mm, &kk, &nn);
+			int gg = matmul_groups(&m->val[in->a[0]].sh, &m->val[in->a[1]].sh);
+			if (gg > 1) {
+				tg_bmm(o, a, c, gg, mm, kk, nn);
+				break;
+			}
 			if (vm_matmul_hook) vm_matmul_hook(vm_hook_ctx, m, in, a, c);
 			const Value *qa = &m->val[in->a[0]], *qb = &m->val[in->a[1]];
 			if (qa->qbits && q_axis_for(m, in->a[0], in) == qa->qaxis) {
@@ -191,12 +200,19 @@ static void exec(VM *vm, const Block *b)
 		}
 		case CLS_TRANS: {
 			const Shape *s = &m->val[in->a[0]].sh;
-			tg_transpose(o, a, s->dim[0], s->dim[1]);
+			if (s->rank == 3) tg_btranspose(o, a, s->dim[0], s->dim[1], s->dim[2]);
+			else tg_transpose(o, a, s->dim[0], s->dim[1]);
 			break;
 		}
 		case CLS_RESHAPE:
 			tg_copy(o, a, n);
 			break;
+		case CLS_SUMTO: {
+			int d[TG_BCAST_DESC];
+			bcast_desc(&m->val[in->a[0]].sh, &m->val[in->a[1]].sh, NULL, d);
+			tg_sum_to(o, a, n, d);
+			break;
+		}
 		case CLS_SCAN: {
 			const Scan *s = in->sc;
 			for (int k = 0; k < s->nc; k++) tg_copy(ptr(vm, s->c[k]), ptr(vm, s->init[k]), shape_numel(&m->val[s->c[k]].sh));

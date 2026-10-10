@@ -289,12 +289,13 @@ static void acc(AD *a, Adj *adj, int v, int c)
 static int red(AD *a, int c, int operand)
 {
 	const Shape *so = SH(a, operand), *sc = SH(a, c);
-	if (so->rank == sc->rank) return c;
+	if (shape_eq(so, sc)) return c;
 	if (so->rank == 0) return E1(a, OP_SUM, c);
-	if (sc->rank != 2 || so->rank != 1)
-		die(a->file, a->line, "autodiff of row broadcasting supports a vector over the rows of a matrix");
-	Shape rows = { 1, { sc->dim[0] } };
-	return E(a, OP_MATMUL, ONES(a, &rows), c); /* ones(R) @ g: column sums */
+	if (sc->rank == 2 && so->rank == 1) {
+		Shape rows = { 1, { sc->dim[0] } };
+		return E(a, OP_MATMUL, ONES(a, &rows), c); /* ones(R) @ g: column sums */
+	}
+	return E(a, OP_SUM_TO, c, operand); /* general broadcasting */
 }
 
 /* ---- row helpers for rank-2 softmax/rmsnorm ------------------------------ */
@@ -315,6 +316,7 @@ static int bcast_rows(AD *a, int v, int cols) /* (r) -> (r,c) */
 
 static void think_vjp(AD *a, Ins t, int g, Adj *adj);
 static int RESHAPE(AD *a, int x, const Shape *to);
+static int ZEROS(AD *a, const Shape *sp);
 static void scan_vjp(AD *a, Ins t, Adj *adj);
 
 static int scan_has_adj(const Ins *in, const Adj *adj)
@@ -405,7 +407,21 @@ static void vjp(AD *a, const Ins *in, int g, Adj *adj)
 	}
 	case OP_MATMUL: {
 		int ra = SH(a, x0)->rank, rb = SH(a, x1)->rank;
-		if (ra == 2 && rb == 1) {
+		if (ra == 3 && rb == 3) { /* batched */
+			if (w0) acc(a, adj, x0, E(a, OP_MATMUL, g, E1(a, OP_TRANSPOSE, x1)));
+			if (w1) acc(a, adj, x1, E(a, OP_MATMUL, E1(a, OP_TRANSPOSE, x0), g));
+		} else if (ra == 3) { /* (G,M,K) @ (K,N) or (K): rows of all groups share the right operand */
+			const Shape *sa = SH(a, x0);
+			Shape flat = { 2, { sa->dim[0] * sa->dim[1], sa->dim[2] } }, gf = { rb == 2 ? 2 : 1, { sa->dim[0] * sa->dim[1], rb == 2 ? SH(a, x1)->dim[1] : 0 } };
+			int af = RESHAPE(a, x0, &flat), gl = RESHAPE(a, g, &gf);
+			if (rb == 2) {
+				if (w0) acc(a, adj, x0, E(a, OP_MATMUL, g, E1(a, OP_TRANSPOSE, x1)));
+				if (w1) acc(a, adj, x1, E(a, OP_MATMUL, E1(a, OP_TRANSPOSE, af), gl));
+			} else {
+				if (w0) acc(a, adj, x0, RESHAPE(a, E(a, OP_OUTER, gl, x1), SH(a, x0)));
+				if (w1) acc(a, adj, x1, E(a, OP_MATMUL, E1(a, OP_TRANSPOSE, af), gl));
+			}
+		} else if (ra == 2 && rb == 1) {
 			if (w0) acc(a, adj, x0, E(a, OP_OUTER, g, x1));
 			if (w1) acc(a, adj, x1, E(a, OP_MATMUL, E1(a, OP_TRANSPOSE, x0), g));
 		} else if (ra == 2 && rb == 2) {
@@ -454,6 +470,9 @@ static void vjp(AD *a, const Ins *in, int g, Adj *adj)
 		return;
 	case OP_TAKE_T: /* linear in g */
 		if (w1) acc(a, adj, x1, E(a, OP_TAKE, g, x0));
+		return;
+	case OP_SUM_TO: /* the gradient broadcasts back over the reduced axes */
+		if (w0) acc(a, adj, x0, E(a, OP_ADD, g, ZEROS(a, SH(a, x0))));
 		return;
 	case OP_TRANSPOSE:
 		acc(a, adj, x0, E1(a, OP_TRANSPOSE, g));

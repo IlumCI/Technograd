@@ -39,7 +39,7 @@ examples/use_import.tg:1,-1,2,-2 examples/delta_memory.tg:1,0,0,0:1,2,3,4 tests/
 tests/sparse/spmm.tg:0,1,2,0.5,5,-1,0,0,1,1,1,1,9,3,-1,2:0.5,-0.5
 tests/sparse/rows.tg:0,1,2,0.5,5,-1,1,1,1,1,9,0.3:0.5,-0.5
 tests/attn/window.tg:0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1,1.1,1.2,1.3,1.4,1.5,1.6,-0.1,-0.2,-0.3,-0.4,-0.5,-0.6,-0.7,-0.8,0.3,0.1,0.4,0.1,0.5,0.9,0.2,0.6,1,0,1,0,1,0,1,0,0,1,0,1,0,1,0,1,0.5,0.5,0.5,0.5,-0.5,-0.5,-0.5,-0.5 tests/scan/scan.tg:1,2,3,4,5,6,7,8:1,0.5,-1,2 tests/think/halt.tg:1,1 tests/think/halt.tg:0,0 tests/scan/nested_grad.tg:0.1,0.2,0.3,-0.4,0.5,0.1,-0.2,0.3 examples/selective_ssm.tg:0.1,0,0.2,0,-0.3,1,0.4,0,0.1,0,0.2,1,-0.1,0,0.3,0,0.2,0,-0.4,1,0.1,0,0.2,0:0.1,0.3,-0.3,0.1,0.2,0.2,0.1,0.4,0.6,-0.4,-0.3,-0.1
-examples/drift_calibration.tg:10,20,30"
+examples/drift_calibration.tg:10,20,30 tests/native/broadcast.tg:1,2,3:0.5,-1,2,0:$(seq -s, -1 0.1 1.3)"
 for c in $CASES; do
 	f=${c%%:*}
 	args=$(echo "${c#*:}" | tr ':' ' ')
@@ -247,7 +247,8 @@ fxcmp() { # MODEL INPUT...: max |fixed - float| over the outputs, from the host 
 }
 for c in "examples/newton.tg 2,9,16" "examples/latent_reasoner.tg 1,0,0,1,0,1,1,0" "tests/cases/ops.tg 1,-2,3,0.5" \
 	"tests/sparse/spmm.tg 0,1,2,0.5,5,-1,0,0,1,1,1,1,9,3,-1,2 0.5,-0.5" "tests/scan/scan.tg 1,2,3,4,5,6,7,8 1,0.5,-1,2" \
-	"$TMP/q4gptq.tgir 0.1,0.2,-0.3,0.4,0.5,-0.6,0.7,0.8,0.9,-0.1,0.2,0.3,0.4,0.5,0.6,0.7 3,0.5,10,1,63,0.25"; do
+	"$TMP/q4gptq.tgir 0.1,0.2,-0.3,0.4,0.5,-0.6,0.7,0.8,0.9,-0.1,0.2,0.3,0.4,0.5,0.6,0.7 3,0.5,10,1,63,0.25" \
+	"tests/native/broadcast.tg 1,2,3 0.5,-1,2,0 $(seq -s, -1 0.1 1.3)"; do
 	set -- $c
 	e=$(fxcmp "$@")
 	awk -v e="$e" 'BEGIN { exit !(e < 5e-4) }' && ok || bad "fixed point $1: max error $e"
@@ -266,7 +267,8 @@ NATIVE="examples/latent_reasoner.tg:1,0,0,1,0,1,1,0 tests/cases/ops.tg:1,-2,3,0.
 tests/think/halt.tg:0,0 tests/sparse/rows.tg:0,1,2,0.5,5,-1,1,1,1,1,9,0.3:0.5,-0.5
 tests/native/matmul.tg:1,2,3,4,5,6,7:$(seq -s, 0.1 0.1 3.5):1,-1,2,-2,0.5:0.5:1,2,3
 examples/selective_ssm.tg:0.1,0,0.2,0,-0.3,1,0.4,0,0.1,0,0.2,1,-0.1,0,0.3,0,0.2,0,-0.4,1,0.1,0,0.2,0:0.1,0.3,-0.3,0.1,0.2,0.2,0.1,0.4,0.6,-0.4,-0.3,-0.1
-$TMP/q4gptq.tgir:0.1,0.2,-0.3,0.4,0.5,-0.6,0.7,0.8,0.9,-0.1,0.2,0.3,0.4,0.5,0.6,0.7:3,0.5,10,1,63,0.25"
+$TMP/q4gptq.tgir:0.1,0.2,-0.3,0.4,0.5,-0.6,0.7,0.8,0.9,-0.1,0.2,0.3,0.4,0.5,0.6,0.7:3,0.5,10,1,63,0.25
+tests/native/broadcast.tg:1,2,3:0.5,-1,2,0:$(seq -s, -1 0.1 1.3)"
 perl -e 'srand(3); for (1..6) { print join(",", map { sprintf("%.1f", 2*rand()-1) } 1..8), "\n" }' > "$TMP/seq6.csv"
 native() { # TARGET TOLERANCE
 	for c in $NATIVE; do

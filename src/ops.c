@@ -41,6 +41,7 @@ const OpInfo tg_ops[OP_COUNT] = {
 	[OP_COS]       = { "cos",       1, CLS_UN },
 	[OP_RESHAPE]   = { "reshape",   1, CLS_RESHAPE },
 	[OP_FLOOR]     = { "floor",     1, CLS_UN },
+	[OP_SUM_TO]    = { "sum_to",    2, CLS_SUMTO },
 	[OP_THINK]     = { "think",     0, CLS_THINK },
 	[OP_SCAN]      = { "scan",      0, CLS_SCAN },
 };
@@ -52,11 +53,26 @@ int op_lookup(const char *name)
 	return -1;
 }
 
+/* Per-group dimensions. (G, M, K) @ (G, K, N) is G products of M x K by
+ * K x N; (G, M, K) @ (K, N) or @ (K) is one product with G * M rows. */
 void matmul_dims(const Shape *a, const Shape *b, int *m, int *k, int *n)
 {
-	*m = a->rank == 2 ? a->dim[0] : 1;
-	*k = a->rank == 2 ? a->dim[1] : a->dim[0];
-	*n = b->rank == 2 ? b->dim[1] : 1;
+	int g = matmul_groups(a, b);
+	*m = a->rank == 3 ? (g > 1 || b->rank == 3 ? a->dim[1] : a->dim[0] * a->dim[1]) : a->rank == 2 ? a->dim[0] : 1;
+	*k = a->dim[a->rank - 1];
+	*n = b->rank >= 2 ? b->dim[b->rank - 1] : 1;
+}
+
+int matmul_groups(const Shape *a, const Shape *b)
+{
+	return a->rank == 3 && b->rank == 3 ? a->dim[0] : 1;
+}
+
+int bin_simple(const Shape *out, const Shape *a, const Shape *b)
+{
+	int n = shape_numel(out), na = shape_numel(a), nb = shape_numel(b);
+	if ((na == n || na == 1) && (nb == n || nb == 1)) return 1;
+	return (shape_eq(a, out) && shape_suffix(b, out)) || (shape_eq(b, out) && shape_suffix(a, out));
 }
 
 void spmm_dims(const Shape *x, const Shape *w, int *rows, int *k, int *d, int *h)
@@ -86,27 +102,39 @@ int op_infer(Op op, const Shape *a, int na, Shape *out, char *err, size_t errn)
 	case CLS_CONST:
 		return 1;
 	case CLS_BIN:
-		if (shape_eq(&a[0], &a[1]) || a[1].rank == 0 || shape_suffix(&a[1], &a[0])) { *out = a[0]; return 1; }
-		if (a[0].rank == 0 || shape_suffix(&a[0], &a[1])) { *out = a[1]; return 1; }
+		if (shape_broadcast(&a[0], &a[1], out)) return 1;
 		shape_str(&a[0], s0, sizeof s0);
 		shape_str(&a[1], s1, sizeof s1);
-		snprintf(err, errn, "'%s' shape mismatch %s vs %s (shapes must be equal, one a scalar, or one the trailing dimensions of the other)", oi->name, s0, s1);
+		snprintf(err, errn, "'%s' shape mismatch %s vs %s (dimensions are compared from the right; each pair must be equal or one of them 1)", oi->name, s0, s1);
 		return 0;
+	case CLS_SUMTO: { /* sum_to(x, like): x summed over the axes like was broadcast along */
+		Shape b;
+		if (!shape_broadcast(&a[0], &a[1], &b) || !shape_eq(&b, &a[0])) {
+			shape_str(&a[0], s0, sizeof s0);
+			shape_str(&a[1], s1, sizeof s1);
+			snprintf(err, errn, "'sum_to' cannot reduce %s to %s (%s must broadcast to %s)", s0, s1, s1, s0);
+			return 0;
+		}
+		*out = a[1];
+		return 1;
+	}
 	case CLS_UN:
 		*out = a[0];
 		return 1;
 	case CLS_MATMUL: {
+		/* (M,K)/(K) @ (K,N)/(K); (G,M,K) @ (K,N)/(K) with a shared right
+		 * operand; (G,M,K) @ (G,K,N) batched */
 		int ra = a[0].rank, rb = a[1].rank;
-		int ka = ra == 2 ? a[0].dim[1] : ra == 1 ? a[0].dim[0] : -1;
-		int kb = rb >= 1 ? a[1].dim[0] : -1;
-		if (ra < 1 || ra > 2 || rb < 1 || rb > 2 || ka != kb) {
+		int ka = ra >= 1 ? a[0].dim[ra - 1] : -1;
+		int kb = rb == 3 ? a[1].dim[1] : rb >= 1 ? a[1].dim[0] : -1;
+		if (ra < 1 || ra > 3 || rb < 1 || rb > 3 || ka != kb || (rb == 3 && (ra != 3 || a[0].dim[0] != a[1].dim[0]))) {
 			shape_str(&a[0], s0, sizeof s0);
 			shape_str(&a[1], s1, sizeof s1);
 			snprintf(err, errn, "'matmul' incompatible operands %s @ %s", s0, s1);
 			return 0;
 		}
-		if (ra == 2) out->dim[out->rank++] = a[0].dim[0];
-		if (rb == 2) out->dim[out->rank++] = a[1].dim[1];
+		for (int i = 0; i < ra - 1; i++) out->dim[out->rank++] = a[0].dim[i];
+		if (rb >= 2) out->dim[out->rank++] = a[1].dim[rb - 1];
 		return 1;
 	}
 	case CLS_ROW:
@@ -119,13 +147,13 @@ int op_infer(Op op, const Shape *a, int na, Shape *out, char *err, size_t errn)
 	case CLS_RED:
 		return 1; /* scalar */
 	case CLS_TRANS:
-		if (a[0].rank != 2) {
-			snprintf(err, errn, "'transpose' needs rank 2");
+		if (a[0].rank != 2 && a[0].rank != 3) {
+			snprintf(err, errn, "'transpose' needs rank 2, or rank 3 (the last two axes swap)");
 			return 0;
 		}
-		out->rank = 2;
-		out->dim[0] = a[0].dim[1];
-		out->dim[1] = a[0].dim[0];
+		*out = a[0];
+		out->dim[out->rank - 2] = a[0].dim[a[0].rank - 1];
+		out->dim[out->rank - 1] = a[0].dim[a[0].rank - 2];
 		return 1;
 	case CLS_OUTER:
 		if (a[0].rank != 1 || a[1].rank != 1) {
