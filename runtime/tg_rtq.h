@@ -14,10 +14,12 @@
 
 #include <stdint.h>
 
+#ifndef TG_FN /* tgc asm --support defines it empty: extern kernels for native code */
 #if defined(__GNUC__) || defined(__clang__)
 #define TG_FN static inline __attribute__((unused))
 #else
 #define TG_FN static inline
+#endif
 #endif
 
 typedef int32_t tg_t;
@@ -156,6 +158,7 @@ TG_FN void tg_gelu(tg_t *o, const tg_t *a, int n)
 }
 
 /* ---- linear algebra --------------------------------------------------------- */
+#ifndef TG_ASM_MATMUL /* a native backend supplies its own */
 TG_FN void tg_matmul(tg_t *o, const tg_t *a, const tg_t *b, int m, int k, int n)
 {
 	for (int i = 0; i < m; i++)
@@ -165,6 +168,9 @@ TG_FN void tg_matmul(tg_t *o, const tg_t *a, const tg_t *b, int m, int k, int n)
 			o[i * n + j] = tg_sat((s + 32768) >> 16);
 		}
 }
+#else
+TG_FN void tg_matmul(tg_t *o, const tg_t *a, const tg_t *b, int m, int k, int n);
+#endif
 
 TG_FN int tg_qget(const signed char *q, int bits, int i)
 {
@@ -409,6 +415,30 @@ TG_FN void tg_fx_format(tg_t v, char *buf)
 	int k = 0;
 	while (n) buf[k++] = t[--n];
 	buf[k] = 0;
+}
+
+/* ---- loop control and broadcasting for native backends (tgc asm) ---------- */
+TG_FN int tg_k_think(tg_t *o, const tg_t *y, int n, const tg_t *eps, const tg_t *p, tg_t *sv, const tg_t *thr)
+{
+	tg_t d = tg_delta(y, o, n);
+	tg_copy(o, y, n);
+	if (eps && d <= *eps) return 1;
+	if (p) {
+		tg_t q = *p < 0 ? 0 : *p > TG_ONE ? TG_ONE : *p;
+		*sv = tg_fmul(*sv, TG_ONE - q);
+		if (TG_ONE - *sv > *thr) return 1;
+	}
+	return 0;
+}
+TG_FN void tg_k_bin(int op, tg_t *o, const tg_t *a, int na, const tg_t *b, int nb, int n)
+{
+	void (*k)(tg_t *, const tg_t *, int, const tg_t *, int, int) = op == 0 ? tg_add : op == 1 ? tg_sub : op == 2 ? tg_mul : op == 3 ? tg_div : op == 4 ? tg_max : tg_min;
+	if ((na == n || na == 1) && (nb == n || nb == 1)) {
+		k(o, a, na == n, b, nb == n, n);
+		return;
+	}
+	int w = na < n ? na : nb;
+	for (int r = 0; r < n / w; r++) k(o + r * w, na < n ? a : a + r * w, 1, nb < n ? b : b + r * w, 1, w);
 }
 
 #endif

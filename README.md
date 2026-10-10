@@ -32,7 +32,7 @@ make            # builds build/tgc (C11, no dependencies beyond libm; perl at bu
 build/tgc train hf:scikit-learn/iris            # any dataset, no configuration: detect, featurize, train, export
 build/tgc train reviews.csv --model ssm         # adds a Mamba-3-style sequence layer over the words
 build/tgc predict iris_model new_flowers.csv     # predictions on raw new data
-make test       # 243 checks (offline; TG_TEST_NETWORK=1 adds a Hugging Face run)
+make test       # 276 checks (offline; TG_TEST_NETWORK=1 adds a Hugging Face run)
 make fixer      # retrain the auto-fix forest (deterministic, ~15 s) and evaluate it on held-out programs
 
 build/tgc run  examples/latent_reasoner.tg 1,0,0,1,0,1,1,0
@@ -55,6 +55,8 @@ build/tgc plan examples/latent_reasoner.tg   # arena layout: 320 B instead of 62
 build/tgc c    examples/latent_reasoner.tg -o reasoner.c
 build/tgc c    examples/latent_reasoner.tg --fixed -o reasoner_q16.c   # Q16.16 integers: no FPU needed
 build/tgc quantize model.tg --bits 4 --method gptq --calib rows.csv   # int4 weights, per-channel scales
+build/tgc asm  examples/latent_reasoner.tg --target cortex-m4f -o reasoner.s   # native: cortex-m3 (Q16.16), cortex-m4f, rv64gcv
+build/tgc asm  examples/latent_reasoner.tg --target cortex-m4f --support -o support.c   # kernels + driver to link with it
 cc -O2 -DTG_MAIN reasoner.c -lm -o reasoner && ./reasoner 1,0,0,1,0,1,1,0
 ```
 
@@ -208,8 +210,9 @@ every failure.
   S-expressions. The toolchain is C11 because it is the lowest portable layer
   above assembly, has no runtime, and can host the compiler on the same
   class of targets it compiles for. Perl is used only at build time, to embed
-  the kernel library into emitted units. An assembly backend fits naturally
-  as a later code generator from the same planned IR (see roadmap).
+  the kernel library into emitted units. `tgc asm` is that code
+  generator. It emits native code from the same planned IR for Cortex-M3 in
+  fixed point, Cortex-M4F and RV64GCV, and hand-writes matmul for each.
 - **One source of arithmetic.** The VM and the generated code call the same
   kernels (`runtime/tg_rt.h`). The test suite checks that their outputs match
   byte for byte.
@@ -218,6 +221,7 @@ every failure.
 
 - Coconut, continuous latent reasoning: Hao et al., *Training Large Language Models to Reason in a Continuous Latent Space*, [arXiv:2412.06769](https://arxiv.org/abs/2412.06769). This is the source of `think`: the hidden state is the next input. `examples/coconut/` runs its multi-stage curriculum in the language, by backpropagation through fixed-budget think loops.
 - Learned halting: PonderNet, Banino et al., [arXiv:2107.05407](https://arxiv.org/abs/2107.05407), for `think ... halt p` and `examples/ponder/`.
+- Native kernels: CMSIS-NN, Lai et al., [arXiv:1801.06601](https://arxiv.org/abs/1801.06601), for the Cortex-M `SMLAL` matmul; vector-length-agnostic RVV 1.0 GEMM, [arXiv:2311.05284](https://arxiv.org/abs/2311.05284), for `rv64gcv`.
 - Quantization: GPTQ, Frantar et al., [arXiv:2210.17323](https://arxiv.org/abs/2210.17323), for `tgc quantize --method gptq`; per-channel weight-only int8/int4 with clipping search for `rtn`.
 - Attention: rotary position embedding (RoFormer), [arXiv:2104.09864](https://arxiv.org/abs/2104.09864); sliding-window causal attention with a rolling key/value buffer as in Mistral 7B, [arXiv:2310.06825](https://arxiv.org/abs/2310.06825). This is the basis for `rope`, `attention` and `examples/kv_attention.tg`.
 - Recurrent depth with input re-injection: Geiping et al., *Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach*, [arXiv:2502.05171](https://arxiv.org/abs/2502.05171). This is the pattern used in `examples/latent_reasoner.tg`.

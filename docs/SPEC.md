@@ -1124,7 +1124,77 @@ Training in fixed point is not supported: optimizer updates (lr x
 gradient, Adam's second moments) fall below the 1.5e-5 resolution. Train
 in float and deploy the fixed-point unit.
 
-## 22. Roadmap
+## 22. Native backends
+
+`tgc asm MODEL --target T` emits assembly for the whole model function
+from the planned IR. Every operand address is fixed at compile time: arena
+offsets, weight and state symbols, and the input pointers saved in the
+frame. Native code runs the `think` and `scan` loops (counters in frame
+slots, learned-halting survival in a static word) and the two-phase update
+commit. Weights go to `.rodata`. A quantized parameter keeps only its codes
+and scales unless a use needs f32. Each IR instruction becomes one call
+with the operand addresses as arguments.
+
+| target | ISA and ABI | arithmetic | hand-written `tg_matmul` |
+|---|---|---|---|
+| `cortex-m3` | ARMv7-M Thumb-2, soft float | Q16.16, same as `tgc c --fixed` | `SMLAL` 32x32->64 accumulate, one rounding, saturation |
+| `cortex-m4f` | ARMv7E-M + FPv4-SP, hard float | f32 | `VFMA.F32` |
+| `rv64gcv` | RV64GC + V 1.0, LP64D | f32 | vector-length agnostic: `vfmacc.vf` over strips of output columns; `vfmacc.vv` + `vfredusum` for matrix-vector |
+
+The other kernels come from the support unit (`tgc asm MODEL --target T
+--support -o support.c`). It holds the runtime of `runtime/tg_rt.h` (or
+`tg_rtq.h` for `cortex-m3`) compiled as extern functions, with
+`TG_ASM_MATMUL` removing the C matmul. It also has the `TG_MAIN` test
+driver. The assembly uses no floating-point registers outside `tg_matmul`.
+Loop termination (`tg_k_think`: convergence delta, PonderNet survival) and
+broadcasting (`tg_k_bin`) are calls. One generator therefore covers the
+soft-float, hard-float and fixed-point ABIs.
+
+```sh
+tgc asm model.tg --target cortex-m4f -o model.s
+tgc asm model.tg --target cortex-m4f --support -o support.c
+arm-none-eabi-gcc -mcpu=cortex-m4 -mthumb -mfloat-abi=hard -mfpu=fpv4-sp-d16 -O2 \
+    -ffunction-sections -Wl,--gc-sections firmware.c support.c model.s -lm
+```
+
+The exported symbols are the same as for a C unit: `tg_<m>_run`,
+`tg_<m>_steps` and `tg_<m>_state_<name>`. The one exception is
+`tg_<m>_reset`, which is not emitted.
+
+### Verification
+
+`tests/mcu/native.sh` builds each unit and runs it. ARM targets run on
+QEMU `mps2-an385` (Cortex-M3, no FPU) and `mps2-an386` (Cortex-M4F) with
+semihosting. RISC-V runs under `qemu-riscv64` with `v=true` at VLEN 128 and
+256. The script compares each run with the VM. The suite covers
+`latent_reasoner`, every op class (`tests/cases/ops.tg`), `scan`, learned
+halting, row-sparse `spmm`, the selective SSM, int4 GPTQ weights, a
+self-updating memory over ten runs, the KV ring with row updates, and
+`tests/native/matmul.tg`. That last model covers m > 1, n = 37 (not a
+multiple of any VL), k = 1 and five inputs, which puts arguments on the
+stack on every target.
+
+| target | largest difference vs VM (relative to max(1, \|y\|)) | think/scan steps |
+|---|---|---|
+| `cortex-m4f` | 1.2e-7 (FMA contraction) | equal |
+| `rv64gcv` | 1.2e-7 (VLEN 128, 256, 1024) | equal |
+| `cortex-m3` | 4.6e-5 (Q16.16) | equal on the suite |
+
+The Cortex-M3 output is bit-identical to the `--fixed` C unit compiled for
+the host. The `SMLAL` kernel rounds and saturates exactly like
+`tg_rtq.h`, so a convergence loop stops at the same step as the C unit. In
+three of the eighteen sweep models, Q16.16 deltas move the stopping step of
+a convergence loop relative to the f32 VM. The same happens with
+`tgc c --fixed`. The M3 objects reference no floating-point helpers, only
+`__aeabi_ldivmod`. For `latent_reasoner` the native object is 3756 bytes
+of text against 5172 for the `-O2` C unit (kernels excluded from both).
+
+References: CMSIS-NN, Lai et al.,
+[arXiv:1801.06601](https://arxiv.org/abs/1801.06601) (Cortex-M kernels
+with 64-bit `SMLAL` accumulation). Vector-length-agnostic RVV 1.0 GEMM
+kernels: [arXiv:2311.05284](https://arxiv.org/abs/2311.05284).
+
+## 23. Roadmap
 
 Ordered by importance for latent-reasoning models on embedded targets:
 
@@ -1136,5 +1206,3 @@ Ordered by importance for latent-reasoning models on embedded targets:
 2. Distributed execution: multiple processes over `serve`/`stream`
    transports, then data-parallel training with gradients and optimizer
    state partitioned across them (ZeRO, arXiv:1910.02054).
-3. Native backends from the planned IR: ARMv7-M/ARMv8-M assembly with
-   CMSIS-NN style kernels, and RISC-V with the vector extension.

@@ -8,10 +8,12 @@
 
 #include <math.h>
 
+#ifndef TG_FN /* tgc asm --support defines it empty: extern kernels for native code */
 #if defined(__GNUC__) || defined(__clang__)
 #define TG_FN static inline __attribute__((unused))
 #else
 #define TG_FN static inline
+#endif
 #endif
 
 TG_FN void tg_copy(float *o, const float *a, int n)
@@ -72,6 +74,7 @@ TG_FN void tg_floor(float *o, const float *a, int n)
 TG_FN void tg_step(float *o, const float *a, int n)
 { for (int i = 0; i < n; i++) o[i] = a[i] > 0.0f ? 1.0f : 0.0f; }
 
+#ifndef TG_ASM_MATMUL /* a native backend supplies its own */
 /* o[m,n] = a[m,k] @ b[k,n]. o must not alias a or b. */
 TG_FN void tg_matmul(float *o, const float *a, const float *b, int m, int k, int n)
 {
@@ -82,6 +85,9 @@ TG_FN void tg_matmul(float *o, const float *a, const float *b, int m, int k, int
 			o[i * n + j] = s;
 		}
 }
+#else
+TG_FN void tg_matmul(float *o, const float *a, const float *b, int m, int k, int n);
+#endif
 
 /* Quantized weights: signed int8 codes, or int4 codes packed two per byte
  * (element i in byte i/2, low nibble first), times one f32 scale per output
@@ -328,6 +334,32 @@ TG_FN float tg_delta(const float *a, const float *b, int n)
 	float d = 0.0f;
 	for (int i = 0; i < n; i++) { float e = fabsf(a[i] - b[i]); if (e > d) d = e; }
 	return d;
+}
+
+/* ---- loop control and broadcasting for native backends (tgc asm) ---------
+ * Generated assembly never touches floating-point registers: think-loop
+ * halting and row broadcasting are these calls. */
+TG_FN int tg_k_think(float *o, const float *y, int n, const float *eps, const float *p, float *sv, const float *thr)
+{
+	float d = tg_delta(y, o, n);
+	tg_copy(o, y, n);
+	if (eps && d <= *eps) return 1;
+	if (p) {
+		float q = *p < 0.0f ? 0.0f : *p > 1.0f ? 1.0f : *p;
+		*sv *= 1.0f - q;
+		if (1.0f - *sv > *thr) return 1;
+	}
+	return 0;
+}
+TG_FN void tg_k_bin(int op, float *o, const float *a, int na, const float *b, int nb, int n)
+{
+	void (*k)(float *, const float *, int, const float *, int, int) = op == 0 ? tg_add : op == 1 ? tg_sub : op == 2 ? tg_mul : op == 3 ? tg_div : op == 4 ? tg_max : tg_min;
+	if ((na == n || na == 1) && (nb == n || nb == 1)) {
+		k(o, a, na == n, b, nb == n, n);
+		return;
+	}
+	int w = na < n ? na : nb;
+	for (int r = 0; r < n / w; r++) k(o + r * w, na < n ? a : a + r * w, 1, nb < n ? b : b + r * w, 1, w);
 }
 
 #endif

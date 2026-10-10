@@ -15,6 +15,8 @@ static void usage(void)
 	      "  stream <file> [src] [-o dst]    row in, row out, flushed; src/dst: - (std), a file, or tcp://HOST:PORT\n"
 	      "  serve <file> --listen [HOST:]PORT   TCP row protocol and HTTP (GET /health, GET /, POST /run)\n"
 	      "  c     <file> [-o out.c] [--fixed]   emit a freestanding C unit; --fixed: Q16.16 integers, no FPU\n"
+	      "  asm   <file> --target T [-o out.s]    native assembly: cortex-m3 (Q16.16), cortex-m4f, rv64gcv\n"
+	      "  asm   <file> --target T --support [-o support.c]   runtime kernels + test driver to link with it\n"
 	      "  quantize <file> [-o out.tgir] [--bits 8|4] [--method rtn|gptq] [--calib data]   int8/int4 weights\n"
 	      "  fix   <file> [-o out.tg]  repair compile errors with the neural-forest fixer\n"
 	      "  train SOURCE [-o DIR] [--target COL] ...  train a model on a dataset file or hf:OWNER/NAME\n"
@@ -286,11 +288,17 @@ static Module *load_fixed(const char *path)
 
 int main(int argc, char **argv)
 {
-	int fix = 0, k = 1, threads = 1, fixed = 0;
-	const char *save_state = NULL;
+	int fix = 0, k = 1, threads = 1, fixed = 0, support = 0;
+	const char *save_state = NULL, *target = NULL;
+	int is_asm = argc > 1 && strcmp(argv[1], "asm") == 0;
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--autofix") == 0) fix = 1;
 		else if (strcmp(argv[i], "--fixed") == 0) fixed = 1;
+		else if (is_asm && strcmp(argv[i], "--support") == 0) support = 1;
+		else if (is_asm && strcmp(argv[i], "--target") == 0) { /* train has its own --target */
+			if (++i == argc) usage();
+			target = argv[i];
+		}
 		else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) tg_verbose = tg_verbose > 1 ? tg_verbose : 1;
 		else if (strcmp(argv[i], "-vv") == 0) tg_verbose = 2;
 		else if (strcmp(argv[i], "--save-state") == 0) {
@@ -443,6 +451,18 @@ int main(int argc, char **argv)
 			tr_num("arena_bytes", m->arena * 4);
 			tr_end("emitted C unit for %s to %s", m->name, f == stdout ? "stdout" : argv[4]);
 		}
+		if (f != stdout && fclose(f) != 0) die(NULL, 0, "write failed '%s'", argv[4]);
+	} else if (strcmp(cmd, "asm") == 0) {
+		if (!target) die(NULL, 0, "asm needs --target cortex-m3|cortex-m4f|rv64gcv");
+		FILE *f = stdout;
+		if (argc == 5 && strcmp(argv[3], "-o") == 0) {
+			f = fopen(argv[4], "w");
+			if (!f) die(NULL, 0, "cannot write '%s'", argv[4]);
+		} else if (argc != 3) {
+			usage();
+		}
+		if (support) cgen_support(m, f, asm_target_fixed(target));
+		else asmgen(m, f, target);
 		if (f != stdout && fclose(f) != 0) die(NULL, 0, "write failed '%s'", argv[4]);
 	} else {
 		usage();

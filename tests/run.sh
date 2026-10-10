@@ -214,8 +214,7 @@ if command -v curl > /dev/null; then
 	[ "$(curl -s "http://127.0.0.1:$PORT/health")" = ok ] && ok || bad "serve /health"
 	curl -s "http://127.0.0.1:$PORT/" | grep -q '"values_per_row":8,"think_loops":0,"stateful":true' && ok || bad "serve signature"
 	head -4 tests/state/mem.csv | curl -s --data-binary @- "http://127.0.0.1:$PORT/run" > "$TMP/srv.out"
-	exec 8<>"/dev/tcp/127.0.0.1/$PORT"; sed -n 5,6p tests/state/mem.csv >&8; read -r r1 <&8; read -r r2 <&8; exec 8>&-
-	printf '%s\n%s\n' "$r1" "$r2" >> "$TMP/srv.out"
+	sed -n 5,6p tests/state/mem.csv | perl -MIO::Socket::INET -e '$c = IO::Socket::INET->new("127.0.0.1:$ARGV[0]") or die; $c->autoflush(1); while (<STDIN>) { print $c $_; print scalar <$c> }' $PORT >> "$TMP/srv.out"
 	kill -TERM $SPID; wait $SPID; st=$?
 	head -6 tests/state/mem.csv > "$TMP/mem6.csv"
 	$TGC batch examples/delta_memory.tg "$TMP/mem6.csv" -o "$TMP/bat.out" --save-state "$TMP/bt"
@@ -261,6 +260,42 @@ if command -v arm-none-eabi-gcc > /dev/null && command -v qemu-system-arm > /dev
 	tests/mcu/run.sh cortex-m3 "$TMP/lr_fx.c" "$TMP/lr_m3.elf" 1,0,0,1,0,1,1,0 > "$TMP/m3.out" 2>&1
 	head -1 "$TMP/m3.out" | tr ' ' '\n' > "$TMP/m3a"; $TGC run examples/latent_reasoner.tg 1,0,0,1,0,1,1,0 | head -1 | tr ' ' '\n' > "$TMP/m3b"
 	paste "$TMP/m3a" "$TMP/m3b" | awk '{ d = $1 - $2; if (d < 0) d = -d; if (d > m) m = d } END { exit !(NR == 4 && m < 1e-4) }' && grep -q "steps 0 9" "$TMP/m3.out" && ok || bad "Cortex-M3 run: $(cat "$TMP/m3.out")"
+fi
+# native backends (tgc asm): Cortex-M3 Q16.16 with SMLAL, Cortex-M4F with VFMA, RV64GCV with RVV; against the VM
+NATIVE="examples/latent_reasoner.tg:1,0,0,1,0,1,1,0 tests/cases/ops.tg:1,-2,3,0.5 tests/scan/scan.tg:1,2,3,4,5,6,7,8:1,0.5,-1,2
+tests/think/halt.tg:0,0 tests/sparse/rows.tg:0,1,2,0.5,5,-1,1,1,1,1,9,0.3:0.5,-0.5
+tests/native/matmul.tg:1,2,3,4,5,6,7:$(seq -s, 0.1 0.1 3.5):1,-1,2,-2,0.5:0.5:1,2,3
+examples/selective_ssm.tg:0.1,0,0.2,0,-0.3,1,0.4,0,0.1,0,0.2,1,-0.1,0,0.3,0,0.2,0,-0.4,1,0.1,0,0.2,0:0.1,0.3,-0.3,0.1,0.2,0.2,0.1,0.4,0.6,-0.4,-0.3,-0.1
+$TMP/q4gptq.tgir:0.1,0.2,-0.3,0.4,0.5,-0.6,0.7,0.8,0.9,-0.1,0.2,0.3,0.4,0.5,0.6,0.7:3,0.5,10,1,63,0.25"
+perl -e 'srand(3); for (1..6) { print join(",", map { sprintf("%.1f", 2*rand()-1) } 1..8), "\n" }' > "$TMP/seq6.csv"
+native() { # TARGET TOLERANCE
+	for c in $NATIVE; do
+		f=${c%%:*}
+		r=$(tests/mcu/native.sh "$TGC" "$TMP" "$1" "$f" $(echo "${c#*:}" | tr ':' ' ') 2>&1 | tail -1)
+		echo "$r" | awk -v t="$2" '{ exit !(NF == 2 && $1 < t && $2 == "same") }' && ok || bad "native $1 $f: $r"
+	done
+	tests/mcu/native.sh "$TGC" "$TMP" "$1" examples/delta_memory.tg 1,0,0,0 1,2,3,4 0,1,0,0 5,6,7,8 1,0,0,0 0,0,0,0 0,1,0,0 0,0,0,0 1,0,0,0 9,9,9,9 > /dev/null 2>&1
+	tr ' ' '\n' < "$TMP/native_$1.out" | awk '{ printf "%s%g", NR % 4 == 1 ? (NR > 1 ? "\n" : "") : ",", $1 } END { print "" }' > "$TMP/nat_dm"
+	cmp -s "$TMP/nat_dm" tests/state/mem.expected && ok || bad "native $1 self-updating state: $(tr '\n' ' ' < "$TMP/nat_dm")"
+	tests/mcu/native.sh "$TGC" "$TMP" "$1" examples/kv_attention.tg $(cat "$TMP/seq6.csv") > /dev/null 2>&1
+	$TGC batch examples/kv_attention.tg "$TMP/seq6.csv" | tr ',' '\n' > "$TMP/nat_kvb"
+	tr ' ' '\n' < "$TMP/native_$1.out" | paste - "$TMP/nat_kvb" | awk -v t="$2" '{ d = $1 - $2; if (d < 0) d = -d; if (d > m) m = d } END { exit !(NR == 48 && m < t) }' && ok || bad "native $1 KV ring (row updates)"
+}
+if command -v arm-none-eabi-gcc > /dev/null && command -v qemu-system-arm > /dev/null; then
+	native cortex-m3 5e-4
+	$TGC c examples/latent_reasoner.tg --fixed -o "$TMP/lrh.c" && $CC -std=c99 -O2 -DTG_MAIN -o "$TMP/lrh" "$TMP/lrh.c"
+	tests/mcu/native.sh "$TGC" "$TMP" cortex-m3 examples/latent_reasoner.tg 1,0,0,1,0,1,1,0 > /dev/null 2>&1
+	"$TMP/lrh" 1,0,0,1,0,1,1,0 | cmp -s - "$TMP/native_cortex-m3.out" && ok || bad "Cortex-M3 native not bit-identical to the fixed-point C unit"
+	arm-none-eabi-gcc -mcpu=cortex-m3 -mthumb -mfloat-abi=soft -O2 -std=c99 -Wall -Wextra -Werror -c "$TMP/native_cortex-m3.c" -o "$TMP/nat3.o" \
+		&& arm-none-eabi-gcc -mcpu=cortex-m3 -mthumb -c "$TMP/native_cortex-m3.s" -o "$TMP/nat3s.o" \
+		&& [ -z "$(arm-none-eabi-nm -u "$TMP/nat3.o" "$TMP/nat3s.o" | grep -v -E '^$|:$|__aeabi_u?ldivmod$|memset$|tg_matmul$|tg_latent_reasoner_(run|steps)$|tg_(copy|k_[a-z]+|rmsnorm|softmax|tanh)$')" ] \
+		&& ok || bad "Cortex-M3 native unit needs float support: $(arm-none-eabi-nm -u "$TMP/nat3.o" "$TMP/nat3s.o" | tr '\n' ' ')"
+	native cortex-m4f 1e-5
+fi
+if command -v riscv64-linux-gnu-gcc > /dev/null && command -v qemu-riscv64-static > /dev/null; then
+	native rv64gcv 1e-5
+	r=$(TG_VLEN=256 tests/mcu/native.sh "$TGC" "$TMP" rv64gcv tests/native/matmul.tg 1,2,3,4,5,6,7 "$(seq -s, 0.1 0.1 3.5)" 1,-1,2,-2,0.5 0.5 1,2,3 2>&1 | tail -1)
+	echo "$r" | awk '{ exit !(NF == 2 && $1 < 1e-5 && $2 == "same") }' && ok || bad "rv64gcv at VLEN 256: $r"
 fi
 # learned halting (PonderNet): steps follow the difficulty; a fixed budget overshoots
 sh examples/ponder/run.sh "$TGC" "$TMP/ponder" 20000 > "$TMP/ponder.log" 2>&1

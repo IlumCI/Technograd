@@ -56,7 +56,7 @@ static int needs_f32_block(const Module *m, int v, const Block *b)
 	return 0;
 }
 
-static int needs_f32(const Module *m, int v)
+int cgen_needs_f32(const Module *m, int v)
 {
 	if (!m->val[v].qbits || m->output == v) return 1;
 	for (int i = 0; i < m->nupd; i++)
@@ -311,6 +311,44 @@ static void driver_fixed(G *g, int outn)
 	fputs("\t}\n\treturn 0;\n}\n#endif\n", f);
 }
 
+/* Optional test driver; output format matches `tgc run`. */
+static void driver_float(G *g, int outn)
+{
+	const Module *m = g->m;
+	const char *nm = m->name;
+	FILE *f = g->f;
+	fprintf(f, "\n#ifdef TG_MAIN\n#include <stdio.h>\n#include <stdlib.h>\n\n"
+		   "static int tg_parse(const char *s, float *v, int n)\n{\n"
+		   "\tint k = 0;\n\tchar *e;\n"
+		   "\tfor (;;) {\n\t\tif (k == n) return 0;\n\t\tv[k++] = strtof(s, &e);\n"
+		   "\t\tif (e == s) return 0;\n\t\tif (!*e) break;\n\t\tif (*e != ',') return 0;\n\t\ts = e + 1;\n\t}\n"
+		   "\treturn k == n;\n}\n\n"
+		   "int main(int argc, char **argv)\n{\n");
+	for (int i = 0; i < m->ninputs; i++) {
+		const Value *x = &m->val[m->inputs[i]];
+		fprintf(f, "\tstatic float in%d[%d];\n", i, shape_numel(&x->sh));
+	}
+	fprintf(f, "\tstatic float out[%d];\n", outn);
+	/* Each group of NIN arguments is one sample; samples run in order in one
+	 * process, so a self-updating unit carries its state across them. */
+	fprintf(f, "\tif (argc < 2 || (argc - 1) %% %d) { fprintf(stderr, \"usage: %%s", m->ninputs);
+	for (int i = 0; i < m->ninputs; i++) fprintf(f, " %s", m->val[m->inputs[i]].name);
+	fputs(" [more samples...]\\n\", argv[0]); return 2; }\n", f);
+	fprintf(f, "\tfor (int s = 1; s < argc; s += %d) {\n", m->ninputs);
+	for (int i = 0; i < m->ninputs; i++) {
+		const Value *x = &m->val[m->inputs[i]];
+		fprintf(f, "\t\tif (!tg_parse(argv[s + %d], in%d, %d)) { fprintf(stderr, \"input '%s' needs %d comma-separated values\\n\"); return 2; }\n",
+			i, i, shape_numel(&x->sh), x->name, shape_numel(&x->sh));
+	}
+	fprintf(f, "\t\ttg_%s_run(", nm);
+	for (int i = 0; i < m->ninputs; i++) fprintf(f, "in%d, ", i);
+	fputs("out);\n", f);
+	fprintf(f, "\t\tfor (int i = 0; i < %d; i++) printf(\"%%s%%.9g\", i ? \" \" : \"\", (double)out[i]);\n\t\tputchar('\\n');\n", outn);
+	if (m->nthink)
+		fprintf(f, "\t\tfor (int i = 0; i < %d; i++) printf(\"steps %%d %%d\\n\", i, tg_%s_steps[i]);\n", m->nthink, nm);
+	fputs("\t}\n\treturn 0;\n}\n#endif\n", f);
+}
+
 void cgen_mode(const Module *m, FILE *f, int fixed)
 {
 	FX = fixed;
@@ -367,7 +405,7 @@ void cgen(const Module *m, FILE *f)
 				fputs(i + 1 < nch ? ", " : "\n", f);
 			}
 			fputs("};\n", f);
-			if (!needs_f32(m, v)) continue;
+			if (!cgen_needs_f32(m, v)) continue;
 		}
 		fprintf(f, "static const %s tgp_%s[%d] = {", TY, x->name, n);
 		for (int i = 0; i < n; i++) {
@@ -450,35 +488,26 @@ void cgen(const Module *m, FILE *f)
 		driver_fixed(&g, outn);
 		return;
 	}
-	/* Optional test driver; output format matches `tgc run`. */
-	fprintf(f, "\n#ifdef TG_MAIN\n#include <stdio.h>\n#include <stdlib.h>\n\n"
-		   "static int tg_parse(const char *s, float *v, int n)\n{\n"
-		   "\tint k = 0;\n\tchar *e;\n"
-		   "\tfor (;;) {\n\t\tif (k == n) return 0;\n\t\tv[k++] = strtof(s, &e);\n"
-		   "\t\tif (e == s) return 0;\n\t\tif (!*e) break;\n\t\tif (*e != ',') return 0;\n\t\ts = e + 1;\n\t}\n"
-		   "\treturn k == n;\n}\n\n"
-		   "int main(int argc, char **argv)\n{\n");
-	for (int i = 0; i < m->ninputs; i++) {
-		const Value *x = &m->val[m->inputs[i]];
-		fprintf(f, "\tstatic float in%d[%d];\n", i, shape_numel(&x->sh));
-	}
-	fprintf(f, "\tstatic float out[%d];\n", outn);
-	/* Each group of NIN arguments is one sample; samples run in order in one
-	 * process, so a self-updating unit carries its state across them. */
-	fprintf(f, "\tif (argc < 2 || (argc - 1) %% %d) { fprintf(stderr, \"usage: %%s", m->ninputs);
-	for (int i = 0; i < m->ninputs; i++) fprintf(f, " %s", m->val[m->inputs[i]].name);
-	fputs(" [more samples...]\\n\", argv[0]); return 2; }\n", f);
-	fprintf(f, "\tfor (int s = 1; s < argc; s += %d) {\n", m->ninputs);
-	for (int i = 0; i < m->ninputs; i++) {
-		const Value *x = &m->val[m->inputs[i]];
-		fprintf(f, "\t\tif (!tg_parse(argv[s + %d], in%d, %d)) { fprintf(stderr, \"input '%s' needs %d comma-separated values\\n\"); return 2; }\n",
-			i, i, shape_numel(&x->sh), x->name, shape_numel(&x->sh));
-	}
-	fprintf(f, "\t\ttg_%s_run(", nm);
-	for (int i = 0; i < m->ninputs; i++) fprintf(f, "in%d, ", i);
-	fputs("out);\n", f);
-	fprintf(f, "\t\tfor (int i = 0; i < %d; i++) printf(\"%%s%%.9g\", i ? \" \" : \"\", (double)out[i]);\n\t\tputchar('\\n');\n", outn);
-	if (m->nthink)
-		fprintf(f, "\t\tfor (int i = 0; i < %d; i++) printf(\"steps %%d %%d\\n\", i, tg_%s_steps[i]);\n", m->nthink, nm);
-	fputs("\t}\n\treturn 0;\n}\n#endif\n", f);
+	driver_float(&g, outn);
+}
+
+/* Support unit for a native backend (tgc asm --support): the runtime kernels
+ * as extern functions (tg_matmul excluded: the assembly brings its own), the
+ * model's prototypes, and the TG_MAIN driver. */
+void cgen_support(const Module *m, FILE *f, int fixed)
+{
+	FX = fixed;
+	G g = { m, f };
+	int outn = shape_numel(&m->val[m->output].sh);
+	fprintf(f, "/* Technograd support unit for the native model '%s'. Do not edit.\n"
+		   " * Link with the assembly from tgc asm; it defines tg_%s_run, the weights,\n"
+		   " * the arena, tg_%s_steps and tg_%s_state_<name>. */\n#define TG_FN\n#define TG_ASM_MATMUL\n", m->name, m->name, m->name, m->name);
+	const char *const *rt = FX ? tg_rtq_lines : tg_rt_lines;
+	for (int i = 0; rt[i]; i++) fputs(rt[i], f);
+	fprintf(f, "\nextern int tg_%s_steps[%d];\n", m->name, m->nthink ? m->nthink : 1);
+	signature(&g);
+	fputs(";\n", f);
+	if (FX) driver_fixed(&g, outn);
+	else driver_float(&g, outn);
+	FX = 0;
 }

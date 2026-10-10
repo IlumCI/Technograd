@@ -2,7 +2,7 @@ CC      ?= cc
 CFLAGS  ?= -std=c11 -O2 -Wall -Wextra -Wpedantic
 LDLIBS  = -lm -pthread
 
-SRC = src/util.c src/sexp.c src/ops.c src/parse.c src/lower.c src/ir.c src/plan.c src/vm.c src/cgen.c src/fixer.c src/io.c src/trace.c src/par.c src/autodiff.c src/optim.c src/data.c src/autotrain.c src/serve.c src/quant.c src/main.c
+SRC = src/util.c src/sexp.c src/ops.c src/parse.c src/lower.c src/ir.c src/plan.c src/vm.c src/cgen.c src/fixer.c src/io.c src/trace.c src/par.c src/autodiff.c src/optim.c src/data.c src/autotrain.c src/serve.c src/quant.c src/asmgen.c src/main.c
 OBJ = $(SRC:src/%.c=build/%.o)
 
 all: build/tgc

@@ -1,0 +1,17 @@
+# Native backend matmul shapes: matrix-vector, a row block wider than one
+# vector register group at VLEN 128 (n = 37 is not a multiple of any VL),
+# k = 1, and a column-vector product, with five inputs (stack arguments on
+# every target). t is added to every output row (row broadcast).
+model nmm
+
+param A : f32[5, 7] = rand(11, 0.5)
+param B : f32[7, 37] = rand(12, 0.5)
+param C : f32[37, 3] = rand(13, 0.5)
+param D : f32[1, 9] = rand(14, 0.5)
+
+def forward(x: f32[7], y: f32[5, 7], c: f32[5, 1], s: f32, t: f32[3]) -> f32[5, 3]:
+    v = A @ x
+    P = tanh(y @ B)
+    Q = P @ C
+    R = c @ D
+    return Q * s + sum(v) * sum(R) + t
