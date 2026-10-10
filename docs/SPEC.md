@@ -1041,21 +1041,61 @@ error: it trades weight fidelity for fidelity of what the layer computes on
 real inputs. The per-row scales of a 32768-row table are a fifth of its int4
 size; fp16 scales are a later step.
 
+### Fixed point for targets without an FPU
+
+`tgc c MODEL --fixed` emits the unit in Q16.16 integer arithmetic: every
+value is a `tg_t` (int32_t, 1.0 = 65536, range [-32768, 32768),
+resolution 1.5e-5), and the runtime (`runtime/tg_rtq.h`) has the same
+kernels as the float one under the same names.
+
+- **Arithmetic.** Products accumulate in 64 bits and round once; results
+  saturate instead of wrapping; division rounds to nearest.
+- **Functions.** exp: `x = k ln2 + r`, a degree-8 polynomial in Q30, shifted
+  by k (saturates above 10.397, 0 below -12). log: `m 2^e` with
+  `log m = 2 atanh((m-1)/(m+1))` to the 13th power in Q30. sin/cos: reduced
+  to [-pi/2, pi/2], Taylor to x^13 in Q30. sqrt: exact integer square root.
+  tanh, sigmoid, softplus, silu and gelu are built from these without
+  overflow; softmax subtracts the row maximum; rmsnorm uses a 64-bit sum of
+  squares.
+- **Everything else** (matmul, sparse rows, take, active, row updates,
+  scan, think halting on the integer delta) runs on the same integers;
+  sparse indices are Q16.16 too. Quantized weights keep their int8/int4
+  codes; scales become Q7.24.
+- **The test driver** (`-DTG_MAIN`) parses and prints decimal text with
+  integer arithmetic only, so a whole program runs with no FPU.
+
+Measured against the float VM (max |fixed - float| over the outputs):
+newton 1.5e-6, latent_reasoner 1.6e-5, `tests/cases/ops.tg` 3.3e-5,
+broadcast 1.4e-5, windowed attention with rope 2.3e-5, sparse rows 2.2e-6,
+a scan model that takes two gradients through time 1.4e-4 (outputs up to
+9.7), the int4 GPTQ model 5.7e-6. The suite requires < 5e-4.
+
+On a Cortex-M3 (no FPU; `tests/mcu/run.sh` builds with arm-none-eabi-gcc
+and runs on QEMU's mps2-an385 board with semihosting), latent_reasoner's
+fixed-point unit references no floating-point routine (only 64-bit integer
+division helpers), runs, and matches the float VM within 1e-4 with the
+same think step count. The float unit for the same target needs the
+soft-float library (`__aeabi_fadd`, `fmul`, `fdiv`, ...) and `expf`,
+`tanhf`, `sqrtf`; its code is 3.8 KB against 5.2 KB fixed-point, before
+the soft-float and libm code it pulls in.
+
+Training in fixed point is not supported: optimizer updates (lr x
+gradient, Adam's second moments) fall below the 1.5e-5 resolution. Train
+in float and deploy the fixed-point unit.
+
 ## 22. Roadmap
 
 Ordered by importance for latent-reasoning models on embedded targets:
 
-1. Fixed-point kernels for targets without an FPU (int8/int4 weights with
-   per-channel scales are done, section 21).
-2. Sequence models beyond one layer: stacked Mamba-3 blocks with BCNorm
+1. Sequence models beyond one layer: stacked Mamba-3 blocks with BCNorm
    and MIMO, a fused scan kernel (the VM spends 10x the bag-of-words time
    on SST-2), and pretraining of the embeddings and layer on unlabeled text
    (next-token prediction with the same scan), which a 7k-sentence task
    cannot replace.
-3. Learned halting heads (`until` driven by a predicate value) in addition to
+2. Learned halting heads (`until` driven by a predicate value) in addition to
    convergence halting.
-4. Distributed execution: multiple processes over `serve`/`stream`
+3. Distributed execution: multiple processes over `serve`/`stream`
    transports, then data-parallel training with gradients and optimizer
    state partitioned across them (ZeRO, arXiv:1910.02054).
-5. Native backends from the planned IR: ARMv7-M/ARMv8-M assembly with
+4. Native backends from the planned IR: ARMv7-M/ARMv8-M assembly with
    CMSIS-NN style kernels, and RISC-V with the vector extension.

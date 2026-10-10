@@ -239,6 +239,29 @@ grep -q "static const signed char tgq_T" "$TMP/q4.c" && ! grep -q "tgp_W1\[" "$T
 head -20 "$TMP/qcal.csv" > "$TMP/qc20.csv"
 [ "$(while read r; do "$TMP/q4b" "$(echo "$r" | cut -d, -f1-16)" "$(echo "$r" | cut -d, -f17-)"; done < "$TMP/qc20.csv" | tr ' ' ',')" = "$($TGC batch "$TMP/q4gptq.tgir" "$TMP/qc20.csv")" ] && ok || bad "quantized C differs from VM"
 $TGC quantize tests/quant/mlp.tg --method gptq 2>&1 | grep -q "needs --calib" && ok || bad "gptq without calibration"
+# fixed point: Q16.16 integer units agree with the float VM; on an FPU-less Cortex-M3 too
+fxcmp() { # MODEL INPUT...: max |fixed - float| over the outputs, from the host build
+	f=$1; shift
+	$TGC c "$f" --fixed -o "$TMP/fx.c" && $CC -std=c99 -O2 -Wall -Wextra -Werror -pedantic -DTG_MAIN -o "$TMP/fx" "$TMP/fx.c" || { echo 1; return; }
+	"$TMP/fx" "$@" | head -1 | tr ' ' '\n' > "$TMP/fxa"; $TGC run "$f" "$@" | head -1 | tr ' ' '\n' > "$TMP/fxb"
+	paste "$TMP/fxa" "$TMP/fxb" | awk '{ d = $1 - $2; if (d < 0) d = -d; if (d > m) m = d } END { print m + 0 }'
+}
+for c in "examples/newton.tg 2,9,16" "examples/latent_reasoner.tg 1,0,0,1,0,1,1,0" "tests/cases/ops.tg 1,-2,3,0.5" \
+	"tests/sparse/spmm.tg 0,1,2,0.5,5,-1,0,0,1,1,1,1,9,3,-1,2 0.5,-0.5" "tests/scan/scan.tg 1,2,3,4,5,6,7,8 1,0.5,-1,2" \
+	"$TMP/q4gptq.tgir 0.1,0.2,-0.3,0.4,0.5,-0.6,0.7,0.8,0.9,-0.1,0.2,0.3,0.4,0.5,0.6,0.7 3,0.5,10,1,63,0.25"; do
+	set -- $c
+	e=$(fxcmp "$@")
+	awk -v e="$e" 'BEGIN { exit !(e < 5e-4) }' && ok || bad "fixed point $1: max error $e"
+done
+sed 's#/\*.*\*/##' "$TMP/fx.c" | grep -v '^ \*' | grep -qwE 'float|double' && bad "fixed-point unit mentions float" || ok
+if command -v arm-none-eabi-gcc > /dev/null && command -v qemu-system-arm > /dev/null; then
+	$TGC c examples/latent_reasoner.tg --fixed -o "$TMP/lr_fx.c"
+	arm-none-eabi-gcc -mcpu=cortex-m3 -mthumb -mfloat-abi=soft -O2 -std=c99 -Wall -Wextra -Werror -c "$TMP/lr_fx.c" -o "$TMP/lr_m3.o"
+	[ -z "$(arm-none-eabi-nm -u "$TMP/lr_m3.o" | grep -v -E '__aeabi_u?ldivmod$')" ] && ok || bad "fixed-point unit needs float support: $(arm-none-eabi-nm -u "$TMP/lr_m3.o" | tr '\n' ' ')"
+	tests/mcu/run.sh cortex-m3 "$TMP/lr_fx.c" "$TMP/lr_m3.elf" 1,0,0,1,0,1,1,0 > "$TMP/m3.out" 2>&1
+	head -1 "$TMP/m3.out" | tr ' ' '\n' > "$TMP/m3a"; $TGC run examples/latent_reasoner.tg 1,0,0,1,0,1,1,0 | head -1 | tr ' ' '\n' > "$TMP/m3b"
+	paste "$TMP/m3a" "$TMP/m3b" | awk '{ d = $1 - $2; if (d < 0) d = -d; if (d > m) m = d } END { exit !(NR == 4 && m < 1e-4) }' && grep -q "steps 0 9" "$TMP/m3.out" && ok || bad "Cortex-M3 run: $(cat "$TMP/m3.out")"
+fi
 # row-sparse (lazy) optimizer steps on spmm tables
 lz() { sed "s/OPT/$1/" > "$TMP/lz.tg" <<'TG'
 model lz

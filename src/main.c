@@ -14,7 +14,7 @@ static void usage(void)
 	      "  batch <file> <data> [-o out]    one sample per text row, or a raw .bin/.f32 stream; data '-' = stdin\n"
 	      "  stream <file> [src] [-o dst]    row in, row out, flushed; src/dst: - (std), a file, or tcp://HOST:PORT\n"
 	      "  serve <file> --listen [HOST:]PORT   TCP row protocol and HTTP (GET /health, GET /, POST /run)\n"
-	      "  c     <file> [-o out.c]   emit a freestanding C unit\n"
+	      "  c     <file> [-o out.c] [--fixed]   emit a freestanding C unit; --fixed: Q16.16 integers, no FPU\n"
 	      "  quantize <file> [-o out.tgir] [--bits 8|4] [--method rtn|gptq] [--calib data]   int8/int4 weights\n"
 	      "  fix   <file> [-o out.tg]  repair compile errors with the neural-forest fixer\n"
 	      "  train SOURCE [-o DIR] [--target COL] ...  train a model on a dataset file or hf:OWNER/NAME\n"
@@ -286,10 +286,11 @@ static Module *load_fixed(const char *path)
 
 int main(int argc, char **argv)
 {
-	int fix = 0, k = 1, threads = 1;
+	int fix = 0, k = 1, threads = 1, fixed = 0;
 	const char *save_state = NULL;
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--autofix") == 0) fix = 1;
+		else if (strcmp(argv[i], "--fixed") == 0) fixed = 1;
 		else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) tg_verbose = tg_verbose > 1 ? tg_verbose : 1;
 		else if (strcmp(argv[i], "-vv") == 0) tg_verbose = 2;
 		else if (strcmp(argv[i], "--save-state") == 0) {
@@ -435,7 +436,7 @@ int main(int argc, char **argv)
 		} else if (argc != 3) {
 			usage();
 		}
-		cgen(m, f);
+		cgen_mode(m, f, fixed);
 		if (tr_on(1)) {
 			tr_begin(1, "cgen");
 			tr_str("output", f == stdout ? "-" : argv[4]);

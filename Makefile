@@ -10,12 +10,15 @@ all: build/tgc
 build/tgc: $(OBJ)
 	$(CC) $(CFLAGS) -o $@ $(OBJ) $(LDLIBS)
 
-build/%.o: src/%.c src/tg.h src/data.h runtime/tg_rt.h build/rt_embed.h build/forest_embed.h | build
+build/%.o: src/%.c src/tg.h src/data.h runtime/tg_rt.h build/rt_embed.h build/rtq_embed.h build/forest_embed.h | build
 	$(CC) $(CFLAGS) -pthread -Ibuild -c -o $@ $<
 
 # Embed the runtime kernels as C string lines so emitted units are self-contained.
 build/rt_embed.h: runtime/tg_rt.h | build
 	perl -ne 'BEGIN { print "static const char *const tg_rt_lines[] = {\n" } chomp; s/\\/\\\\/g; s/"/\\"/g; print "\t\"$$_\\n\",\n"; END { print "\t0\n};\n" }' < $< > $@
+
+build/rtq_embed.h: runtime/tg_rtq.h | build
+	perl -ne 'BEGIN { print "static const char *const tg_rtq_lines[] = {\n" } chomp; s/\\/\\\\/g; s/"/\\"/g; print "\t\"$$_\\n\",\n"; END { print "\t0\n};\n" }' < $< > $@
 
 # The auto-fix ranker is a Technograd program, embedded as source. Before the
 # first `make fixer` the list is empty and autofix reports that no model exists.

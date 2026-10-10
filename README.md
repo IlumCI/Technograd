@@ -32,7 +32,7 @@ make            # builds build/tgc (C11, no dependencies beyond libm; perl at bu
 build/tgc train hf:scikit-learn/iris            # any dataset, no configuration: detect, featurize, train, export
 build/tgc train reviews.csv --model ssm         # adds a Mamba-3-style sequence layer over the words
 build/tgc predict iris_model new_flowers.csv     # predictions on raw new data
-make test       # 222 checks (offline; TG_TEST_NETWORK=1 adds a Hugging Face run)
+make test       # 231 checks (offline; TG_TEST_NETWORK=1 adds a Hugging Face run)
 make fixer      # retrain the auto-fix forest (deterministic, ~15 s) and evaluate it on held-out programs
 
 build/tgc run  examples/latent_reasoner.tg 1,0,0,1,0,1,1,0
@@ -52,6 +52,8 @@ build/tgc serve examples/xor.tg --listen 8080      # TCP rows and HTTP (GET /hea
 printf '1,0\n0,1\n' | build/tgc stream examples/xor.tg   # row in, row out; tcp://HOST:PORT works as source/sink
 build/tgc plan examples/latent_reasoner.tg   # arena layout: 320 B instead of 624 B unshared
 build/tgc c    examples/latent_reasoner.tg -o reasoner.c
+build/tgc c    examples/latent_reasoner.tg --fixed -o reasoner_q16.c   # Q16.16 integers: no FPU needed
+build/tgc quantize model.tg --bits 4 --method gptq --calib rows.csv   # int4 weights, per-channel scales
 cc -O2 -DTG_MAIN reasoner.c -lm -o reasoner && ./reasoner 1,0,0,1,0,1,1,0
 ```
 

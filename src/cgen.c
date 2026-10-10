@@ -10,6 +10,9 @@
  * Compile with -DTG_MAIN to get a command-line driver for testing. */
 #include "tg.h"
 #include "rt_embed.h"
+#include "rtq_embed.h"
+
+#include <stdint.h>
 
 #include <math.h>
 
@@ -66,10 +69,23 @@ static void ind(G *g, int d)
 	for (int i = 0; i < d; i++) fputc('\t', g->f);
 }
 
+/* Fixed-point mode (tgc c --fixed): every value is Q16.16 in a tg_t (int32_t). */
+static int FX;
+#define TY (FX ? "tg_t" : "float")
+
+static long long to_fixed(double v, int frac)
+{
+	double s = v * (double)(1LL << frac);
+	if (s >= 2147483647.0) return 2147483647LL;
+	if (s <= -2147483648.0) return -2147483647LL - 1;
+	return llround(s);
+}
+
 static void flt(G *g, float v)
 {
 	if (!isfinite(v)) die(NULL, 0, "non-finite constant in model");
-	fprintf(g->f, "%.9ef", (double)v);
+	if (FX) fprintf(g->f, "%lld", to_fixed(v, 16));
+	else fprintf(g->f, "%.9ef", (double)v);
 }
 
 static void block(G *g, const Block *b, int d)
@@ -220,13 +236,14 @@ static void block(G *g, const Block *b, int d)
 			ind(g, d + 1);
 			fprintf(g->f, "it[%d]++;\n", in->tid);
 			ind(g, d + 1);
-			fprintf(g->f, "float d = tg_delta(%s, %s, %d);\n", y, o, n);
+			fprintf(g->f, "%s d = tg_delta(%s, %s, %d);\n", TY, y, o, n);
 			ind(g, d + 1);
 			fprintf(g->f, "tg_copy(%s, %s, %d);\n", o, y, n);
 			if (in->eps >= 0) {
 				ind(g, d + 1);
 				fputs("if (d <= ", g->f);
-				flt(g, in->eps);
+				if (FX) fprintf(g->f, "%lld", to_fixed(in->eps, 16) > 0 || in->eps == 0 ? to_fixed(in->eps, 16) : 1); /* a positive threshold stays positive */
+				else flt(g, in->eps);
 				fputs(") break;\n", g->f);
 			} else {
 				ind(g, d + 1);
@@ -247,8 +264,43 @@ static void signature(G *g)
 	const Module *m = g->m;
 	fprintf(g->f, "void tg_%s_run(", m->name);
 	for (int i = 0; i < m->ninputs; i++)
-		fprintf(g->f, "const float *tgi_%s, ", m->val[m->inputs[i]].name);
-	fputs("float *tg_out)", g->f);
+		fprintf(g->f, "const %s *tgi_%s, ", TY, m->val[m->inputs[i]].name);
+	fprintf(g->f, "%s *tg_out)", TY);
+}
+
+/* Test driver for fixed-point units: decimal text in and out with integer
+ * arithmetic only, so the whole program runs where there is no FPU. */
+static void driver_fixed(G *g, int outn)
+{
+	const Module *m = g->m;
+	FILE *f = g->f;
+	fprintf(f, "\n#ifdef TG_MAIN\n#include <stdio.h>\n\n"
+		   "static int tg_parse(const char *s, tg_t *v, int n)\n{\n"
+		   "\tint k = 0;\n"
+		   "\tfor (;;) {\n\t\tif (k == n) return 0;\n\t\ts = tg_fx_parse(s, &v[k++]);\n"
+		   "\t\tif (!s) return 0;\n\t\tif (!*s) break;\n\t\tif (*s != ',') return 0;\n\t\ts++;\n\t}\n"
+		   "\treturn k == n;\n}\n\n"
+		   "int main(int argc, char **argv)\n{\n\tchar buf[24];\n");
+	for (int i = 0; i < m->ninputs; i++) fprintf(f, "\tstatic tg_t in%d[%d];\n", i, shape_numel(&m->val[m->inputs[i]].sh));
+	fprintf(f, "\tstatic tg_t out[%d];\n", outn);
+	fprintf(f, "\tif (argc < 2 || (argc - 1) %% %d) { fputs(\"usage: unit inputs...\\n\", stderr); return 2; }\n", m->ninputs);
+	fprintf(f, "\tfor (int s = 1; s < argc; s += %d) {\n", m->ninputs);
+	for (int i = 0; i < m->ninputs; i++)
+		fprintf(f, "\t\tif (!tg_parse(argv[s + %d], in%d, %d)) { fputs(\"bad input '%s'\\n\", stderr); return 2; }\n", i, i,
+			shape_numel(&m->val[m->inputs[i]].sh), m->val[m->inputs[i]].name);
+	fprintf(f, "\t\ttg_%s_run(", m->name);
+	for (int i = 0; i < m->ninputs; i++) fprintf(f, "in%d, ", i);
+	fputs("out);\n", f);
+	fprintf(f, "\t\tfor (int i = 0; i < %d; i++) { tg_fx_format(out[i], buf); printf(\"%%s%%s\", i ? \" \" : \"\", buf); }\n\t\tputchar('\\n');\n", outn);
+	if (m->nthink) fprintf(f, "\t\tfor (int i = 0; i < %d; i++) printf(\"steps %%d %%d\\n\", i, tg_%s_steps[i]);\n", m->nthink, m->name);
+	fputs("\t}\n\treturn 0;\n}\n#endif\n", f);
+}
+
+void cgen_mode(const Module *m, FILE *f, int fixed)
+{
+	FX = fixed;
+	cgen(m, f);
+	FX = 0;
 }
 
 void cgen(const Module *m, FILE *f)
@@ -271,8 +323,10 @@ void cgen(const Module *m, FILE *f)
 			   " * State arrays tg_%s_state_<name> are exported so firmware can save and restore\n"
 			   " * what the model learned; tg_%s_reset() restores the initial values.",
 			states * 4, nm, nm);
+	if (FX) fputs("\n * Fixed point: every value is Q16.16 in tg_t (int32_t, 1.0 = 65536); no floating point.", f);
 	fputs("\n */\n", f);
-	for (int i = 0; tg_rt_lines[i]; i++) fputs(tg_rt_lines[i], f);
+	const char *const *rt = FX ? tg_rtq_lines : tg_rt_lines;
+	for (int i = 0; rt[i]; i++) fputs(rt[i], f);
 	fputc('\n', f);
 
 	for (int i = 0; i < m->ninputs; i++) {
@@ -290,16 +344,17 @@ void cgen(const Module *m, FILE *f)
 			int nb = x->qbits == 8 ? n : (n + 1) / 2, nch = x->sh.dim[x->qaxis];
 			fprintf(f, "static const signed char tgq_%s[%d] = { /* int%d codes */", x->name, nb, x->qbits);
 			for (int i = 0; i < nb; i++) fprintf(f, "%s%d%s", i % 16 == 0 ? "\n\t" : "", x->q[i], i + 1 < nb ? ", " : "\n");
-			fprintf(f, "};\nstatic const float tgqs_%s[%d] = {", x->name, nch);
+			fprintf(f, "};\nstatic const %s tgqs_%s[%d] = {", FX ? "int32_t" : "float", x->name, nch);
 			for (int i = 0; i < nch; i++) {
 				if (i % 6 == 0) fputs("\n\t", f);
-				flt(&g, x->qs[i]);
+				if (FX) fprintf(f, "%lld", to_fixed(x->qs[i], 24)); /* Q7.24 scales */
+				else flt(&g, x->qs[i]);
 				fputs(i + 1 < nch ? ", " : "\n", f);
 			}
 			fputs("};\n", f);
 			if (!needs_f32(m, v)) continue;
 		}
-		fprintf(f, "static const float tgp_%s[%d] = {", x->name, n);
+		fprintf(f, "static const %s tgp_%s[%d] = {", TY, x->name, n);
 		for (int i = 0; i < n; i++) {
 			if (i % 6 == 0) fputs("\n\t", f);
 			flt(&g, x->data[i]);
@@ -312,8 +367,8 @@ void cgen(const Module *m, FILE *f)
 		if (x->kind != V_STATE) continue;
 		int n = shape_numel(&x->sh);
 		for (int pass = 0; pass < 2; pass++) { /* pristine const copy, then the RAM state */
-			if (pass == 0) fprintf(f, "static const float tgs0_%s[%d] = {", x->name, n);
-			else fprintf(f, "#define TG_%s_STATE_%s %d\nfloat tg_%s_state_%s[%d] = {", nm, x->name, n, nm, x->name, n);
+			if (pass == 0) fprintf(f, "static const %s tgs0_%s[%d] = {", TY, x->name, n);
+			else fprintf(f, "#define TG_%s_STATE_%s %d\n%s tg_%s_state_%s[%d] = {", nm, x->name, n, TY, nm, x->name, n);
 			for (int i = 0; i < n; i++) {
 				if (i % 6 == 0) fputs("\n\t", f);
 				flt(&g, x->data[i]);
@@ -322,7 +377,7 @@ void cgen(const Module *m, FILE *f)
 			fputs("};\n", f);
 		}
 	}
-	fprintf(f, "\nstatic float tg_%s_arena[%d];\nint tg_%s_steps[%d];\n\n", nm, m->arena ? m->arena : 1, nm, m->nthink ? m->nthink : 1);
+	fprintf(f, "\nstatic %s tg_%s_arena[%d];\nint tg_%s_steps[%d];\n\n", TY, nm, m->arena ? m->arena : 1, nm, m->nthink ? m->nthink : 1);
 	if (m->nupd || states) {
 		fprintf(f, "void tg_%s_reset(void);\nvoid tg_%s_reset(void)\n{\n", nm, nm);
 		for (int v = 0; v < m->nval; v++)
@@ -334,7 +389,7 @@ void cgen(const Module *m, FILE *f)
 	signature(&g);
 	fprintf(f, ";\n");
 	signature(&g);
-	fprintf(f, "\n{\n\tfloat *const A = tg_%s_arena;\n", nm);
+	fprintf(f, "\n{\n\t%s *const A = tg_%s_arena;\n", TY, nm);
 	if (m->nthink) fprintf(f, "\tint it[%d];\n", m->nthink);
 	fprintf(f, "\t(void)A;\n");
 	block(&g, &m->top, 1);
@@ -376,6 +431,10 @@ void cgen(const Module *m, FILE *f)
 	}
 	fputs("}\n", f);
 
+	if (FX) {
+		driver_fixed(&g, outn);
+		return;
+	}
 	/* Optional test driver; output format matches `tgc run`. */
 	fprintf(f, "\n#ifdef TG_MAIN\n#include <stdio.h>\n#include <stdlib.h>\n\n"
 		   "static int tg_parse(const char *s, float *v, int n)\n{\n"

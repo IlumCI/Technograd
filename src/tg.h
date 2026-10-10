@@ -231,6 +231,7 @@ void par_init(int threads); /* 0 = one per online CPU */
 int par_threads(void);
 void par_for(int n, int grain, void (*fn)(void *ctx, int lo, int hi, int tid), void *ctx);
 void cgen(const Module *m, FILE *f);
+void cgen_mode(const Module *m, FILE *f, int fixed); /* fixed: Q16.16 integer unit (runtime/tg_rtq.h) */
 int tg_qget_host(const signed char *q, int bits, int i); /* code i of a quantized param */
 int q_axis_for(const Module *m, int param, const Ins *in); /* axis a matmul/spmm operand needs, or -1 */
 int quantize_main(int argc, char **argv);              /* quant.c */
