@@ -71,6 +71,7 @@ static void live(Module *m, Block *b, Ins **loops, int nl)
 			loops[nl] = in;
 			live(m, in->body, loops, nl + 1);
 			use(m, in->yield, in->pend, loops, nl + 1);
+			if (in->halt >= 0) use(m, in->halt, in->pend, loops, nl + 1);
 			use(m, in->out, in->pend, loops, nl);
 		} else {
 			for (int j = 0; j < in->na; j++) use(m, in->a[j], in->pbeg, loops, nl);

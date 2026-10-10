@@ -1,0 +1,13 @@
+# Learned halting: the loop stops after the step at which the probability of
+# having halted, 1 - prod(1 - p), first exceeds 0.6. Inputs nearer the
+# target halt sooner; the steps line reports how many steps ran.
+model halt
+
+param w : f32[2] = [1, 0.5]
+
+def forward(x: f32[2]) -> f32[2]:
+    h = x
+    think h for 20 halt p at 0.6:
+        h = h * 0.9 + 0.1
+        p = sigmoid(dot(w, h) * 3 - 6)
+    return h

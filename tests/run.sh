@@ -38,7 +38,7 @@ tests/cases/nested.tg:0.3,-0.7 tests/cases/multi_input.tg:1,2,3:0.5 tests/cases/
 examples/use_import.tg:1,-1,2,-2 examples/delta_memory.tg:1,0,0,0:1,2,3,4 tests/bcast/broadcast.tg:0.1,-0.2,0.3,1,2,-1,0,0,0,-3,0.5,0.25
 tests/sparse/spmm.tg:0,1,2,0.5,5,-1,0,0,1,1,1,1,9,3,-1,2:0.5,-0.5
 tests/sparse/rows.tg:0,1,2,0.5,5,-1,1,1,1,1,9,0.3:0.5,-0.5
-tests/attn/window.tg:0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1,1.1,1.2,1.3,1.4,1.5,1.6,-0.1,-0.2,-0.3,-0.4,-0.5,-0.6,-0.7,-0.8,0.3,0.1,0.4,0.1,0.5,0.9,0.2,0.6,1,0,1,0,1,0,1,0,0,1,0,1,0,1,0,1,0.5,0.5,0.5,0.5,-0.5,-0.5,-0.5,-0.5 tests/scan/scan.tg:1,2,3,4,5,6,7,8:1,0.5,-1,2 tests/scan/nested_grad.tg:0.1,0.2,0.3,-0.4,0.5,0.1,-0.2,0.3 examples/selective_ssm.tg:0.1,0,0.2,0,-0.3,1,0.4,0,0.1,0,0.2,1,-0.1,0,0.3,0,0.2,0,-0.4,1,0.1,0,0.2,0:0.1,0.3,-0.3,0.1,0.2,0.2,0.1,0.4,0.6,-0.4,-0.3,-0.1
+tests/attn/window.tg:0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1,1.1,1.2,1.3,1.4,1.5,1.6,-0.1,-0.2,-0.3,-0.4,-0.5,-0.6,-0.7,-0.8,0.3,0.1,0.4,0.1,0.5,0.9,0.2,0.6,1,0,1,0,1,0,1,0,0,1,0,1,0,1,0,1,0.5,0.5,0.5,0.5,-0.5,-0.5,-0.5,-0.5 tests/scan/scan.tg:1,2,3,4,5,6,7,8:1,0.5,-1,2 tests/think/halt.tg:1,1 tests/think/halt.tg:0,0 tests/scan/nested_grad.tg:0.1,0.2,0.3,-0.4,0.5,0.1,-0.2,0.3 examples/selective_ssm.tg:0.1,0,0.2,0,-0.3,1,0.4,0,0.1,0,0.2,1,-0.1,0,0.3,0,0.2,0,-0.4,1,0.1,0,0.2,0:0.1,0.3,-0.3,0.1,0.2,0.2,0.1,0.4,0.6,-0.4,-0.3,-0.1
 examples/drift_calibration.tg:10,20,30"
 for c in $CASES; do
 	f=${c%%:*}
@@ -262,6 +262,11 @@ if command -v arm-none-eabi-gcc > /dev/null && command -v qemu-system-arm > /dev
 	head -1 "$TMP/m3.out" | tr ' ' '\n' > "$TMP/m3a"; $TGC run examples/latent_reasoner.tg 1,0,0,1,0,1,1,0 | head -1 | tr ' ' '\n' > "$TMP/m3b"
 	paste "$TMP/m3a" "$TMP/m3b" | awk '{ d = $1 - $2; if (d < 0) d = -d; if (d > m) m = d } END { exit !(NR == 4 && m < 1e-4) }' && grep -q "steps 0 9" "$TMP/m3.out" && ok || bad "Cortex-M3 run: $(cat "$TMP/m3.out")"
 fi
+# learned halting (PonderNet): steps follow the difficulty; a fixed budget overshoots
+sh examples/ponder/run.sh "$TGC" "$TMP/ponder" 20000 > "$TMP/ponder.log" 2>&1
+grep -q "all: accuracy 100.0%" "$TMP/ponder.log" && grep -q "hops 1: accuracy 100.0%, mean steps 1.00" "$TMP/ponder.log" \
+	&& grep -q "hops 4: accuracy 100.0%, mean steps 4.00" "$TMP/ponder.log" && ok || bad "learned halting: $(tr '\n' ' ' < "$TMP/ponder.log")"
+[ "$($TGC run tests/think/halt.tg 1,1 | tail -1)" = "steps 0 5" ] && [ "$($TGC run tests/think/halt.tg 0,0 | tail -1)" = "steps 0 19" ] && ok || bad "halt step counts"
 # row-sparse (lazy) optimizer steps on spmm tables
 lz() { sed "s/OPT/$1/" > "$TMP/lz.tg" <<'TG'
 model lz

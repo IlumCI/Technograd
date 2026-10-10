@@ -1,0 +1,21 @@
+# Inference with learned halting: the weights train.tg learned, one latent
+# step at a time until the halting distribution passes its median.
+model ponder
+
+param E : f32[16, 8] = file("w.E.bin")
+param K : f32[16, 6] = file("w.K.bin")
+param W1 : f32[16, 16] = file("w.W1.bin")
+param W2 : f32[16, 16] = file("w.W2.bin")
+param W3 : f32[16, 6] = file("w.W3.bin")
+param R : f32[8, 16] = file("w.R.bin")
+param b : f32[16] = file("w.b.bin")
+param wh : f32[16] = file("w.wh.bin")
+param bh : f32 = file("w.bh.bin")
+
+def forward(A: f32[8, 8], s: f32[8], k: f32[6]) -> f32[8]:
+    h = tanh(E @ s + K @ k)
+    think h for 8 halt lam:
+        node = softmax(R @ h * 4)
+        h = tanh(W1 @ h + W2 @ (E @ (transpose(A) @ node)) + W3 @ k + b)
+        lam = sigmoid(dot(wh, h) + bh)
+    return softmax(R @ h * 4)

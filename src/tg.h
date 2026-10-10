@@ -154,6 +154,8 @@ typedef struct {
 	Block *body;  /* OP_THINK */
 	int yield;    /* OP_THINK: next-state value computed by body */
 	int tid;      /* OP_THINK: index into the steps vector */
+	int halt;     /* OP_THINK: body scalar with the step's halting probability, or -1 */
+	float hthr;   /* OP_THINK: halt once 1 - prod(1 - p) exceeds this (0.5: the median step) */
 	Scan *sc;     /* OP_SCAN (body in `body`; `out` is one of its outputs) */
 	int pbeg, pend;
 } Ins;

@@ -12,7 +12,7 @@
  *   literal  := num | '[' literal {',' literal} ']'
  *   block    := NL INDENT stmt {stmt} DEDENT
  *   stmt     := NAME '=' expr NL | 'return' expr NL
- *             | 'think' NAME 'for' INT ['until' num] ':' block
+ *             | 'think' NAME 'for' INT ['until' num | 'halt' NAME ['at' num]] ':' block
  *             | 'scan' NAME {',' NAME} 'over' NAME 'in' expr {',' NAME 'in' expr} ':' block
  *             | 'emit' NAME '=' expr NL            (scan bodies only)
  *   expr     := term {('+'|'-') term}
@@ -439,14 +439,27 @@ static Sx *stmt(P *p)
 		if (!iskw(f, "for")) die(p->file, f->line, "expected 'for' after think state, got '%s'", tokdesc(f));
 		int max = posint(p);
 		double eps = -1;
+		Sx *halt = NULL;
 		if (iskw(peek(p), "until")) {
 			next(p);
 			eps = signed_num(p);
 			if (eps < 0) die(p->file, line, "halting threshold must be >= 0");
+		} else if (iskw(peek(p), "halt")) { /* learned halting: halt NAME [at THRESHOLD] */
+			next(p);
+			Tok *hn = expect_name(p);
+			double thr = 0.5;
+			if (iskw(peek(p), "at")) {
+				next(p);
+				thr = signed_num(p);
+				if (thr <= 0 || thr >= 1) die(p->file, line, "halting threshold must be in (0, 1)");
+			}
+			halt = sx_list(line, 3, sx_sym("halt", line), sx_sym(hn->s, line), sx_num(thr, line));
 		}
 		expect_op(p, ":");
 		Sx *b = block(p);
-		return sx_list(line, 5, sx_sym("think", line), sx_sym(n->s, line), sx_num(max, line), sx_num(eps, line), b);
+		Sx *t = sx_list(line, 5, sx_sym("think", line), sx_sym(n->s, line), sx_num(max, line), sx_num(eps, line), b);
+		if (halt) sx_push(t, halt);
+		return t;
 	}
 	Tok *n = expect_name(p);
 	expect_op(p, "=");

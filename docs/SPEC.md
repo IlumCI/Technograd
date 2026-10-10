@@ -134,6 +134,29 @@ Scoping rules:
 Loops can nest. Inner loops can come from inlined functions. The steps slot of
 an inner loop holds the count from its last execution.
 
+### Learned halting
+
+```
+think h for N halt p [at T]:
+    h = f(h, ...)
+    p = sigmoid(...)         # a scalar of the body: this step's halting probability
+```
+
+Instead of convergence, a learned head decides when to stop. After step n
+the loop has halted with probability `1 - prod_{i<=n} (1 - p_i)`; it stops
+at the first step where that exceeds T (default 0.5: the median of the
+halting distribution, PonderNet's deterministic inference rule), or at N.
+`p` is clamped to [0, 1]. VM, TGIR (`(halt V T)` after `(yield ...)`), C
+and fixed-point C implement it identically.
+
+Halting is a discrete decision, so `grad` through such a loop is a compile
+error. Training uses PonderNet's objective (Banino et al., arXiv:2107.05407)
+written with `scan` over the whole budget: at every step n a prediction and
+`lam_n`, the halting distribution `p_n = lam_n prod_{i<n} (1 - lam_i)`
+(normalized over the budget), and the loss `sum_n p_n L_n + beta KL(p ||
+geometric prior)`. The trained weights then run in a `think ... halt` model
+(`examples/ponder/`).
+
 ## 8. TGIR
 
 TGIR is the canonical, machine-facing form. `tgc ir` prints it, and every
@@ -151,7 +174,7 @@ TGIR is the canonical, machine-facing form. `tgc ir` prints it, and every
 TYPE  := (f32 d...)
 INSTR := (NAME TYPE (OP VALUE...))        ; OP from the builtin table, by name; 1 to 3 operands
        | (NAME TYPE (const NUMBER))
-       | (NAME TYPE (think INIT MAX EPS|none INSTR... (yield VALUE)))
+       | (NAME TYPE (think INIT MAX EPS|none INSTR... (yield VALUE) [(halt VALUE T)]))
        | (scan T forward|reverse [steps] (carry C TYPE INIT)... (in X TYPE SEQ)...
                (body INSTR...) (next C VALUE)... (emit Y TYPE VALUE)...)   ; section 19; `steps`: a fixed-budget think loop turned into a scan by `grad` reports T in the next steps slot
 ```
@@ -991,6 +1014,24 @@ more than the schedule; at lr 0.003 the curriculum reached every depth
 tried, while direct training fell short at 4 hops with 1000 rows per stage
 and at 8 hops. The 4-hop curriculum is regression-tested.
 
+### Learned halting, measured
+
+`examples/ponder/` (graph in the input, start node, hop count k = 1..6,
+answer k hops later; 8 latent steps at most) trained with the PonderNet
+objective on 20,000 examples (AdamW lr 0.001), then run with
+`think h for 8 halt lam` on 1,200 new examples:
+
+| Hops | 1 | 2 | 3 | 4 | 5 | 6 |
+|------|---|---|---|---|---|---|
+| accuracy | 100% | 100% | 100% | 100% | 100% | 100% |
+| mean steps taken | 1.00 | 2.00 | 3.00 | 4.00 | 5.00 | 6.00 |
+
+The model spends exactly as many steps as the question needs: 3.5 on
+average against a budget of 8. Run for all 8 steps, the same weights reach
+56.5%, because they overshoot the answer. At lr 0.003 the halting was less
+exact (94.6% overall, hop 5 at 63.2%), and at 60,000 examples and lr 0.001
+it was 99.5%. The fixed-point C unit halts at the same step as the VM.
+
 ## 21. Quantization
 
 ```
@@ -1092,10 +1133,8 @@ Ordered by importance for latent-reasoning models on embedded targets:
    on SST-2), and pretraining of the embeddings and layer on unlabeled text
    (next-token prediction with the same scan), which a 7k-sentence task
    cannot replace.
-2. Learned halting heads (`until` driven by a predicate value) in addition to
-   convergence halting.
-3. Distributed execution: multiple processes over `serve`/`stream`
+2. Distributed execution: multiple processes over `serve`/`stream`
    transports, then data-parallel training with gradients and optimizer
    state partitioned across them (ZeRO, arXiv:1910.02054).
-4. Native backends from the planned IR: ARMv7-M/ARMv8-M assembly with
+3. Native backends from the planned IR: ARMv7-M/ARMv8-M assembly with
    CMSIS-NN style kernels, and RISC-V with the vector extension.

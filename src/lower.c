@@ -507,11 +507,19 @@ static int lower_block(L *l, Block *b, Env *e, Sx *stmts, int is_fn)
 				if (strcmp(n, st->s) != 0 && inner.b[j].val != e->b[j].val)
 					die(l->file, s->line, "think block assigns outer variable '%s'; only the state '%s' is carried", n, st->s);
 			}
-			int y = env_get(&inner, st->s);
+			int y = env_get(&inner, st->s), hv = -1;
+			if (s->len > 5) { /* halt NAME: a scalar of the body */
+				const char *hn = s->v[5]->v[1]->s;
+				hv = env_get(&inner, hn);
+				if (hv < 0) die(l->file, s->line, "halting value '%s' is not defined in the think body", hn);
+				if (l->m->val[hv].sh.rank != 0) die(l->file, s->line, "halting value '%s' must be a scalar probability", hn);
+			}
 			xfree(inner.b);
 			ins = &b->v[idx]; /* block may have been reallocated */
 			ins->body = body;
 			ins->yield = y;
+			ins->halt = hv;
+			ins->hthr = s->len > 5 ? (float)s->v[5]->v[2]->n : 0.5f;
 			env_set(e, st->s, state);
 			continue;
 		}
@@ -747,6 +755,7 @@ static void mark_block(const Block *b, char *live)
 			if (in->op == OP_THINK) {
 				live[in->init] = 1;
 				live[in->yield] = 1;
+				if (in->halt >= 0) live[in->halt] = 1;
 				mark_block(in->body, live);
 			} else {
 				for (int j = 0; j < in->na; j++) live[in->a[j]] = 1;

@@ -230,6 +230,10 @@ static void block(G *g, const Block *b, int d)
 			fprintf(g->f, "/* think: latent state %s, budget %d */\n", o, in->maxit);
 			ind(g, d);
 			fprintf(g->f, "tg_copy(%s, %s, %d);\n", o, init, n);
+			if (in->halt >= 0) {
+				ind(g, d);
+				fprintf(g->f, "%s sv%d = %s; /* probability of not having halted yet */\n", TY, in->tid, FX ? "65536" : "1.0f");
+			}
 			ind(g, d);
 			fprintf(g->f, "for (it[%d] = 0; it[%d] < %d;) {\n", in->tid, in->tid, in->maxit);
 			block(g, in->body, d + 1);
@@ -248,6 +252,17 @@ static void block(G *g, const Block *b, int d)
 			} else {
 				ind(g, d + 1);
 				fputs("(void)d;\n", g->f);
+			}
+			if (in->halt >= 0) {
+				char hp[64];
+				ref(g, in->halt, hp, sizeof hp);
+				ind(g, d + 1);
+				if (FX)
+					fprintf(g->f, "{ tg_t p = %s[0] < 0 ? 0 : %s[0] > 65536 ? 65536 : %s[0]; sv%d = tg_fmul(sv%d, 65536 - p); if (65536 - sv%d > %lld) break; }\n",
+						hp, hp, hp, in->tid, in->tid, in->tid, to_fixed(in->hthr, 16));
+				else
+					fprintf(g->f, "{ float p = %s[0] < 0.0f ? 0.0f : %s[0] > 1.0f ? 1.0f : %s[0]; sv%d *= 1.0f - p; if (1.0f - sv%d > %.9ef) break; }\n",
+						hp, hp, hp, in->tid, in->tid, (double)in->hthr);
 			}
 			ind(g, d);
 			fputs("}\n", g->f);

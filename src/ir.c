@@ -128,7 +128,14 @@ static void write_block(const Module *m, const Block *b, FILE *f, int d)
 			write_block(m, in->body, f, d + 1);
 			vname(m, in->yield, n2, sizeof n2);
 			indent(f, d + 1);
-			fprintf(f, "(yield %s)))\n", n2);
+			fprintf(f, "(yield %s)", n2);
+			if (in->halt >= 0) {
+				vname(m, in->halt, n2, sizeof n2);
+				fprintf(f, "\n");
+				indent(f, d + 1);
+				fprintf(f, "(halt %s %.9g)", n2, (double)in->hthr);
+			}
+			fputs("))\n", f);
 		} else {
 			fprintf(f, "(%s", tg_ops[in->op].name);
 			for (int j = 0; j < in->na; j++) {
@@ -407,14 +414,23 @@ static void r_block(R *r, Block *b, const Sx *forms, int from, int to)
 
 		int out = mod_value(r->m, V_TMP, &decl, NULL);
 		if (tmp.op == OP_THINK) {
-			const Sx *y = e->v[e->len - 1];
+			const Sx *hl = e->v[e->len - 1];
+			int has_halt = hl->k == SX_LIST && hl->len >= 1 && sx_issym(hl->v[0], "halt");
+			const Sx *y = e->v[e->len - 1 - has_halt];
 			need(r, y, y->k == SX_LIST && y->len == 2 && sx_issym(y->v[0], "yield"), "think (missing yield)");
 			tmp.tid = r->m->nthink++;
 			tmp.body = xmalloc(sizeof *tmp.body);
 			int mark = r->n;
 			r_def(r, x->v[0], out); /* state visible in body */
-			r_block(r, tmp.body, e, 4, e->len - 1);
+			r_block(r, tmp.body, e, 4, e->len - 1 - has_halt);
 			tmp.yield = r_get(r, y->v[1]);
+			tmp.halt = -1;
+			if (has_halt) {
+				need(r, hl, hl->len == 3 && hl->v[2]->k == SX_NUM && hl->v[2]->n > 0 && hl->v[2]->n < 1 && tmp.eps < 0, "think halt (value, threshold in (0, 1); no until)");
+				tmp.halt = r_get(r, hl->v[1]);
+				if (r->m->val[tmp.halt].sh.rank != 0) die(r->file, hl->line, "halting value must be a scalar");
+				tmp.hthr = (float)hl->v[2]->n;
+			}
 			if (!shape_eq(&r->m->val[tmp.yield].sh, &decl)) die(r->file, y->line, "yield shape differs from state shape");
 			r->n = mark; /* drop body scope, state re-bound below */
 		}
@@ -423,7 +439,7 @@ static void r_block(R *r, Block *b, const Sx *forms, int from, int to)
 		*in = tmp;
 		in->out = out;
 		for (int j = tmp.op == OP_THINK ? 0 : tmp.na; j < TG_MAXARGS; j++) in->a[j] = -1;
-		if (tmp.op != OP_THINK) in->init = in->yield = -1;
+		if (tmp.op != OP_THINK) in->init = in->yield = in->halt = -1;
 	}
 }
 

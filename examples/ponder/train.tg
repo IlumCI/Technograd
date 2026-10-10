@@ -1,0 +1,37 @@
+# PonderNet (Banino et al., arXiv:2107.05407) training for learned halting.
+# Task: a graph given in the input (A[i, j] = 1 for an edge i -> j; every
+# node has one successor), a start node, and a hop count k (1..6); the
+# answer is the node k hops later. The model takes up to 8 latent steps; at
+# every step it predicts an answer and a halting probability lam. Training
+# unrolls all 8 steps with scan and minimizes the expected loss under the
+# halting distribution p_n = lam_n prod_{i<n} (1 - lam_i), plus a KL term
+# towards a geometric prior. infer.tg runs the same weights with
+# `think ... halt lam`, stopping at the median of that distribution.
+model ponder_train
+
+state E : f32[16, 8] = rand(1, 0.5)
+state K : f32[16, 6] = rand(2, 0.5)
+state W1 : f32[16, 16] = rand(3, 0.3)
+state W2 : f32[16, 16] = rand(4, 0.3)
+state W3 : f32[16, 6] = rand(5, 0.3)
+state R : f32[8, 16] = rand(6, 0.5)
+state b : f32[16] = zeros
+state wh : f32[16] = rand(7, 0.2)
+state bh : f32 = -1
+param budget : f32[8] = zeros
+# log of a geometric prior (lambda_p = 0.2) over 8 steps, normalized
+param lprior : f32[8] = [-1.4413, -1.6645, -1.8876, -2.1108, -2.3339, -2.5571, -2.7802, -3.0034]
+
+def forward(A: f32[8, 8], s: f32[8], k: f32[6], target: f32[8]) -> f32[8]:
+    h = tanh(E @ s + K @ k)
+    sv = 1
+    scan h, sv over z in budget:
+        node = softmax(R @ h * 4)
+        h = tanh(W1 @ h + W2 @ (E @ (transpose(A) @ node)) + W3 @ k + b + z)
+        lam = sigmoid(dot(wh, h) + bh)
+        emit p = sv * lam
+        emit l = xent(R @ h * 4, target)
+        sv = sv * (1 - lam)
+    pn = p / sum(p)
+    train sum(pn * l) + 0.01 * sum(pn * (log(pn + 0.0000001) - lprior)) with adamw(lr=0.001)
+    return pn

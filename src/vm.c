@@ -220,6 +220,7 @@ static void exec(VM *vm, const Block *b)
 			tg_copy(o, ptr(vm, in->init), n);
 			const float *y = NULL;
 			int it = 0;
+			float survive = 1.0f; /* probability of not having halted yet */
 			while (it < in->maxit) {
 				exec(vm, in->body);
 				it++;
@@ -235,6 +236,11 @@ static void exec(VM *vm, const Block *b)
 				if (vm->delta) vm->delta[in->tid] = d;
 				tg_copy(o, y, n);
 				if (in->eps >= 0 && d <= in->eps) break;
+				if (in->halt >= 0) {
+					float p = *ptr(vm, in->halt);
+					survive *= 1.0f - (p < 0.0f ? 0.0f : p > 1.0f ? 1.0f : p);
+					if (1.0f - survive > in->hthr) break;
+				}
 			}
 			vm->steps[in->tid] = it;
 			break;

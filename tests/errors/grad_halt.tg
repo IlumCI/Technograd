@@ -1,0 +1,9 @@
+# expect: grad through a think loop with learned halting: train with the expected loss over a fixed budget (a scan; see examples/ponder) and halt only at inference
+model e
+param w : f32[2] = [1, 0.5]
+def forward(x: f32[2]) -> f32[2]:
+    h = x
+    think h for 5 halt p:
+        h = tanh(h + x)
+        p = sigmoid(dot(w, h))
+    return grad(sum(h), x)

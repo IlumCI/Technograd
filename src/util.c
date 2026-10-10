@@ -232,7 +232,7 @@ Ins *block_push(Block *b)
 	}
 	Ins *i = &b->v[b->len++];
 	memset(i, 0, sizeof *i);
-	i->out = i->init = i->yield = -1;
+	i->out = i->init = i->yield = i->halt = -1;
 	for (int k = 0; k < TG_MAXARGS; k++) i->a[k] = -1;
 	return i;
 }

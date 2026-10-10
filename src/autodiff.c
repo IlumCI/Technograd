@@ -560,6 +560,8 @@ static void clone_into(AD *a, const Block *body, Clone *c)
 			a->b = outer;
 			outer->v[idx].body = nb;
 			outer->v[idx].yield = cl_get(c, in.yield);
+			outer->v[idx].halt = in.halt >= 0 ? cl_get(c, in.halt) : -1;
+			outer->v[idx].hthr = in.hthr;
 		} else if (in.op == OP_SCAN) {
 			const Scan *s = in.sc;
 			Scan *ns = scan_new(s->T, s->reverse);
@@ -795,6 +797,9 @@ static void scan_vjp(AD *a, Ins t, Adj *adj)
 static void think_vjp(AD *a, Ins t, int g, Adj *adj)
 {
 	Module *m = a->m;
+	if (t.halt >= 0)
+		die(a->file, a->line, "grad through a think loop with learned halting: train with the expected loss over a fixed "
+				      "budget (a scan; see examples/ponder) and halt only at inference");
 	if (t.eps < 0) { /* a fixed budget has no fixed point: it is a T-step scan, differentiated through time */
 		Ins *in = &m->def_blk[t.out]->v[m->def_idx[t.out]];
 		Scan *s = scan_new(in->maxit, 0);

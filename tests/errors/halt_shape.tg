@@ -1,0 +1,8 @@
+# expect: halting value 'p' must be a scalar probability
+model e
+def forward(x: f32[2]) -> f32[2]:
+    h = x
+    think h for 5 halt p:
+        h = tanh(h + x)
+        p = sigmoid(h)
+    return h
