@@ -1217,11 +1217,18 @@ slots, dv = 64, 29,184 multiply-adds per token plus three top-k selections,
 | 4,096 | 99.98% | 100% | 5 s | 7 s |
 | 16,384 | 17.75% | 100% | 19 s | 26 s |
 | 65,536 | 3.20% | 96.73% | 74 s | 105 s |
+| 262,144 | 1.06% | 22.69% | 308 s | 435 s |
 
-At equal compute per token, the dense model stops at about 4,000 facts
-(32 kbit in 31k parameters); the memory holds 63,000 facts (about 507 kbit)
-for 1.4 times the training time. Capacity is a property of the slot count,
-not of the work done per token.
+With N = 256 (`N=256 run.sh`: 65,536 slots, 4.2M parameters, 37,376
+multiply-adds per token, 1.22 times the dense model's), the memory recalls
+93.41% of the 262,144 facts in 540 s.
+
+At about equal compute per token, the dense model stops at about 4,000
+facts (32 kbit in 31k parameters). The 16,384-slot memory saturates at
+about 60,000 facts (22.69% of 262,144 is 59,480), and the 65,536-slot
+memory holds 244,860: four times the slots store 4.1 times the facts, at
+0.45 to 0.47 bits per parameter. Capacity follows the slot count, not the
+work done per token; the score cost grows only with N = sqrt(slots).
 
 ## 21. Quantization
 
