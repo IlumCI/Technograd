@@ -30,6 +30,9 @@ expect_run examples/xor.tg 0 1,1
 expect_run examples/newton.tg "1.41421354 3 4
 steps 0 5" 2,9,16
 expect_run tests/cases/ops.tg "$(cat tests/cases/ops.expected)" 1,-2,3,0.5
+expect_run tests/memory/topk.tg "1 3 2 5 0 1 2 3 0 1 2 3" 0,5,3,4,-1,2,0,0,0,0,0,0,6,5,4,3,2,1
+expect_run tests/memory/topk_pad.tg "1 0 2 -1 -1" 2,3,1
+expect_run tests/memory/take_along.tg "4 1 0 6 0 11" 1,2,3,4,5,6,7,8,9,10,11,12 3,0,-1,1,4,2
 
 # 2-3. every example and positive case
 CASES="examples/xor.tg:1,0 examples/newton.tg:2,9,16 examples/latent_reasoner.tg:1,0,0,1,0,1,1,0
@@ -39,7 +42,8 @@ examples/use_import.tg:1,-1,2,-2 examples/delta_memory.tg:1,0,0,0:1,2,3,4 tests/
 tests/sparse/spmm.tg:0,1,2,0.5,5,-1,0,0,1,1,1,1,9,3,-1,2:0.5,-0.5
 tests/sparse/rows.tg:0,1,2,0.5,5,-1,1,1,1,1,9,0.3:0.5,-0.5
 tests/attn/window.tg:0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1,1.1,1.2,1.3,1.4,1.5,1.6,-0.1,-0.2,-0.3,-0.4,-0.5,-0.6,-0.7,-0.8,0.3,0.1,0.4,0.1,0.5,0.9,0.2,0.6,1,0,1,0,1,0,1,0,0,1,0,1,0,1,0,1,0.5,0.5,0.5,0.5,-0.5,-0.5,-0.5,-0.5 tests/scan/scan.tg:1,2,3,4,5,6,7,8:1,0.5,-1,2 tests/think/halt.tg:1,1 tests/think/halt.tg:0,0 tests/scan/nested_grad.tg:0.1,0.2,0.3,-0.4,0.5,0.1,-0.2,0.3 examples/selective_ssm.tg:0.1,0,0.2,0,-0.3,1,0.4,0,0.1,0,0.2,1,-0.1,0,0.3,0,0.2,0,-0.4,1,0.1,0,0.2,0:0.1,0.3,-0.3,0.1,0.2,0.2,0.1,0.4,0.6,-0.4,-0.3,-0.1
-examples/drift_calibration.tg:10,20,30 tests/native/broadcast.tg:1,2,3:0.5,-1,2,0:$(seq -s, -1 0.1 1.3)"
+examples/drift_calibration.tg:10,20,30 tests/native/broadcast.tg:1,2,3:0.5,-1,2,0:$(seq -s, -1 0.1 1.3)
+tests/memory/topk.tg:0,5,3,4,-1,2,0,0,0,0,0,0,6,5,4,3,2,1 tests/memory/topk_pad.tg:2,3,1 tests/memory/take_along.tg:1,2,3,4,5,6,7,8,9,10,11,12:3,0,-1,1,4,2"
 for c in $CASES; do
 	f=${c%%:*}
 	args=$(echo "${c#*:}" | tr ':' ' ')
@@ -138,7 +142,7 @@ $TGC ir examples/delta_memory.tg | grep -q "(update mem %" && ok || bad "TGIR lo
 #     on-device training in generated C matching the VM bit for bit
 mkdir -p "$TMP/gc"
 if perl tests/gradcheck.pl "$TGC" "$TMP/gc" > "$TMP/gc.out"; then ok; else bad "gradcheck: $(grep FAIL "$TMP/gc.out")"; fi
-[ "$(grep -c "^ok" "$TMP/gc.out")" -ge 46 ] && ok || bad "gradcheck ran too few cases"
+[ "$(grep -c "^ok" "$TMP/gc.out")" -ge 60 ] && ok || bad "gradcheck ran too few cases"
 perl -e 'srand(3); my @d=([0,0,0],[0,1,1],[1,0,1],[1,1,0]); for (1..1500) { for my $r (sort { rand() <=> 0.5 } @d) { print join(",", @$r), "\n" } }' > "$TMP/xt.csv"
 $TGC batch examples/train_xor.tg "$TMP/xt.csv" --save-state "$TMP/xor" -o "$TMP/xp.csv"
 paste -d, "$TMP/xt.csv" "$TMP/xp.csv" | tail -8 | awk -F, '{ if ($3 == 1 && $4 < 0.9 || $3 == 0 && $4 > 0.1) bad = 1 } END { exit bad }' && ok || bad "XOR not learned"
@@ -264,7 +268,7 @@ fxcmp() { # MODEL INPUT...: max |fixed - float| over the outputs, from the host 
 for c in "examples/newton.tg 2,9,16" "examples/latent_reasoner.tg 1,0,0,1,0,1,1,0" "tests/cases/ops.tg 1,-2,3,0.5" \
 	"tests/sparse/spmm.tg 0,1,2,0.5,5,-1,0,0,1,1,1,1,9,3,-1,2 0.5,-0.5" "tests/scan/scan.tg 1,2,3,4,5,6,7,8 1,0.5,-1,2" \
 	"$TMP/q4gptq.tgir 0.1,0.2,-0.3,0.4,0.5,-0.6,0.7,0.8,0.9,-0.1,0.2,0.3,0.4,0.5,0.6,0.7 3,0.5,10,1,63,0.25" \
-	"tests/native/broadcast.tg 1,2,3 0.5,-1,2,0 $(seq -s, -1 0.1 1.3)"; do
+	"tests/native/broadcast.tg 1,2,3 0.5,-1,2,0 $(seq -s, -1 0.1 1.3)" "tests/memory/topk.tg 0,5,3,4,-1,2,0,0,0,0,0,0,6,5,4,3,2,1"; do
 	set -- $c
 	e=$(fxcmp "$@")
 	awk -v e="$e" 'BEGIN { exit !(e < 5e-4) }' && ok || bad "fixed point $1: max error $e"
@@ -284,7 +288,8 @@ tests/think/halt.tg:0,0 tests/sparse/rows.tg:0,1,2,0.5,5,-1,1,1,1,1,9,0.3:0.5,-0
 tests/native/matmul.tg:1,2,3,4,5,6,7:$(seq -s, 0.1 0.1 3.5):1,-1,2,-2,0.5:0.5:1,2,3
 examples/selective_ssm.tg:0.1,0,0.2,0,-0.3,1,0.4,0,0.1,0,0.2,1,-0.1,0,0.3,0,0.2,0,-0.4,1,0.1,0,0.2,0:0.1,0.3,-0.3,0.1,0.2,0.2,0.1,0.4,0.6,-0.4,-0.3,-0.1
 $TMP/q4gptq.tgir:0.1,0.2,-0.3,0.4,0.5,-0.6,0.7,0.8,0.9,-0.1,0.2,0.3,0.4,0.5,0.6,0.7:3,0.5,10,1,63,0.25
-tests/native/broadcast.tg:1,2,3:0.5,-1,2,0:$(seq -s, -1 0.1 1.3)"
+tests/native/broadcast.tg:1,2,3:0.5,-1,2,0:$(seq -s, -1 0.1 1.3)
+tests/memory/topk.tg:0,5,3,4,-1,2,0,0,0,0,0,0,6,5,4,3,2,1"
 perl -e 'srand(3); for (1..6) { print join(",", map { sprintf("%.1f", 2*rand()-1) } 1..8), "\n" }' > "$TMP/seq6.csv"
 native() { # TARGET TOLERANCE
 	for c in $NATIVE; do

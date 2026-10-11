@@ -195,6 +195,12 @@ static void block(G *g, const Block *b, int d)
 		case CLS_RESHAPE:
 			fprintf(g->f, "tg_copy(%s, %s, %d);\n", o, a, n);
 			break;
+		case CLS_TOPK: {
+			int rows, cols;
+			row_dims(&m->val[in->a[0]].sh, &rows, &cols);
+			fprintf(g->f, "tg_topk(%s, %s, %d, %d, %d);\n", o, a, rows, cols, m->val[in->out].sh.dim[m->val[in->out].sh.rank - 1]);
+			break;
+		}
 		case CLS_SUMTO:
 			fprintf(g->f, "tg_sum_to(%s, %s, %d, ", o, a, n);
 			desc(g, &m->val[in->a[0]].sh, &m->val[in->a[1]].sh, NULL);

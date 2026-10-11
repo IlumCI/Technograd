@@ -1,0 +1,5 @@
+# take_along: gather along the last axis; indices outside [0, n) give zero.
+model ta
+
+def forward(s: f32[3, 4], i: f32[3, 2]) -> f32[3, 2]:
+    return take_along(s, i)

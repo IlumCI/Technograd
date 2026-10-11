@@ -1,0 +1,5 @@
+# topk with k larger than the row: the missing places are -1.
+model tkp
+
+def forward(s: f32[3]) -> f32[5]:
+    return topk(s, 5)

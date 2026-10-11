@@ -386,6 +386,18 @@ static void r_block(R *r, Block *b, const Sx *forms, int from, int to)
 		} else {
 			int op = op_lookup(head->s);
 			if (op < 0) die(r->file, head->line, "unknown op '%s'", head->s);
+			if (op == OP_TOPK) { /* the declared type carries k in its last dimension */
+				need(r, e, e->len == 2, "topk");
+				tmp.op = OP_TOPK;
+				tmp.na = 1;
+				tmp.a[0] = r_get(r, e->v[1]);
+				const Shape *xs = &r->m->val[tmp.a[0]].sh;
+				int okk = xs->rank >= 1 && decl.rank == xs->rank && decl.dim[decl.rank - 1] >= 1 && decl.dim[decl.rank - 1] <= 256;
+				for (int i = 0; okk && i < xs->rank - 1; i++) okk = decl.dim[i] == xs->dim[i];
+				if (!okk) die(r->file, e->line, "topk: the declared type must keep the leading dimensions and set the last to k (1 to 256)");
+				got = decl;
+				goto checked;
+			}
 			if (op == OP_RESHAPE) { /* the declared type is the target; only the element count is checked */
 				need(r, e, e->len == 2, "reshape");
 				tmp.op = OP_RESHAPE;

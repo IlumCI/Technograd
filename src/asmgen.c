@@ -439,6 +439,13 @@ static void ins(A *a, const Ins *in)
 		}
 		return;
 	}
+	case CLS_TOPK: {
+		int rows, cols;
+		row_dims(s0, &rows, &cols);
+		Arg c[5] = { V(in->out), V(in->a[0]), I(rows), I(cols), I(m->val[in->out].sh.dim[m->val[in->out].sh.rank - 1]) };
+		call(a, "tg_topk", c, 5);
+		return;
+	}
 	case CLS_SUMTO: {
 		Arg c[4] = { V(in->out), V(in->a[0]), I(n), desc(a, s0, &m->val[in->a[1]].sh, NULL) };
 		call(a, "tg_sum_to", c, 4);

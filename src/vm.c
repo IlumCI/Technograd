@@ -337,6 +337,12 @@ static void exec_one(VM *vm, const Ins *in)
 		case CLS_RESHAPE:
 			tg_copy(o, a, n);
 			break;
+		case CLS_TOPK: {
+			int rows, cols;
+			row_dims(&m->val[in->a[0]].sh, &rows, &cols);
+			tg_topk(o, a, rows, cols, os->dim[os->rank - 1]);
+			break;
+		}
 		case CLS_SUMTO: {
 			int d[TG_BCAST_DESC];
 			bcast_desc(&m->val[in->a[0]].sh, &m->val[in->a[1]].sh, NULL, d);

@@ -316,6 +316,7 @@ static int bcast_rows(AD *a, int v, int cols) /* (r) -> (r,c) */
 
 static void think_vjp(AD *a, Ins t, int g, Adj *adj);
 static int RESHAPE(AD *a, int x, const Shape *to);
+static int TOPK(AD *a, int x, int k);
 static int ZEROS(AD *a, const Shape *sp);
 static void scan_vjp(AD *a, Ins t, Adj *adj);
 
@@ -464,6 +465,7 @@ static void vjp(AD *a, const Ins *in, int g, Adj *adj)
 		acc(a, adj, x0, E1(a, OP_NEG, E(a, OP_MUL, g, E1(a, OP_SIN, x0))));
 		return;
 	case OP_ACTIVE: /* row indices: piecewise constant */
+	case OP_TOPK:
 		return;
 	case OP_TAKE: /* rows are piecewise constant */
 		if (w0) acc(a, adj, x0, E3(a, OP_TAKE_T, x1, g, x0));
@@ -616,6 +618,7 @@ static void clone_into(AD *a, const Block *body, Clone *c)
 		} else {
 			c->map[in.out] = in.op == OP_CONST ? K(a, in.k)
 				       : in.op == OP_RESHAPE ? RESHAPE(a, cl_get(c, in.a[0]), &m->val[in.out].sh)
+				       : in.op == OP_TOPK ? TOPK(a, cl_get(c, in.a[0]), m->val[in.out].sh.dim[m->val[in.out].sh.rank - 1])
 				       : E3(a, in.op, cl_get(c, in.a[0]), in.na > 1 ? cl_get(c, in.a[1]) : -1, in.na > 2 ? cl_get(c, in.a[2]) : -1);
 		}
 	}
@@ -647,6 +650,22 @@ static int RESHAPE(AD *a, int x, const Shape *to)
 	int o = mod_value(a->m, V_TMP, &s, NULL);
 	Ins *ins = block_push(a->b);
 	ins->op = OP_RESHAPE;
+	ins->out = o;
+	ins->na = 1;
+	ins->a[0] = x;
+	mod_note_def(a->m, o, a->b, a->b->len - 1);
+	return o;
+}
+
+static int TOPK(AD *a, int x, int k)
+{
+	Shape s = *SH(a, x);
+	if (s.rank < 1) die(a->file, a->line, "'topk' needs a tensor of rank >= 1");
+	if (k < 1 || k > 256) die(a->file, a->line, "'topk' count must be 1 to 256, got %d", k);
+	s.dim[s.rank - 1] = k;
+	int o = mod_value(a->m, V_TMP, &s, NULL);
+	Ins *ins = block_push(a->b);
+	ins->op = OP_TOPK;
 	ins->out = o;
 	ins->na = 1;
 	ins->a[0] = x;
@@ -1028,6 +1047,12 @@ int ir_reshape(Module *m, Block *b, int x, const Shape *to)
 {
 	AD a = { m, b, "", 0, -1, NULL, 0, 0, 0, -1, -1, 1, 1 };
 	return RESHAPE(&a, x, to);
+}
+
+int ir_topk(Module *m, Block *b, int x, int k)
+{
+	AD a = { m, b, "", 0, -1, NULL, 0, 0, 0, -1, -1, 1, 1 };
+	return TOPK(&a, x, k);
 }
 
 int ir_k(Module *m, Block *b, float k)

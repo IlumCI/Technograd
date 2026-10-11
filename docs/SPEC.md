@@ -102,6 +102,8 @@ and parentheses. All binary operators are left associative.
 | `spmm(s, w)` | sparse rows times a matrix: `s` is `(K, 2)` or `(B, K, 2)`, each row K `(index, value)` pairs (ELLPACK form), `w` is `(D, H)`; returns `(H)` or `(B, H)`, `sum_k value_k * w[index_k]`. Cost O(B K H), independent of D. Indices round to the nearest integer; padding has value 0; an index outside `[0, D)` is skipped, so no input can address out of bounds. With one pair `(token, 1)` per row it is an embedding gather |
 | `active(s, w)` | `(n)`, n = B K: the distinct rows of `w` that sparse rows `s` touch with a nonzero value, ascending, padded with -1. Not differentiable (indices) |
 | `take(w, r)` | `(D, ...) , (n) -> (n, ...)`: rows `r` of `w`; zero for -1 or out-of-range indices; repeats allowed |
+| `topk(x, k)` | `(..., n) -> (..., k)`, k an integer literal 1..256: indices of the k largest entries along the last axis, largest first, ties to the lower index, NaN skipped, -1 where k > n. Not differentiable (indices); the selection is piecewise constant |
+| `take_along(x, i)` | `(..., n), (..., k) -> (..., k)`: `x[..., i[..., j]]`, zero where `i` is outside `[0, n)`; the gather that pairs with `topk`. Lowered to `take` over the flattened rows, so its gradient is a scatter-add into `x` |
 | `grad(y, x)` | `y` scalar, `x` a name; returns dy/dx with the shape of `x` (section 16) |
 | `mse(p, t)`, `bce(p, t)`, `xent(logits, onehot)` | scalar losses (section 17) |
 
@@ -516,7 +518,9 @@ model compiles to freestanding C like any other.
   get zero. Its two derivative operations are themselves differentiable, so
   second-order gradients through `spmm` work;
 - `take` sends its gradient to the table as a scatter-add (`take_t`), whose
-  own derivative is `take`; `active` returns indices and has none;
+  own derivative is `take`; `active` and `topk` return indices and have
+  none, so a top-k selection passes gradient only through the gathered
+  scores and rows (`take_along`, `take`);
 - `scan` loops are differentiated by backpropagation through time
   (section 19).
 
@@ -561,7 +565,7 @@ model itself also compiles to C (about 11.5 KB for the XOR MLP, using only
 
 `tests/gradcheck.pl` compares every derivative rule, including both
 implicit-differentiation cases and both second-order `spmm` cases, against
-central finite differences (46 cases, worst relative error 4.3e-4). A planted bug in one rule makes 9 cases fail.
+central finite differences (60 cases, worst relative error 4.3e-4). A planted bug in one rule makes 9 cases fail.
 
 ## 17. Training statement and optimizers
 

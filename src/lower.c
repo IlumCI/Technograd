@@ -114,6 +114,7 @@ static int emit_op(L *l, Block *b, Op op, const int *args, int na, int line)
 
 static int lower_block(L *l, Block *b, Env *e, Sx *stmts, int is_fn);
 static int lower_attn(L *l, Block *b, Env *e, Sx *x);
+static int lower_take_along(L *l, Block *b, Env *e, Sx *x);
 
 static int lower_expr(L *l, Block *b, Env *e, Sx *x)
 {
@@ -143,6 +144,16 @@ static int lower_expr(L *l, Block *b, Env *e, Sx *x)
 		return ad_grad(l->m, b, yv, xv, l->file, x->line);
 	}
 	if (strcmp(fn->s, "rope") == 0 || strcmp(fn->s, "attention") == 0) return lower_attn(l, b, e, x);
+	if (strcmp(fn->s, "topk") == 0) { /* topk(x, k): indices of the k largest along the last axis */
+		if (x->len != 4) die(l->file, x->line, "'topk' takes a tensor and a literal count, e.g. topk(scores, 8)");
+		Sx *d = x->v[3];
+		if (!sx_issym(d->v[0], "num") || d->v[1]->n < 1 || d->v[1]->n > 256 || d->v[1]->n != (double)(int)d->v[1]->n)
+			die(l->file, x->line, "'topk' count must be an integer literal from 1 to 256");
+		int v = lower_expr(l, b, e, x->v[2]);
+		if (l->m->val[v].sh.rank < 1) die(l->file, x->line, "'topk' needs a tensor of rank >= 1");
+		return ir_topk(l->m, b, v, (int)d->v[1]->n);
+	}
+	if (strcmp(fn->s, "take_along") == 0) return lower_take_along(l, b, e, x);
 	if (strcmp(fn->s, "reshape") == 0) { /* reshape(x, d0, d1, ...): literal dimensions */
 		Shape to = { 0 };
 		if (x->len < 4 || x->len - 3 > TG_MAXRANK) die(l->file, x->line, "'reshape' takes a tensor and 1 to %d dimensions", TG_MAXRANK);
@@ -257,6 +268,49 @@ static int const_param(L *l, const char *name, const Shape *sh, const float *dat
  * (0 inside the window, -1e9 outside: exactly zero weight). W >= T gives
  * full causal attention; a ring of W keys at inference computes the same.
  * Both expand to differentiable builtins. */
+/* take_along(x, i): x (..., n), i (..., k) with the same leading dimensions;
+ * out (..., k), out[..., j] = x[..., i[..., j]], zero where i is outside
+ * [0, n). The gather along the last axis that pairs with topk. Sugar over
+ * take: x flattens to (R n, 1) and i shifts by a constant row offset (R, 1),
+ * so the gradient to x is take's scatter-add and none flows to i:
+ *   ok = step(i + 1) * step(n - i), idx = (i + off) * ok + ok - 1 */
+static int lower_take_along(L *l, Block *b, Env *e, Sx *x)
+{
+	Module *m = l->m;
+	if (x->len != 4) die(l->file, x->line, "'take_along' takes (x, indices)");
+	int v = lower_expr(l, b, e, x->v[2]), iv = lower_expr(l, b, e, x->v[3]);
+	Shape xs = m->val[v].sh, is = m->val[iv].sh;
+	int ok = xs.rank >= 1 && is.rank == xs.rank;
+	for (int d = 0; ok && d < xs.rank - 1; d++) ok = xs.dim[d] == is.dim[d];
+	if (!ok) {
+		char s0[64], s1[64];
+		shape_str(&xs, s0, sizeof s0);
+		shape_str(&is, s1, sizeof s1);
+		die(l->file, x->line, "'take_along' needs x (..., n) and indices (..., k) with the same leading dimensions; got %s and %s", s0, s1);
+	}
+	int n = xs.dim[xs.rank - 1], k = is.dim[is.rank - 1], R = shape_numel(&xs) / n;
+#define OP2(op, p, q) ir_op(m, b, op, p, q, l->file, x->line)
+	int okm = OP2(OP_MUL, OP2(OP_STEP, OP2(OP_ADD, iv, ir_k(m, b, 1)), -1), OP2(OP_STEP, OP2(OP_SUB, ir_k(m, b, (float)n), iv), -1));
+	int sh = iv;
+	if (R > 1) {
+		char name[64];
+		float *off = xmalloc((size_t)R * sizeof *off);
+		for (int r = 0; r < R; r++) off[r] = (float)r * (float)n;
+		Shape os = { 2, { R, 1 } }, is2 = { 2, { R, k } };
+		snprintf(name, sizeof name, "__rowoff_%d_%d", R, n);
+		int ov = const_param(l, name, &os, off);
+		xfree(off);
+		sh = OP2(OP_ADD, ir_reshape(m, b, iv, &is2), ov);
+		okm = ir_reshape(m, b, okm, &is2);
+	}
+	int idx = OP2(OP_SUB, OP2(OP_ADD, OP2(OP_MUL, sh, okm), okm), ir_k(m, b, 1));
+	Shape fl = { 2, { R * n, 1 } }, il = { 1, { R * k } };
+	int g = OP2(OP_TAKE, ir_reshape(m, b, v, &fl), ir_reshape(m, b, idx, &il));
+	Shape out = is;
+#undef OP2
+	return ir_reshape(m, b, g, &out);
+}
+
 static int lower_attn(L *l, Block *b, Env *e, Sx *x)
 {
 	Module *m = l->m;

@@ -1,0 +1,6 @@
+# topk: indices of the k largest entries along the last axis, largest first,
+# ties to the lower index.
+model tk
+
+def forward(s: f32[3, 6]) -> f32[3, 4]:
+    return topk(s, 4)

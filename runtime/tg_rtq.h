@@ -495,4 +495,36 @@ TG_FN void tg_btranspose(tg_t *o, const tg_t *a, int g, int r, int c)
 	for (int i = 0; i < g; i++) tg_transpose(o + (long)i * r * c, a + (long)i * r * c, r, c);
 }
 
+/* o[r, k]: indices of the k largest entries of each row of a (r rows of n),
+ * largest first, ties to the lower index, -1 past the end of a short row.
+ * Selection by insertion into a sorted buffer: O(n k), for small k. */
+TG_FN void tg_topk(tg_t *o, const tg_t *a, int rows, int n, int k)
+{
+	tg_t bv[256];
+	int bi[256];
+	if (k > 256) k = 256;
+	for (int r = 0; r < rows; r++) {
+		const tg_t *x = a + (long)r * n;
+		int c = 0;
+		for (int j = 0; j < n; j++) {
+			tg_t v = x[j];
+			if (0) continue;
+			if (c == k && !(v > bv[k - 1])) continue; /* not better than the worst kept */
+			int p = c < k ? c : k - 1;
+			while (p > 0 && v > bv[p - 1]) { /* strictly greater: equal values keep the earlier index first */
+				bv[p] = bv[p - 1];
+				bi[p] = bi[p - 1];
+				p--;
+			}
+			bv[p] = v;
+			bi[p] = j;
+			if (c < k) c++;
+		}
+		for (int i = 0; i < k; i++) {
+			if (i >= c) bi[i] = -1;
+			o[(long)r * k + i] = (tg_t)(bi[i] < 0 ? -TG_ONE : bi[i] * TG_ONE);
+		}
+	}
+}
+
 #endif
