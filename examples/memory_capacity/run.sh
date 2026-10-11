@@ -3,7 +3,8 @@
 # 64-d key -> one of 256 classes) by a dense MLP and by a product-key memory
 # (Lample et al., arXiv:1907.05242) with about the same multiply-adds per
 # token. Usage: run.sh TGC WORKDIR [EPOCHS] [F...]. Prints the fraction of
-# the F facts each model recalls after training on them.
+# the F facts each model recalls after training on them. N=256 sets the
+# sub-key count (N^2 memory slots; default 128).
 set -e
 TGC=$1; W=$2; E=${3:-40}; shift 3 2>/dev/null || shift $#
 FS=${*:-"1024 4096 16384 65536"}
@@ -18,7 +19,7 @@ for F in $FS; do
 		for (my $b = 0; $b + 32 <= $F; $b += 32) { print $t join(",", $b .. $b + 31), "\n"; print $l join(",", @lab[$b .. $b + 31]), "\n" }' "$F" "$E" "$W" > "$W/train_$F.csv"
 	for K in dense pkm; do
 		D=$W/${K}_$F; mkdir -p "$D"
-		perl "$DIR/models.pl" "$K" "$F" "$D"
+		perl "$DIR/models.pl" "$K" "$F" "$D" "${N:-128}"
 		t0=$(date +%s)
 		(cd "$D" && "$TGC" batch train.tg "$W/train_$F.csv" -o train.out --save-state w)
 		t1=$(date +%s)

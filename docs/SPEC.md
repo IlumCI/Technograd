@@ -1178,6 +1178,51 @@ average against a budget of 8. Run for all 8 steps, the same weights reach
 exact (94.6% overall, hop 5 at 63.2%), and at 60,000 examples and lr 0.001
 it was 99.5%. The fixed-point C unit halts at the same step as the VM.
 
+### Product-key memory: knowledge beyond active compute
+
+A product-key memory (Lample et al., arXiv:1907.05242; at scale, Berger et
+al., arXiv:2412.09764; UltraMemV2, arXiv:2508.18756) stores N^2 value rows
+and reads k of them per token at a cost of O(N) for the scores, not O(N^2).
+It is written with `topk`, `take_along` and `spmm`:
+
+```python
+s1 = rmsnorm(x @ Wq1) @ transpose(C1)              # (B, N) scores, first half-key
+s2 = rmsnorm(x @ Wq2) @ transpose(C2)
+i1 = topk(s1, 8)
+i2 = topk(s2, 8)
+cs = reshape(reshape(take_along(s1, i1), B, 8, 1) + reshape(take_along(s2, i2), B, 1, 8), B, 64)
+ci = reshape(reshape(i1, B, 8, 1) * N + reshape(i2, B, 1, 8), B, 64)
+j = topk(cs, 8)                                      # best 8 of the 8 x 8 products
+w = softmax(take_along(cs, j))
+pairs = reshape(take_along(ci, j), B, 8, 1) * e0 + reshape(w, B, 8, 1) * e1
+out = spmm(pairs, V)                                 # V: (N^2, dv)
+```
+
+Reading the values with `spmm` rather than `take` makes `train` step only the
+rows the batch touched (section 17), so a step costs O(B k dv) whatever the
+memory size. Gradients reach the queries and sub-keys through the gathered
+scores, and the values through `spmm`; `tests/gradcheck.pl` checks all three.
+
+`examples/memory_capacity/run.sh` measures it. F facts map a fixed random
+64-d key to one of 256 classes; both models train on them for 40 epochs
+(batch 32, AdamW lr 0.003, no weight decay) and are scored on recall of the
+same F facts. The dense model is `gelu(x W1 + b1) W2` with width 96 (30,720
+multiply-adds per token, 31k parameters); the memory has N = 128 (16,384
+slots, dv = 64, 29,184 multiply-adds per token plus three top-k selections,
+1.07M parameters):
+
+| Facts F | Dense recall | Memory recall | Dense time | Memory time |
+|---------|--------------|---------------|------------|-------------|
+| 1,024 | 100% | 100% | 1 s | 2 s |
+| 4,096 | 99.98% | 100% | 5 s | 7 s |
+| 16,384 | 17.75% | 100% | 19 s | 26 s |
+| 65,536 | 3.20% | 96.73% | 74 s | 105 s |
+
+At equal compute per token, the dense model stops at about 4,000 facts
+(32 kbit in 31k parameters); the memory holds 63,000 facts (about 507 kbit)
+for 1.4 times the training time. Capacity is a property of the slot count,
+not of the work done per token.
+
 ## 21. Quantization
 
 ```

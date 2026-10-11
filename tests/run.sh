@@ -203,6 +203,9 @@ perl examples/crypto_ctf/gen.pl caesar5 300 999 > "$TMP/cae_test.jsonl"   # disj
 $TGC gen-train "$TMP/cae.jsonl" -o "$TMP/cae" --aligned --epochs 12 --layers 2 --maxlen 24 > "$TMP/cae.log" 2>&1
 em=$($TGC generate "$TMP/cae" --inputs "$TMP/cae_test.jsonl" -o /dev/null 2>&1 | sed -n 's/.*exact-match \([0-9.]*\)%.*/\1/p')
 awk -v e="$em" 'BEGIN { exit !(e >= 90) }' && ok || bad "aligned seq2seq caesar5 exact-match $em% (want >= 90)"
+# product-key memory trains end to end (row-sparse value steps) and recalls every fact
+cap=$(sh examples/memory_capacity/run.sh "$TGC" "$TMP/cap" 40 1024 2>&1)
+echo "$cap" | grep -q "F=1024 pkm recall 100.00%" && echo "$cap" | grep -q "F=1024 dense recall" && ok || bad "memory capacity: $cap"
 [ "$($TGC generate "$TMP/cae" --input hello 2>/dev/null)" = mjqqt ] && ok || bad "aligned decode hello -> $($TGC generate "$TMP/cae" --input hello 2>/dev/null) (want mjqqt)"
 $TGC c "$TMP/cae/seq2seq_infer.tg" -o "$TMP/seqinfer.c" && $CC -std=c99 -O2 -Wall -Wextra -Werror -pedantic -c -o "$TMP/seqinfer.o" "$TMP/seqinfer.c" && ok || bad "seq2seq inference unit does not compile"
 for i in $(seq 70); do echo '{"in":"abc","out":"abcd"}'; done > "$TMP/bad.jsonl"
