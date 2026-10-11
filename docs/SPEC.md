@@ -510,7 +510,7 @@ model compiles to freestanding C like any other.
   other broadcast by `sum_to`;
 - `max`/`min`/`relu` send the gradient through the selected operand, with ties
   going to the second;
-- `softmax` and `rmsnorm` are supported on rank 1 and 2;
+- `softmax` and `rmsnorm` are supported on any rank (rows of the last axis);
 - every `matmul` shape case (batched and shared right operand included),
   `transpose` of rank 2 and 3, and `outer` are covered;
 - `spmm` sends gradients to the matrix (a scatter-add over the active rows)
