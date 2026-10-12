@@ -811,6 +811,14 @@ h1 = gelu(x @ w1 + spmm(s, wt) + rmsnorm(ssm(tok)) @ wp + b1)
   `bdt` starts with step sizes log-spaced in [0.001, 0.1] and `la` with
   decay rates in [1, 16] per head, as in Mamba-2; output projections are
   scaled by 1/sqrt(2 L) (GPT-2 style residual scaling).
+- **Memory** (`--memory N`, for `train --model ssm`, `pretrain` and
+  `gen-train`): the last block's SwiGLU MLP becomes a product-key memory of
+  N^2 value rows of width D (section 20), with the output gate of Berger et
+  al. (arXiv:2412.09764): `e += (memory(v) silu(v Wmg)) Wmo`, v =
+  rmsnorm(e) g2. Each token reads 8 rows, chosen as the best 8 of the 8 x 8
+  products of the top 8 sub-keys of each query half; scoring costs O(N),
+  not O(N^2). The values are read with `spmm`, so the optimizer steps only
+  the rows a batch read.
 - **Training** is backpropagation through time (section 19) inside the same
   `train ... with adamw` step; `infer.tg` and `infer.c` run the stack over
   one row.
@@ -819,7 +827,7 @@ h1 = gelu(x @ w1 + spmm(s, wt) + rmsnorm(ssm(tok)) @ wp + b1)
 
 ```
 tgc pretrain SOURCE [-o DIR] [--column COL] [--epochs N] [--steps N] [--batch N] [--lr X]
-                    [--layers N] [--mimo R] [--max-rows N] [--seed S]
+                    [--layers N] [--mimo R] [--memory N] [--max-rows N] [--seed S]
 tgc train LABELED --model ssm --init DIR
 ```
 

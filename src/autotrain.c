@@ -28,7 +28,7 @@
 
 typedef struct {
 	const char *source, *target, *out, *optimizer, *init, *column, *incol, *outcol, *input;
-	int epochs, hidden, max_rows, seed, text_dim, batch, ssm, layers, mimo, steps, maxlen, aligned;
+	int epochs, hidden, max_rows, seed, text_dim, batch, ssm, layers, mimo, steps, maxlen, aligned, memory;
 	double lr, val;
 } Opts;
 
@@ -39,12 +39,12 @@ static void usage_data(void)
 	      "  tgc data prep SOURCE -o OUT.csv [--target COL]\n"
 	      "  tgc train SOURCE [-o DIR] [--target COL] [--epochs N] [--hidden H] [--lr X]\n"
 	      "                   [--optimizer sgd|momentum|adam|adamw|muon] [--val FRACTION] [--max-rows N]\n"
-	      "                   [--batch N] [--text-dim N] [--model bow|ssm] [--layers N] [--mimo R] [--seed S]\n"
+	      "                   [--batch N] [--text-dim N] [--model bow|ssm] [--layers N] [--mimo R] [--memory N] [--seed S]\n"
 	      "                   [--init PRETRAINED_DIR]\n"
 	      "  tgc pretrain SOURCE [-o DIR] [--column COL] [--epochs N] [--steps N] [--batch N] [--lr X]\n"
-	      "                   [--layers N] [--mimo R] [--max-rows N] [--seed S]\n"
+	      "                   [--layers N] [--mimo R] [--memory N] [--max-rows N] [--seed S]\n"
 	      "  tgc gen-train SOURCE [-o DIR] [--in COL] [--out COL] [--maxlen N] [--epochs N] [--batch N]\n"
-	      "                   [--lr X] [--layers N] [--mimo R] [--init DIR] [--aligned] [--seed S]   byte seq-to-seq (--aligned: length-preserving)\n"
+	      "                   [--lr X] [--layers N] [--mimo R] [--memory N] [--init DIR] [--aligned] [--seed S]   byte seq-to-seq (--aligned: length-preserving)\n"
 	      "  tgc generate DIR (--input STRING | --inputs FILE [--in COL] [--out COL]) [-o OUT]\n"
 	      "  tgc predict DIR SOURCE [-o OUT.csv] [--model QUANTIZED.tgir] [--inputs ROWS.csv]\n"
 	      "SOURCE: a .csv/.tsv/.json/.jsonl/.npy file, or hf:OWNER/NAME[/CONFIG[/SPLIT]]\n",
@@ -71,6 +71,10 @@ static void parse_opts(int argc, char **argv, int first, Opts *o)
 		else if (!strcmp(a, "--batch")) o->batch = atoi(v);
 		else if (!strcmp(a, "--layers")) o->layers = atoi(v);
 		else if (!strcmp(a, "--mimo")) o->mimo = atoi(v);
+		else if (!strcmp(a, "--memory")) {
+			o->memory = atoi(v);
+			if (o->memory < 8 || o->memory > 4096) die(NULL, 0, "--memory is the sub-key count per half, 8 to 4096 (N^2 memory slots)");
+		}
 		else if (!strcmp(a, "--init")) o->init = v;
 		else if (!strcmp(a, "--column")) o->column = v;
 		else if (!strcmp(a, "--steps")) o->steps = atoi(v);
@@ -143,11 +147,12 @@ typedef struct {
 	int dd, ds, k;
 	int sf, T, V, hs; /* sequence path: text feature index (-1: none), steps, vocabulary, model width */
 	int layers, mimo; /* Mamba-3 blocks, MIMO rank */
+	int mem;          /* product-key memory in the last block: sub-keys per half (N^2 slots), 0 for none */
 } Layout;
 
 static Layout layout_of(const Spec *s)
 {
-	Layout l = { 0, 0, 0, -1, 0, 0, 0, 0, 0 };
+	Layout l = { 0, 0, 0, -1, 0, 0, 0, 0, 0, 0 };
 	for (int i = 0; i < s->nf; i++) {
 		if (s->f[i].kind == COL_TEXT) l.ds += s->f[i].dim;
 		else l.dd += s->f[i].dim;
@@ -231,10 +236,23 @@ static void gen_ssm_weights(char *b, size_t cap, size_t *o, const Layout *l, int
 			{ "Wx", D, Di, a }, { "Wz", D, Di, a }, { "WB", D, R * N, a }, { "WC", D, R * N, a }, { "Wdt", D, Hh, a },
 			{ "Wl", D, Hh, a }, { "Wth", D, Hh * N / 2, a }, { "Wo", Di, D, ao }, { "W1", D, F, a }, { "W3", D, F, a }, { "W2", F, D, a2 },
 		};
+		int Nm = k == L ? l->mem : 0, dq = D / 2;
 		for (int i = 0; i < (int)(sizeof w / sizeof *w); i++) {
+			if (Nm && i >= 8) continue; /* the memory replaces this block's MLP */
 			snprintf(sh, sizeof sh, "f32[%d, %d]", w[i].r, w[i].c);
 			snprintf(in, sizeof in, "rand(%d, %.6g)", sd + i, w[i].s);
 			ssm_w(b, cap, o, mode, w[i].n, k, sh, in);
+		}
+		if (Nm) { /* product-key memory: query halves, sub-keys, N^2 values, SiLU gate, output */
+			struct { const char *n; int r, c; double s; } mw[] = {
+				{ "Wq1", D, dq, a }, { "Wq2", D, dq, a }, { "K1", Nm, dq, 1 }, { "K2", Nm, dq, 1 },
+				{ "MV", Nm * Nm, D, 1 / sqrt((double)D) }, { "Wmg", D, D, a }, { "Wmo", D, D, sqrt(3.0 / D) / sqrt(2.0 * L) },
+			};
+			for (int i = 0; i < (int)(sizeof mw / sizeof *mw); i++) {
+				snprintf(sh, sizeof sh, "f32[%d, %d]", mw[i].r, mw[i].c);
+				snprintf(in, sizeof in, "rand(%d, %.6g)", sd + 40 + i, mw[i].s);
+				ssm_w(b, cap, o, mode, mw[i].n, k, sh, in);
+			}
 		}
 		snprintf(sh, sizeof sh, "f32[%d]", D);
 		ssm_w(b, cap, o, mode, "g1", k, sh, "ones");
@@ -298,7 +316,8 @@ static void gen_ssm_weights(char *b, size_t cap, size_t *o, const Layout *l, int
 		for (int j = 0; j < N; j++) PW("%s%d", j ? ", " : "", j / 2 == i);
 		PW("]");
 	}
-	PW("]\nparam J : f32[2, 2] = [[0, 1], [-1, 0]]\n"); /* (v0, v1) @ J = (-v1, v0): a quarter turn of each channel pair */
+	PW("]\nparam J : f32[2, 2] = [[0, 1], [-1, 0]]\n");
+	if (l->mem) PW("param pidx : f32[1, 2] = [[1, 0]]\nparam pwt : f32[1, 2] = [[0, 1]]\n"); /* (index, weight) pairs for spmm */ /* (v0, v1) @ J = (-v1, v0): a quarter turn of each channel pair */
 	PW("param h0 : f32[%d, %d, %d] = zeros\n", Bm * Hh, N, P);
 	if (!H) return;
 	snprintf(sh, sizeof sh, "f32[%d, %d]", D, H);
@@ -344,8 +363,21 @@ static void gen_ssm_def(char *b, size_t cap, size_t *o, const Layout *l, int Bm,
 		PW("    xr = reshape(x, %d, %d, 1, %d)\n", TB, Hh, P);
 		PW("    y = reshape(sum_to(reshape(ys, %d, %d, %d, %d) * Wyr_%d, xr), %d, %d) + x * dk_%d\n", TB, Hh, R, P, k, TB, Di, k);
 		PW("    e%dm = e%d + (y * silu(u @ Wz_%d)) @ Wo_%d\n", k, p, k, k);
-		PW("    # block %d: SwiGLU MLP\n", k);
 		PW("    v = rmsnorm(e%dm) * g2_%d\n", k, k);
+		if (k == l->layers && l->mem) {
+			int Nm = l->mem;
+			PW("    # block %d: product-key memory, %d slots, 8 read per token (arXiv:1907.05242, 2412.09764)\n", k, Nm * Nm);
+			PW("    s1 = rmsnorm(v @ Wq1_%d) @ transpose(K1_%d)\n", k, k);
+			PW("    s2 = rmsnorm(v @ Wq2_%d) @ transpose(K2_%d)\n", k, k);
+			PW("    i1 = topk(s1, 8)\n    i2 = topk(s2, 8)\n");
+			PW("    cs = reshape(reshape(take_along(s1, i1), %d, 8, 1) + reshape(take_along(s2, i2), %d, 1, 8), %d, 64)\n", TB, TB, TB);
+			PW("    ci = reshape(reshape(i1, %d, 8, 1) * %d + reshape(i2, %d, 1, 8), %d, 64)\n", TB, Nm, TB, TB);
+			PW("    j = topk(cs, 8)\n");
+			PW("    pairs = reshape(take_along(ci, j), %d, 8, 1) * pidx + reshape(softmax(take_along(cs, j)), %d, 8, 1) * pwt\n", TB, TB);
+			PW("    e%d = e%dm + (spmm(pairs, MV_%d) * silu(v @ Wmg_%d)) @ Wmo_%d\n", k, k, k, k, k);
+			continue;
+		}
+		PW("    # block %d: SwiGLU MLP\n", k);
 		PW("    e%d = e%dm + (silu(v @ W1_%d) * (v @ W3_%d)) @ W2_%d\n", k, k, k, k, k);
 	}
 	PW("    ef = rmsnorm(e%d) * gf * m\n", l->layers);
@@ -390,6 +422,9 @@ static char *gen_model(const char *name, const Spec *s, const Layout *l, int H, 
 		  "# block followed by a SwiGLU MLP, pre-norm residual. Trained by\n"
 		  "# backpropagation through time. tok holds one (word bucket, 1) pair per\n"
 		  "# position, time-major; padding is (0, 0).\n", l->layers, T, l->mimo);
+	if (l->sf >= 0 && l->mem)
+		P("# The last block's MLP is a product-key memory: %d value rows, 8 read per\n"
+		  "# token, gated by SiLU (arXiv:1907.05242, 2412.09764).\n", l->mem * l->mem);
 	P("model %s%s\n\n", name, mode == GEN_INFER ? "_infer" : mode == GEN_EVAL ? "_eval" : "");
 	if (l->sf >= 0) gen_ssm_weights(b, cap, &o, l, Bm, H, mode);
 	const char *wn[4] = { "w1", "wt", "b1", "w2" };
@@ -606,6 +641,7 @@ static int cmd_train(Opts *o)
 		L.hs = 32;
 		L.layers = o->layers > 0 ? o->layers : 2;
 		L.mimo = o->mimo > 0 ? o->mimo : 4;
+		L.mem = o->memory;
 		int *ids = xmalloc(65 * sizeof *ids);
 		for (int i = 0; i < ntr; i++) {
 			int w = spec_tokens(s, t, rows[i], L.sf, ids, 64);
@@ -861,6 +897,9 @@ static char *gen_lm(const char *name, const Layout *l, int Bm, double lr, int mo
 	  "# over windows of %d tokens hashed into %d buckets, in batches of %d windows.\n"
 	  "# Softmax over the distinct target buckets of the batch (in-batch sampled\n"
 	  "# softmax), tied embeddings, logits soft-capped at 15.\n", src, l->layers, l->T, l->V, Bm);
+	if (l->mem)
+		P("# The last block's MLP is a product-key memory: %d value rows, 8 read per\n"
+		  "# token, gated by SiLU; training steps only the rows a batch reads.\n", l->mem * l->mem);
 	P("model %s_lm%s\n\n", name, mode == GEN_EVAL ? "_eval" : "");
 	gen_ssm_weights(b, cap, &o, l, Bm, 0, mode);
 	P("param onesD : f32[%d] = ones\nparam onesN : f32[%d] = ones\n\n", D, TB);
@@ -886,7 +925,7 @@ static int cmd_pretrain(Opts *o)
 	for (int i = 0; i < t->ncols && col < 0; i++)
 		if (o->column ? !strcmp(t->col[i].name, o->column) : t->col[i].kind == COL_TEXT) col = i;
 	if (col < 0) die(NULL, 0, o->column ? "pretrain: no column '%s'" : "pretrain: %s has no text column (name one with --column)", o->column ? o->column : o->source);
-	Layout L = { 0, 0, 0, 0, 64, o->text_dim, 32, o->layers > 0 ? o->layers : 2, o->mimo > 0 ? o->mimo : 4 };
+	Layout L = { 0, 0, 0, 0, 64, o->text_dim, 32, o->layers > 0 ? o->layers : 2, o->mimo > 0 ? o->mimo : 4, o->memory };
 	int T = L.T, Bm = o->batch > 0 ? o->batch : 16;
 	/* rows are packed into one token stream (as in GPT pretraining), cut into
 	 * windows of T + 1 tokens that overlap by one */
@@ -1107,6 +1146,7 @@ static int cmd_gentrain(Opts *o)
 	L.hs = 32;
 	L.layers = o->layers > 0 ? o->layers : 2;
 	L.mimo = o->mimo > 0 ? o->mimo : 4;
+	L.mem = o->memory;
 	int T = L.T, Bm = o->batch > 0 ? o->batch : 32;
 	int nw = 0, cap = 1024;
 	int *W = xmalloc((size_t)cap * (size_t)T * sizeof *W), *G = xmalloc((size_t)cap * (size_t)T * sizeof *G);

@@ -197,6 +197,14 @@ sed -n 's/^epoch \([02]\):.*validation loss \([0-9.]*\).*/\2/p' "$TMP/olm.log" |
 $TGC train "$TMP/order.csv" --model ssm --epochs 2 --init "$TMP/ord_lm" -o "$TMP/ord_init" > "$TMP/oi.log" 2>&1
 grep -q "^init     48 of 53 weights" "$TMP/oi.log" && grep -q "accuracy 100.00%" "$TMP/oi.log" && ok || bad "--init: $(grep -E '^init|best epoch' "$TMP/oi.log" | tr '\n' ' ')"
 $TGC train "$TMP/order.csv" --model ssm --mimo 2 --epochs 1 --init "$TMP/ord_lm" -o "$TMP/ord_bad" 2>&1 | grep -q "the model's 'WB_1' needs" && ok || bad "--init accepted a different MIMO rank"
+# product-key memory in place of the last block's MLP: train, predict, C, pretrain
+$TGC train "$TMP/order.csv" --model ssm --memory 16 --epochs 10 -o "$TMP/ord_mem" > "$TMP/om.log" 2>&1
+grep -q "accuracy 100.00%" "$TMP/om.log" && grep -q "topk(s1, 8)" "$TMP/ord_mem/infer.tg" && ok || bad "ssm --memory: $(grep 'best epoch' "$TMP/om.log")"
+[ "$($TGC predict "$TMP/ord_mem" "$TMP/onew.csv" 2>/dev/null | cut -d, -f1 | tr '\n' ' ')" = 'prediction "pos" "neg" ' ] && ok || bad "ssm --memory predict"
+$CC -std=c99 -Wall -Werror -c -o "$TMP/ominfer.o" "$TMP/ord_mem/infer.c" && ok || bad "ssm --memory infer.c does not compile"
+$TGC pretrain "$TMP/order.csv" -o "$TMP/ord_mlm" --batch 8 --epochs 2 --memory 16 > "$TMP/omlm.log" 2>&1
+sed -n 's/^epoch \([02]\):.*validation loss \([0-9.]*\).*/\2/p' "$TMP/omlm.log" | tr '\n' ' ' | awk '{ exit !(NF == 2 && $2 > 0 && $2 < $1 - 2) }' && ok || bad "pretrain --memory: $(grep '^epoch' "$TMP/omlm.log" | tr '\n' ' ')"
+$TGC ir "$TMP/ord_mlm/lm.tg" | grep -q "spmm_tc" && ok || bad "memory values do not take row-sparse steps"
 # byte-level sequence-to-sequence: learn a fixed-key cipher from (in, out) pairs and emit exact strings
 perl examples/crypto_ctf/gen.pl caesar5 1500 1 > "$TMP/cae.jsonl"
 perl examples/crypto_ctf/gen.pl caesar5 300 999 > "$TMP/cae_test.jsonl"   # disjoint seed: unseen inputs
