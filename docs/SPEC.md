@@ -816,7 +816,8 @@ h1 = gelu(x @ w1 + spmm(s, wt) + rmsnorm(ssm(tok)) @ wp + b1)
   N^2 value rows of width D (section 20), with the output gate of Berger et
   al. (arXiv:2412.09764): `e += (memory(v) silu(v Wmg)) Wmo`, v =
   rmsnorm(e) g2. Each token reads 8 rows, chosen as the best 8 of the 8 x 8
-  products of the top 8 sub-keys of each query half; scoring costs O(N),
+  products of the top 8 sub-keys of each query half (queries and sub-keys
+  both RMS-normalized); scoring costs O(N),
   not O(N^2). The values are read with `spmm`, so the optimizer steps only
   the rows a batch read.
 - **Training** is backpropagation through time (section 19) inside the same
@@ -890,6 +891,33 @@ overfit after epoch 2 (a lower fine-tuning rate, 0.003, reached 81.81%).
 Longer pretraining is the open lever: the corpus is 2M words, three orders
 of magnitude below what pretraining normally uses.
 
+Memory against the MLP it replaces, on the military science and purple-team
+corpus (`examples/military_purple/`, 1.96M words, 30,016 training windows,
+2 blocks of width 32, 4 epochs, seed 1; held-out next-token loss):
+
+| Last block | Multiply-adds per token | Parameters in it | Loss | Time |
+|------------|-------------------------|------------------|------|------|
+| SwiGLU MLP | 6,144 | 6,144 | 4.3466 | 1015 s |
+| `--memory 128` (16,384 rows) | 7,424 | 0.53M | 4.3410 | 1100 s |
+| `--memory 256` (65,536 rows) | 11,520 | 2.1M | 4.3460 | 1167 s |
+
+At this scale the memory buys nothing measurable (0.006 nats at best).
+Only 51.8% of the 16,384 rows and 26.4% of the 65,536 rows moved during
+training. Two remedies for that were measured over 1 epoch at N = 128
+(held-out loss; MLP 4.7397):
+
+| Variant | Rows moved after 1 epoch | Loss after 1 epoch |
+|---------|--------------------------|--------------------|
+| as above (queries normalized) | not measured | 4.7563 |
+| 4 query heads of 4 dimensions each, 32 rows read | 50.4% | 4.7545 |
+| sub-keys normalized too (qk-norm, as Berger et al.) | 59.1% | 4.7560 |
+
+Key normalization reaches more rows and is now the default; neither changes
+the loss. The limit is the corpus: with 2M words and a 1M-parameter
+embedding table already read per token, little is left that the model fails
+to store. The capacity measurement in section 20 shows where the memory pays:
+many arbitrary facts per unit of compute. The table above predates key
+normalization.
 ### Byte-level transforms (`tgc gen-train` / `tgc generate`)
 
 ```

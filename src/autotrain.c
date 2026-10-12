@@ -367,8 +367,8 @@ static void gen_ssm_def(char *b, size_t cap, size_t *o, const Layout *l, int Bm,
 		if (k == l->layers && l->mem) {
 			int Nm = l->mem;
 			PW("    # block %d: product-key memory, %d slots, 8 read per token (arXiv:1907.05242, 2412.09764)\n", k, Nm * Nm);
-			PW("    s1 = rmsnorm(v @ Wq1_%d) @ transpose(K1_%d)\n", k, k);
-			PW("    s2 = rmsnorm(v @ Wq2_%d) @ transpose(K2_%d)\n", k, k);
+			PW("    s1 = rmsnorm(v @ Wq1_%d) @ transpose(rmsnorm(K1_%d))\n", k, k);
+			PW("    s2 = rmsnorm(v @ Wq2_%d) @ transpose(rmsnorm(K2_%d))\n", k, k);
 			PW("    i1 = topk(s1, 8)\n    i2 = topk(s2, 8)\n");
 			PW("    cs = reshape(reshape(take_along(s1, i1), %d, 8, 1) + reshape(take_along(s2, i2), %d, 1, 8), %d, 64)\n", TB, TB, TB);
 			PW("    ci = reshape(reshape(i1, %d, 8, 1) * %d + reshape(i2, %d, 1, 8), %d, 64)\n", TB, Nm, TB, TB);
