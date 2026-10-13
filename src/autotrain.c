@@ -28,7 +28,7 @@
 
 typedef struct {
 	const char *source, *target, *out, *optimizer, *init, *column, *incol, *outcol, *input;
-	int epochs, hidden, max_rows, seed, text_dim, batch, ssm, layers, mimo, steps, maxlen, aligned, memory;
+	int epochs, hidden, max_rows, seed, text_dim, batch, ssm, layers, mimo, steps, maxlen, aligned, memory, recall;
 	double lr, val;
 } Opts;
 
@@ -39,12 +39,12 @@ static void usage_data(void)
 	      "  tgc data prep SOURCE -o OUT.csv [--target COL]\n"
 	      "  tgc train SOURCE [-o DIR] [--target COL] [--epochs N] [--hidden H] [--lr X]\n"
 	      "                   [--optimizer sgd|momentum|adam|adamw|muon] [--val FRACTION] [--max-rows N]\n"
-	      "                   [--batch N] [--text-dim N] [--model bow|ssm] [--layers N] [--mimo R] [--memory N] [--seed S]\n"
+	      "                   [--batch N] [--text-dim N] [--model bow|ssm] [--layers N] [--mimo R] [--memory N] [--recall S] [--seed S]\n"
 	      "                   [--init PRETRAINED_DIR]\n"
 	      "  tgc pretrain SOURCE [-o DIR] [--column COL] [--epochs N] [--steps N] [--batch N] [--lr X]\n"
-	      "                   [--layers N] [--mimo R] [--memory N] [--max-rows N] [--seed S]\n"
+	      "                   [--layers N] [--mimo R] [--memory N] [--recall S] [--max-rows N] [--seed S]\n"
 	      "  tgc gen-train SOURCE [-o DIR] [--in COL] [--out COL] [--maxlen N] [--epochs N] [--batch N]\n"
-	      "                   [--lr X] [--layers N] [--mimo R] [--memory N] [--init DIR] [--aligned] [--seed S]   byte seq-to-seq (--aligned: length-preserving)\n"
+	      "                   [--lr X] [--layers N] [--mimo R] [--memory N] [--recall S] [--init DIR] [--aligned] [--seed S]   byte seq-to-seq (--aligned: length-preserving)\n"
 	      "  tgc generate DIR (--input STRING | --inputs FILE [--in COL] [--out COL]) [-o OUT]\n"
 	      "  tgc predict DIR SOURCE [-o OUT.csv] [--model QUANTIZED.tgir] [--inputs ROWS.csv]\n"
 	      "SOURCE: a .csv/.tsv/.json/.jsonl/.npy file, or hf:OWNER/NAME[/CONFIG[/SPLIT]]\n",
@@ -71,6 +71,12 @@ static void parse_opts(int argc, char **argv, int first, Opts *o)
 		else if (!strcmp(a, "--batch")) o->batch = atoi(v);
 		else if (!strcmp(a, "--layers")) o->layers = atoi(v);
 		else if (!strcmp(a, "--mimo")) o->mimo = atoi(v);
+		else if (!strcmp(a, "--recall")) {
+			o->recall = atoi(v);
+			int r = (int)(sqrt((double)o->recall) + 0.5);
+			if (o->recall < 64 || o->recall > 1 << 20 || r * r != o->recall)
+				die(NULL, 0, "--recall is the in-context memory's slots per sequence, a square from 64 to 1048576 (e.g. 1024, 4096)");
+		}
 		else if (!strcmp(a, "--memory")) {
 			o->memory = atoi(v);
 			if (o->memory < 8 || o->memory > 4096) die(NULL, 0, "--memory is the sub-key count per half, 8 to 4096 (N^2 memory slots)");
@@ -148,11 +154,12 @@ typedef struct {
 	int sf, T, V, hs; /* sequence path: text feature index (-1: none), steps, vocabulary, model width */
 	int layers, mimo; /* Mamba-3 blocks, MIMO rank */
 	int mem;          /* product-key memory in the last block: sub-keys per half (N^2 slots), 0 for none */
+	int recall;       /* in-context memory in the last block: slots per sequence (a square), 0 for none */
 } Layout;
 
 static Layout layout_of(const Spec *s)
 {
-	Layout l = { 0, 0, 0, -1, 0, 0, 0, 0, 0, 0 };
+	Layout l = { 0, 0, 0, -1, 0, 0, 0, 0, 0, 0, 0 };
 	for (int i = 0; i < s->nf; i++) {
 		if (s->f[i].kind == COL_TEXT) l.ds += s->f[i].dim;
 		else l.dd += s->f[i].dim;
@@ -254,6 +261,23 @@ static void gen_ssm_weights(char *b, size_t cap, size_t *o, const Layout *l, int
 				ssm_w(b, cap, o, mode, mw[i].n, k, sh, in);
 			}
 		}
+		if (k == L && l->recall) { /* in-context memory: address halves, sub-keys, value, gate, output */
+			int n = (int)(sqrt((double)l->recall) + 0.5);
+			struct { const char *n; int r, c; double s; } rw[] = {
+				{ "Wr1", D, 8, a }, { "Wr2", D, 8, a }, { "R1", n, 8, 1 }, { "R2", n, 8, 1 }, { "Wrv", D, D, a },
+				{ "Wro", D, D, sqrt(3.0 / D) / sqrt(2.0 * L) },
+			};
+			for (int i = 0; i < (int)(sizeof rw / sizeof *rw); i++) {
+				snprintf(sh, sizeof sh, "f32[%d, %d]", rw[i].r, rw[i].c);
+				snprintf(in, sizeof in, "rand(%d, %.6g)", sd + 60 + i, rw[i].s);
+				ssm_w(b, cap, o, mode, rw[i].n, k, sh, in);
+			}
+			snprintf(sh, sizeof sh, "f32[%d]", D);
+			snprintf(in, sizeof in, "rand(%d, %.6g)", sd + 70, a);
+			ssm_w(b, cap, o, mode, "wrg", k, sh, in);
+			ssm_w(b, cap, o, mode, "gr", k, sh, "ones");
+			ssm_w(b, cap, o, mode, "brg", k, "f32", "0");
+		}
 		snprintf(sh, sizeof sh, "f32[%d]", D);
 		ssm_w(b, cap, o, mode, "g1", k, sh, "ones");
 		ssm_w(b, cap, o, mode, "g2", k, sh, "ones");
@@ -317,6 +341,11 @@ static void gen_ssm_weights(char *b, size_t cap, size_t *o, const Layout *l, int
 		PW("]");
 	}
 	PW("]\nparam J : f32[2, 2] = [[0, 1], [-1, 0]]\n");
+	if (l->recall) {
+		PW("param rM0 : f32[%d, %d] = zeros\nparam roff : f32[%d, 1] = [", Bm * l->recall, D, Bm);
+		for (int i = 0; i < Bm; i++) PW("%s[%d]", i ? ", " : "", i * l->recall);
+		PW("]\nparam tidx : f32[1, 3] = [[1, 0, 0]]\nparam trd : f32[1, 3] = [[0, 1, 0]]\nparam twr : f32[1, 3] = [[0, 0, 1]]\n");
+	}
 	if (l->mem) PW("param pidx : f32[1, 2] = [[1, 0]]\nparam pwt : f32[1, 2] = [[0, 1]]\n"); /* (index, weight) pairs for spmm */ /* (v0, v1) @ J = (-v1, v0): a quarter turn of each channel pair */
 	PW("param h0 : f32[%d, %d, %d] = zeros\n", Bm * Hh, N, P);
 	if (!H) return;
@@ -363,6 +392,22 @@ static void gen_ssm_def(char *b, size_t cap, size_t *o, const Layout *l, int Bm,
 		PW("    xr = reshape(x, %d, %d, 1, %d)\n", TB, Hh, P);
 		PW("    y = reshape(sum_to(reshape(ys, %d, %d, %d, %d) * Wyr_%d, xr), %d, %d) + x * dk_%d\n", TB, Hh, R, P, k, TB, Di, k);
 		PW("    e%dm = e%d + (y * silu(u @ Wz_%d)) @ Wo_%d\n", k, p, k, k);
+		if (k == l->layers && l->recall) {
+			int n = (int)(sqrt((double)l->recall) + 0.5);
+			PW("    # block %d: in-context memory, %d slots per sequence, written and read while the sequence is read\n", k, l->recall);
+			PW("    c = rmsnorm(e%dm) * gr_%d\n", k, k);
+			PW("    rs1 = (rmsnorm(c @ Wr1_%d) @ transpose(rmsnorm(R1_%d))) * 4\n", k, k);
+			PW("    rs2 = (rmsnorm(c @ Wr2_%d) @ transpose(rmsnorm(R2_%d))) * 4\n", k, k);
+			PW("    ri1 = topk(rs1, 8)\n    ri2 = topk(rs2, 8)\n");
+			PW("    rcs = reshape(reshape(take_along(rs1, ri1), %d, 8, 1) + reshape(take_along(rs2, ri2), %d, 1, 8), %d, 64)\n", TB, TB, TB);
+			PW("    rci = reshape(reshape(ri1, %d, 8, 1) * %d + reshape(ri2, %d, 1, 8), %d, 64)\n", TB, n, TB, TB);
+			PW("    rj = topk(rcs, 8)\n");
+			PW("    ra = reshape(softmax(take_along(rcs, rj)), %d, %d, 8, 1)\n", T, Bm);
+			PW("    rg = reshape(sigmoid(c @ wrg_%d + brg_%d) * reshape(m, %d), %d, %d, 1, 1)\n", k, k, TB, T, Bm);
+			PW("    RP = reshape(reshape(take_along(rci, rj), %d, %d, 8) + roff, %d, %d, 8, 1) * tidx + ra * trd + ra * rg * twr\n", T, Bm, T, Bm);
+			PW("    rr = memory_scan(rM0, RP, reshape(c @ Wrv_%d, %d, %d, %d))\n", k, T, Bm, D);
+			PW("    e%dm = e%dm + reshape(rr, %d, %d) @ Wro_%d\n", k, k, TB, D, k);
+		}
 		PW("    v = rmsnorm(e%dm) * g2_%d\n", k, k);
 		if (k == l->layers && l->mem) {
 			int Nm = l->mem;
@@ -642,6 +687,7 @@ static int cmd_train(Opts *o)
 		L.layers = o->layers > 0 ? o->layers : 2;
 		L.mimo = o->mimo > 0 ? o->mimo : 4;
 		L.mem = o->memory;
+		L.recall = o->recall;
 		int *ids = xmalloc(65 * sizeof *ids);
 		for (int i = 0; i < ntr; i++) {
 			int w = spec_tokens(s, t, rows[i], L.sf, ids, 64);
@@ -925,7 +971,7 @@ static int cmd_pretrain(Opts *o)
 	for (int i = 0; i < t->ncols && col < 0; i++)
 		if (o->column ? !strcmp(t->col[i].name, o->column) : t->col[i].kind == COL_TEXT) col = i;
 	if (col < 0) die(NULL, 0, o->column ? "pretrain: no column '%s'" : "pretrain: %s has no text column (name one with --column)", o->column ? o->column : o->source);
-	Layout L = { 0, 0, 0, 0, 64, o->text_dim, 32, o->layers > 0 ? o->layers : 2, o->mimo > 0 ? o->mimo : 4, o->memory };
+	Layout L = { 0, 0, 0, 0, 64, o->text_dim, 32, o->layers > 0 ? o->layers : 2, o->mimo > 0 ? o->mimo : 4, o->memory, o->recall };
 	int T = L.T, Bm = o->batch > 0 ? o->batch : 16;
 	/* rows are packed into one token stream (as in GPT pretraining), cut into
 	 * windows of T + 1 tokens that overlap by one */
@@ -1147,6 +1193,7 @@ static int cmd_gentrain(Opts *o)
 	L.layers = o->layers > 0 ? o->layers : 2;
 	L.mimo = o->mimo > 0 ? o->mimo : 4;
 	L.mem = o->memory;
+	L.recall = o->recall;
 	int T = L.T, Bm = o->batch > 0 ? o->batch : 32;
 	int nw = 0, cap = 1024;
 	int *W = xmalloc((size_t)cap * (size_t)T * sizeof *W), *G = xmalloc((size_t)cap * (size_t)T * sizeof *G);
