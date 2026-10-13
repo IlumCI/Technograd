@@ -854,11 +854,26 @@ h1 = gelu(x @ w1 + spmm(s, wt) + rmsnorm(ssm(tok)) @ wp + b1)
   On that data the next word equals the last continuation of the same
   1-gram 55.5% of the time, of the 2-gram 91.4%, of the 3-gram 97.6%: a
   single-token key cannot copy text in which common words repeat.
+
+  On the military science and purple-team corpus (1.96M words, windows of
+  512 tokens, batch 2, 4 epochs; held-out next-token loss, then the loss of
+  the same weights on repeated text):
+
+  | Model | Loss | Repeated text | Time |
+  |-------|------|---------------|------|
+  | no memory | 4.3899 | 4.1894 | 1,184 s |
+  | product-key address of the previous token (1,024 rows) | 4.3769 | 4.1380 | 1,281 s |
+  | the same with 16,384 rows | 4.3719 | 4.1253 | 1,421 s |
+  | `--recall 16384`, n-gram hashes | **4.3130** | **3.6499** | 1,201 s |
+
+  Trained on ordinary text only, the n-gram memory learns to copy (the
+  repeated-text loss falls by 0.54 nats) and lowers the held-out loss by
+  0.077 nats at about the cost of the model without it.
   Measured with `gen-train` on byte strings (`examples/recall/gen.pl`, 6,000
   pairs, 10 epochs, 500 held out): with 8 letter-digit pairs and one query
   ("j3c8e5w3o8t6v2q9:j" -> "3"), exact match goes from 30.4% (no memory)
   and 30.0% (memory keyed on the block's own state) to **100%** with the
-  token-keyed memory above, validation loss 0.895 -> 0.00017, in 222 s. With
+  n-gram memory above, validation loss 0.895 -> 0.00011, in 216 s. With
   several queries answered after all of them ("...:mxq" -> "103"), output
   j must find query j several positions back; that is an alignment problem
   the memory does not address (4 pairs, 4 queries: 3.75% without, 3.50%
@@ -1578,6 +1593,12 @@ Ordered by importance for latent-reasoning models on embedded targets:
    turns the per-step scan into batched matmuls over chunks, and pretraining
    on corpora of 10^8 words or more; at about 8,000 tokens a second on 4
    cores the VM is the limit (section 18).
-2. Distributed execution: multiple processes over `serve`/`stream`
+2. In-context memory at scale: `--recall` lowers the next-token loss on 2M
+   words (section 18); the open steps are pretraining with it on 10^8 words
+   and longer windows, streamed generation that carries the memory between
+   calls in a `state` (as `examples/recall/long.pl` does at the operation
+   level) inside `tgc generate`, and a learned rather than hashed n-gram key
+   for contexts longer than three tokens.
+3. Distributed execution: multiple processes over `serve`/`stream`
    transports, then data-parallel training with gradients and optimizer
    state partitioned across them (ZeRO, arXiv:1910.02054).
