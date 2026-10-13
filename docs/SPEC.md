@@ -853,14 +853,14 @@ h1 = gelu(x @ w1 + spmm(s, wt) + rmsnorm(ssm(tok)) @ wp + b1)
 
 ```
 tgc pretrain SOURCE [-o DIR] [--column COL] [--epochs N] [--steps N] [--batch N] [--lr X]
-                    [--layers N] [--mimo R] [--memory N] [--recall S] [--max-rows N] [--seed S]
+                    [--window T] [--layers N] [--mimo R] [--memory N] [--recall S] [--max-rows N] [--seed S]
 tgc train LABELED --model ssm --init DIR
 ```
 
 `pretrain` trains the embedding table and the blocks by next-token
 prediction on unlabeled text. The rows of the text column are packed into
 one token stream (hashed exactly as `train` hashes text) and cut into
-windows of 64 + 1 tokens. The generated model (`DIR/lm.tg`, plain
+windows of T + 1 tokens (`--window T`, default 64). The generated model (`DIR/lm.tg`, plain
 Technograd) ends in:
 
 ```python

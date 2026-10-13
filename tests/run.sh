@@ -211,6 +211,8 @@ $CC -std=c99 -Wall -Werror -c -o "$TMP/orcinfer.o" "$TMP/ord_rc/infer.c" && ok |
 $TGC pretrain "$TMP/order.csv" -o "$TMP/ord_mlm" --batch 8 --epochs 2 --memory 16 > "$TMP/omlm.log" 2>&1
 sed -n 's/^epoch \([02]\):.*validation loss \([0-9.]*\).*/\2/p' "$TMP/omlm.log" | tr '\n' ' ' | awk '{ exit !(NF == 2 && $2 > 0 && $2 < $1 - 2) }' && ok || bad "pretrain --memory: $(grep '^epoch' "$TMP/omlm.log" | tr '\n' ' ')"
 $TGC ir "$TMP/ord_mlm/lm.tg" | grep -q "spmm_tc" && ok || bad "memory values do not take row-sparse steps"
+$TGC pretrain "$TMP/order.csv" -o "$TMP/ord_w" --batch 4 --epochs 1 --window 16 --recall 64 > "$TMP/ow.log" 2>&1
+grep -q "windows of 16 tokens" "$TMP/ow.log" && grep -q "memory_scan(rM0" "$TMP/ord_w/lm.tg" && ok || bad "pretrain --window --recall: $(tail -2 "$TMP/ow.log")"
 # byte-level sequence-to-sequence: learn a fixed-key cipher from (in, out) pairs and emit exact strings
 perl examples/crypto_ctf/gen.pl caesar5 1500 1 > "$TMP/cae.jsonl"
 perl examples/crypto_ctf/gen.pl caesar5 300 999 > "$TMP/cae_test.jsonl"   # disjoint seed: unseen inputs

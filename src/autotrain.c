@@ -28,7 +28,7 @@
 
 typedef struct {
 	const char *source, *target, *out, *optimizer, *init, *column, *incol, *outcol, *input;
-	int epochs, hidden, max_rows, seed, text_dim, batch, ssm, layers, mimo, steps, maxlen, aligned, memory, recall;
+	int epochs, hidden, max_rows, seed, text_dim, batch, ssm, layers, mimo, steps, maxlen, aligned, memory, recall, window;
 	double lr, val;
 } Opts;
 
@@ -42,7 +42,7 @@ static void usage_data(void)
 	      "                   [--batch N] [--text-dim N] [--model bow|ssm] [--layers N] [--mimo R] [--memory N] [--recall S] [--seed S]\n"
 	      "                   [--init PRETRAINED_DIR]\n"
 	      "  tgc pretrain SOURCE [-o DIR] [--column COL] [--epochs N] [--steps N] [--batch N] [--lr X]\n"
-	      "                   [--layers N] [--mimo R] [--memory N] [--recall S] [--max-rows N] [--seed S]\n"
+	      "                   [--window T] [--layers N] [--mimo R] [--memory N] [--recall S] [--max-rows N] [--seed S]\n"
 	      "  tgc gen-train SOURCE [-o DIR] [--in COL] [--out COL] [--maxlen N] [--epochs N] [--batch N]\n"
 	      "                   [--lr X] [--layers N] [--mimo R] [--memory N] [--recall S] [--init DIR] [--aligned] [--seed S]   byte seq-to-seq (--aligned: length-preserving)\n"
 	      "  tgc generate DIR (--input STRING | --inputs FILE [--in COL] [--out COL]) [-o OUT]\n"
@@ -71,6 +71,10 @@ static void parse_opts(int argc, char **argv, int first, Opts *o)
 		else if (!strcmp(a, "--batch")) o->batch = atoi(v);
 		else if (!strcmp(a, "--layers")) o->layers = atoi(v);
 		else if (!strcmp(a, "--mimo")) o->mimo = atoi(v);
+		else if (!strcmp(a, "--window")) {
+			o->window = atoi(v);
+			if (o->window < 8 || o->window > 65536) die(NULL, 0, "--window is the pretraining window in tokens, 8 to 65536");
+		}
 		else if (!strcmp(a, "--recall")) {
 			o->recall = atoi(v);
 			int r = (int)(sqrt((double)o->recall) + 0.5);
@@ -974,7 +978,7 @@ static int cmd_pretrain(Opts *o)
 	for (int i = 0; i < t->ncols && col < 0; i++)
 		if (o->column ? !strcmp(t->col[i].name, o->column) : t->col[i].kind == COL_TEXT) col = i;
 	if (col < 0) die(NULL, 0, o->column ? "pretrain: no column '%s'" : "pretrain: %s has no text column (name one with --column)", o->column ? o->column : o->source);
-	Layout L = { 0, 0, 0, 0, 64, o->text_dim, 32, o->layers > 0 ? o->layers : 2, o->mimo > 0 ? o->mimo : 4, o->memory, o->recall };
+	Layout L = { 0, 0, 0, 0, o->window > 0 ? o->window : 64, o->text_dim, 32, o->layers > 0 ? o->layers : 2, o->mimo > 0 ? o->mimo : 4, o->memory, o->recall };
 	int T = L.T, Bm = o->batch > 0 ? o->batch : 16;
 	/* rows are packed into one token stream (as in GPT pretraining), cut into
 	 * windows of T + 1 tokens that overlap by one */
