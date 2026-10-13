@@ -1266,6 +1266,47 @@ memory holds 244,860: four times the slots store 4.1 times the facts, at
 0.45 to 0.47 bits per parameter. Capacity follows the slot count, not the
 work done per token; the score cost grows only with N = sqrt(slots).
 
+### In-context memory: recall of pairs written while reading
+
+The product-key memory above is learned at training time. Long context needs
+the other kind: a memory written while the sequence is read. The delta rule
+(DeltaNet, arXiv:2406.06484; sparse delta memory, arXiv:2607.07386) keeps a
+matrix M and, at each token with address a, value v and write gate w,
+
+```
+r = a M                      # read
+M = M + beta w a^T (v - r)   # replace what the address held by v
+```
+
+`examples/recall/` measures it on multi-query associative recall (MQAR,
+arXiv:2312.04927): P distinct keys, each with a random value of 64, written
+one pair per step, then 16 queries of written keys; the model must output
+each value. Every batch (16 sequences) is new, so the recall on the last
+10% of 3,000 batches is held out. Two addresses share the same scan:
+
+- **dense**: a = k / |k| with k in R^dk, a projection of the key's
+  embedding (DeltaNet). The state holds about dk pairs before writes
+  interfere.
+- **sparse**: a = softmax over the top 8 of S learned slot scores, zero
+  elsewhere. `rows` computes the same model by reading the 8 rows with
+  `take` and writing them with `take_t` (scatter-add), so a step costs
+  O(8 dv) arithmetic instead of O(S dv); over 300 training steps its
+  outputs equal the full-address form and it runs 2.4 times faster.
+
+With 64 distinct keys (AdamW lr 0.003, dv = 32):
+
+| Pairs P | dense, dk = 16 | dense, dk = 256 | sparse, S = 256 |
+|---------|----------------|-----------------|-----------------|
+| 8 | 99.8% | not run | 99.7% |
+| 16 | 99.2% (9 s) | 100% (82 s) | 100% (87 s) |
+| 32 | 95.4% (13 s) | 99.8% (126 s) | 100% (135 s) |
+| 64 | 79.9% (21 s) | 98.4% (215 s) | 100% (232 s) |
+
+The dense state of 16 by 32 loses recall once the pairs exceed its 16
+dimensions; at the same state size as the sparse memory (256 by 32), dense
+addressing still interferes at 64 pairs, while the sparse address, which
+touches 8 of 256 rows per write, recalls every pair.
+
 ## 21. Quantization
 
 ```

@@ -14,7 +14,8 @@
 # Usage: models.pl KIND STEPS DIR [SLOTS]   (KIND dense|sparse|rows; SLOTS = dk or S)
 use strict;
 my ($kind, $T, $dir, $S) = @ARGV;
-my ($B, $NK, $NV, $d, $dv) = (16, 64, 64, 32, 32);
+my ($B, $NV, $d, $dv) = (16, 64, 32, 32);
+my $NK = $ENV{NK} || 64; # distinct keys
 $S ||= $kind eq 'dense' ? 16 : 256;
 my $lr = $ENV{LR} || 0.003;
 my $TB = $T * $B;

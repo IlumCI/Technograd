@@ -3,6 +3,8 @@
 # a dense address (DeltaNet, dk = 16 and 256) and a sparse top-8 address over
 # 256 slots. Usage: run.sh TGC WORKDIR [ROWS] [P...]. Prints the recall on the
 # last 10% of batches; every batch is new sequences, so this is held out.
+# NK sets the number of distinct keys (default 64); MODELS the models, as
+# KIND:SLOTS (default "dense:16 dense:256 sparse:256").
 set -e
 TGC=$1; W=$2; N=${3:-3000}; shift 3 2>/dev/null || shift $#
 PS=${*:-"8 16 32 64"}
@@ -10,8 +12,8 @@ DIR=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$W"; W=$(cd "$W" && pwd)
 TGC=$(cd "$(dirname "$TGC")" && pwd)/$(basename "$TGC")
 for P in $PS; do
-	perl "$DIR/data.pl" "$P" 16 "$N" 1 > "$W/d$P.csv"
-	for M in dense:16 dense:256 sparse:256; do
+	perl "$DIR/data.pl" "$P" 16 "$N" 1 "${NK:-64}" > "$W/d$P.csv"
+	for M in ${MODELS:-dense:16 dense:256 sparse:256}; do
 		K=${M%%:*}; S=${M#*:}; D=$W/${K}${S}_$P; mkdir -p "$D"
 		perl "$DIR/models.pl" "$K" $((P + 16)) "$D" "$S"
 		t0=$(date +%s)
