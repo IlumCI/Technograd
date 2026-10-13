@@ -825,6 +825,16 @@ h1 = gelu(x @ w1 + spmm(s, wt) + rmsnorm(ssm(tok)) @ wp + b1)
   both RMS-normalized); scoring costs O(N),
   not O(N^2). The values are read with `spmm`, so the optimizer steps only
   the rows a batch read.
+- **In-context memory** (`--recall S`, S a square, for the same three
+  commands): after the last block's mixer, the previous token's embedding
+  addresses S slots per sequence with product keys (two sets of sqrt(S)
+  sub-keys, the best 8 of the 8 x 8 sums); with `c = rmsnorm(e) gr`, step t
+  writes `c Wrv` with a learned gate `sigmoid(c wrg + brg)` (zero on
+  padding) and reads with the same address, all in one `memory_scan`
+  (section 20); `e += reads Wro`. Keying on the previous token is the
+  induction-head pattern: after "k v", a later "k" reads back v. Unlike
+  `--memory`, which is trained once and read only, this memory starts empty
+  for every sequence and is written while the sequence is read.
 - **Training** is backpropagation through time (section 19) inside the same
   `train ... with adamw` step; `infer.tg` and `infer.c` run the stack over
   one row.
@@ -833,7 +843,7 @@ h1 = gelu(x @ w1 + spmm(s, wt) + rmsnorm(ssm(tok)) @ wp + b1)
 
 ```
 tgc pretrain SOURCE [-o DIR] [--column COL] [--epochs N] [--steps N] [--batch N] [--lr X]
-                    [--layers N] [--mimo R] [--memory N] [--max-rows N] [--seed S]
+                    [--layers N] [--mimo R] [--memory N] [--recall S] [--max-rows N] [--seed S]
 tgc train LABELED --model ssm --init DIR
 ```
 

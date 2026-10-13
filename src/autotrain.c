@@ -344,6 +344,8 @@ static void gen_ssm_weights(char *b, size_t cap, size_t *o, const Layout *l, int
 	if (l->recall) {
 		PW("param rM0 : f32[%d, %d] = zeros\nparam roff : f32[%d, 1] = [", Bm * l->recall, D, Bm);
 		for (int i = 0; i < Bm; i++) PW("%s[%d]", i ? ", " : "", i * l->recall);
+		PW("]\nparam rprev : f32[%d] = [", T * Bm); /* row of the same stream one step earlier; -1 (zero) at the first step */
+		for (int i = 0; i < T * Bm; i++) PW("%s%d", i ? ", " : "", i < Bm ? -1 : i - Bm);
 		PW("]\nparam tidx : f32[1, 3] = [[1, 0, 0]]\nparam trd : f32[1, 3] = [[0, 1, 0]]\nparam twr : f32[1, 3] = [[0, 0, 1]]\n");
 	}
 	if (l->mem) PW("param pidx : f32[1, 2] = [[1, 0]]\nparam pwt : f32[1, 2] = [[0, 1]]\n"); /* (index, weight) pairs for spmm */ /* (v0, v1) @ J = (-v1, v0): a quarter turn of each channel pair */
@@ -396,8 +398,9 @@ static void gen_ssm_def(char *b, size_t cap, size_t *o, const Layout *l, int Bm,
 			int n = (int)(sqrt((double)l->recall) + 0.5);
 			PW("    # block %d: in-context memory, %d slots per sequence, written and read while the sequence is read\n", k, l->recall);
 			PW("    c = rmsnorm(e%dm) * gr_%d\n", k, k);
-			PW("    rs1 = (rmsnorm(c @ Wr1_%d) @ transpose(rmsnorm(R1_%d))) * 4\n", k, k);
-			PW("    rs2 = (rmsnorm(c @ Wr2_%d) @ transpose(rmsnorm(R2_%d))) * 4\n", k, k);
+			PW("    kp = take(e0, rprev)\n"); /* the previous token's embedding: the address (an induction head's key) */
+			PW("    rs1 = (rmsnorm(kp @ Wr1_%d) @ transpose(rmsnorm(R1_%d))) * 4\n", k, k);
+			PW("    rs2 = (rmsnorm(kp @ Wr2_%d) @ transpose(rmsnorm(R2_%d))) * 4\n", k, k);
 			PW("    ri1 = topk(rs1, 8)\n    ri2 = topk(rs2, 8)\n");
 			PW("    rcs = reshape(reshape(take_along(rs1, ri1), %d, 8, 1) + reshape(take_along(rs2, ri2), %d, 1, 8), %d, 64)\n", TB, TB, TB);
 			PW("    rci = reshape(reshape(ri1, %d, 8, 1) * %d + reshape(ri2, %d, 1, 8), %d, 64)\n", TB, n, TB, TB);

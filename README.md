@@ -40,7 +40,7 @@ sh examples/crypto_ctf/run.sh build/tgc work          # learn fixed-key classica
 sh examples/qwen3/run.sh build/tgc work             # import open-weight Qwen3-0.6B into TGIR; logits match Hugging Face
 sh examples/memory_capacity/run.sh build/tgc work   # product-key memory vs dense MLP at equal compute per token
 build/tgc predict iris_model new_flowers.csv     # predictions on raw new data
-make test       # 335 checks (offline; TG_TEST_NETWORK=1 adds a Hugging Face run)
+make test       # 338 checks (offline; TG_TEST_NETWORK=1 adds a Hugging Face run)
 make fixer      # retrain the auto-fix forest (deterministic, ~15 s) and evaluate it on held-out programs
 
 build/tgc run  examples/latent_reasoner.tg 1,0,0,1,0,1,1,0

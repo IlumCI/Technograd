@@ -203,6 +203,11 @@ $TGC train "$TMP/order.csv" --model ssm --memory 16 --epochs 10 -o "$TMP/ord_mem
 grep -q "accuracy 100.00%" "$TMP/om.log" && grep -q "topk(s1, 8)" "$TMP/ord_mem/infer.tg" && ok || bad "ssm --memory: $(grep 'best epoch' "$TMP/om.log")"
 [ "$($TGC predict "$TMP/ord_mem" "$TMP/onew.csv" 2>/dev/null | cut -d, -f1 | tr '\n' ' ')" = 'prediction "pos" "neg" ' ] && ok || bad "ssm --memory predict"
 $CC -std=c99 -Wall -Werror -c -o "$TMP/ominfer.o" "$TMP/ord_mem/infer.c" && ok || bad "ssm --memory infer.c does not compile"
+# in-context memory (--recall): a memory_scan in the last block, written while the sequence is read
+$TGC train "$TMP/order.csv" --model ssm --recall 64 --epochs 10 -o "$TMP/ord_rc" > "$TMP/orc.log" 2>&1
+grep -q "accuracy 100.00%" "$TMP/orc.log" && grep -q "memory_scan(rM0" "$TMP/ord_rc/infer.tg" && ok || bad "ssm --recall: $(grep 'best epoch' "$TMP/orc.log")"
+[ "$($TGC predict "$TMP/ord_rc" "$TMP/onew.csv" 2>/dev/null | cut -d, -f1 | tr '\n' ' ')" = 'prediction "pos" "neg" ' ] && ok || bad "ssm --recall predict"
+$CC -std=c99 -Wall -Werror -c -o "$TMP/orcinfer.o" "$TMP/ord_rc/infer.c" && ok || bad "ssm --recall infer.c does not compile"
 $TGC pretrain "$TMP/order.csv" -o "$TMP/ord_mlm" --batch 8 --epochs 2 --memory 16 > "$TMP/omlm.log" 2>&1
 sed -n 's/^epoch \([02]\):.*validation loss \([0-9.]*\).*/\2/p' "$TMP/omlm.log" | tr '\n' ' ' | awk '{ exit !(NF == 2 && $2 > 0 && $2 < $1 - 2) }' && ok || bad "pretrain --memory: $(grep '^epoch' "$TMP/omlm.log" | tr '\n' ' ')"
 $TGC ir "$TMP/ord_mlm/lm.tg" | grep -q "spmm_tc" && ok || bad "memory values do not take row-sparse steps"
