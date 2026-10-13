@@ -208,6 +208,8 @@ $CC -std=c99 -Wall -Werror -c -o "$TMP/ominfer.o" "$TMP/ord_mem/infer.c" && ok |
 $TGC train "$TMP/order.csv" --model ssm --match --epochs 10 -o "$TMP/ord_sm" > "$TMP/osm.log" 2>&1
 grep -q "accuracy 100.00%" "$TMP/osm.log" && grep -q "suffix_match(" "$TMP/ord_sm/infer.tg" && ok || bad "ssm --match: $(grep 'best epoch' "$TMP/osm.log")"
 $CC -std=c99 -Wall -Werror -c -o "$TMP/osminfer.o" "$TMP/ord_sm/infer.c" && ok || bad "ssm --match infer.c does not compile"
+$TGC pretrain "$TMP/order.csv" -o "$TMP/ord_smlm" --batch 8 --epochs 2 --match > "$TMP/osmlm.log" 2>&1
+sed -n 's/^epoch \([02]\):.*validation loss \([0-9.]*\).*/\2/p' "$TMP/osmlm.log" | tr '\n' ' ' | awk '{ exit !(NF == 2 && $2 > 0 && $2 < $1 - 2) }' && grep -q "smo = reshape(suffix_match(" "$TMP/ord_smlm/lm.tg" && ok || bad "pretrain --match: $(grep '^epoch' "$TMP/osmlm.log" | tr '\n' ' ')"
 # in-context memory (--recall): a memory_scan in the last block, written while the sequence is read
 $TGC train "$TMP/order.csv" --model ssm --recall 64 --epochs 10 -o "$TMP/ord_rc" > "$TMP/orc.log" 2>&1
 grep -q "accuracy 100.00%" "$TMP/orc.log" && grep -q "memory_scan(rM0" "$TMP/ord_rc/infer.tg" && ok || bad "ssm --recall: $(grep 'best epoch' "$TMP/orc.log")"

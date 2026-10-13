@@ -884,6 +884,27 @@ h1 = gelu(x @ w1 + spmm(s, wt) + rmsnorm(ssm(tok)) @ wp + b1)
   Trained on ordinary text only, the n-gram memory learns to copy (the
   repeated-text loss falls by 0.54 nats) and lowers the held-out loss by
   0.077 nats at about the cost of the model without it.
+- **Suffix-automaton match** (`--match`, for the same three commands): the
+  token that followed the longest earlier match of the current suffix
+  (`suffix_match`, an online suffix automaton, Blumer et al. 1985), as
+  RWKV's ROSA uses it. In the last block, `e += g * (E[match] Wm)` with
+  `g = sigmoid(log(1 + length) wml + rmsnorm(e) gm . wmg + bmg)`; in
+  `pretrain` the matched token's logit also gets a learned bonus
+  `softplus(log(1 + length) cl + h . cw + cb)` (zero without a match), the
+  cache model of Kuhn and De Mori (1990) with unbounded matches. Exact for
+  any match length at amortized O(1) per token, with no parameters in the
+  match itself.
+
+  On the military science and purple-team corpus (windows of 512, batch 2,
+  4 epochs, held-out next-token loss):
+
+  | Model | Loss | Time |
+  |-------|------|------|
+  | no memory | 4.3899 | 1,184 s |
+  | `--match` | 4.3285 | 1,315 s |
+  | `--recall 16384` | 4.3130 | 1,201 s |
+  | `--match --recall 16384` | **4.2973** | 1,380 s |
+
   Measured with `gen-train` on byte strings (`examples/recall/gen.pl`, 6,000
   pairs, 10 epochs, 500 held out): with 8 letter-digit pairs and one query
   ("j3c8e5w3o8t6v2q9:j" -> "3"), exact match goes from 30.4% (no memory)
@@ -1608,12 +1629,14 @@ Ordered by importance for latent-reasoning models on embedded targets:
    turns the per-step scan into batched matmuls over chunks, and pretraining
    on corpora of 10^8 words or more; at about 8,000 tokens a second on 4
    cores the VM is the limit (section 18).
-2. In-context memory at scale: `--recall` lowers the next-token loss on 2M
-   words (section 18); the open steps are pretraining with it on 10^8 words
-   and longer windows, streamed generation that carries the memory between
-   calls in a `state` (as `examples/recall/long.pl` does at the operation
-   level) inside `tgc generate`, and a learned rather than hashed n-gram key
-   for contexts longer than three tokens.
+2. In-context memory at scale: `--recall` and `--match` lower the
+   next-token loss on 2M words (section 18). Open: pretraining with them on
+   10^8 words and longer windows; streamed generation that carries the
+   memory and the automaton between calls inside `tgc generate`; and the
+   corpus-level form of the match, an unbounded n-gram over the training
+   corpus by suffix array (Manber and Myers 1990; infini-gram,
+   arXiv:2401.17377), which supplies memorized continuations with no
+   gradient compute, provided the document being predicted is excluded.
 3. Distributed execution: multiple processes over `serve`/`stream`
    transports, then data-parallel training with gradients and optimizer
    state partitioned across them (ZeRO, arXiv:1910.02054).

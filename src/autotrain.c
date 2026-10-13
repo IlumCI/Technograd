@@ -987,13 +987,35 @@ static char *gen_lm(const char *name, const Layout *l, int Bm, double lr, int mo
 		  "# token, gated by SiLU; training steps only the rows a batch reads.\n", l->mem * l->mem);
 	P("model %s_lm%s\n\n", name, mode == GEN_EVAL ? "_eval" : "");
 	gen_ssm_weights(b, cap, &o, l, Bm, 0, mode);
-	P("param onesD : f32[%d] = ones\nparam onesN : f32[%d] = ones\n\n", D, TB);
+	P("param onesD : f32[%d] = ones\nparam onesN : f32[%d] = ones\n", D, TB);
+	if (l->match) { /* the copy bonus's gate: log match length, final state, bias */
+		const char *nm[3] = { "cw", "cl", "cb" }, *sh[3] = { "", "f32", "f32" }, *init[3] = { "", "1", "0" };
+		char s0[32];
+		snprintf(s0, sizeof s0, "f32[%d]", D);
+		sh[0] = s0;
+		init[0] = "zeros";
+		for (int i = 0; i < 3; i++) {
+			if (mode == GEN_EVAL) P("param %s : %s = zeros\n", nm[i], sh[i]);
+			else P("state %s : %s = %s\n", nm[i], sh[i], init[i]);
+		}
+	}
+	P("\n");
 	gen_ssm_def(b, cap, &o, l, Bm, 0);
 	P("def forward(tok: f32[%d, 1, 2], nxt: f32[%d, 1, 2]) -> f32:\n", TB, TB);
 	P("    h = states(tok)\n");
 	P("    r = active(nxt, E)\n");
 	P("    L = 15 * tanh((h @ transpose(take(E, r))) / 15) - step(0 - r) * 10000\n");
 	P("    pos = 15 * tanh(((h * spmm(nxt, E)) @ onesD) / 15)\n");
+	if (l->match) { /* copy bonus on the matched token (a cache model, Kuhn and De Mori 1990, with unbounded matches) */
+		P("    mw = reshape(tok, %d, 2) @ sel2\n", TB);
+		P("    smo = reshape(suffix_match(reshape((reshape(tok, %d, 2) @ tsel) * mw + mw - 1, %d, %d)), %d, 2)\n", TB, l->T, Bm, TB);
+		P("    pred = smo @ msel0\n    mlen = smo @ msel1\n");
+		P("    cg = softplus(log(mlen + 1) * cl + h @ cw + cb) * step(mlen - 0.5)\n");
+		P("    dl = reshape(pred, %d, 1) - reshape(r, 1, %d)\n", TB, TB);
+		P("    L = L + reshape(cg, %d, 1) * (1 - step(dl * dl - 0.25)) * reshape(step(r + 0.5), 1, %d)\n", TB, TB);
+		P("    dt = pred - reshape(nxt, %d, 2) @ tsel\n", TB);
+		P("    pos = pos + cg * (1 - step(dt * dt - 0.25))\n");
+	}
 	P("    mk = reshape(nxt, %d, 2) @ sel2\n", TB);
 	P("    loss = sum((log(exp(L) @ onesN) - pos) * mk) / (sum(mk) + 0.000001)\n");
 	if (mode == GEN_TRAIN) P("    train loss with adamw(lr=%g, clip=1)\n", lr);
