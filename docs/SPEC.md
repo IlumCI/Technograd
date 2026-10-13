@@ -104,6 +104,7 @@ and parentheses. All binary operators are left associative.
 | `take(w, r)` | `(D, ...) , (n) -> (n, ...)`: rows `r` of `w`; zero for -1 or out-of-range indices; repeats allowed |
 | `topk(x, k)` | `(..., n) -> (..., k)`, k an integer literal 1..256: indices of the k largest entries along the last axis, largest first, ties to the lower index, NaN skipped, -1 where k > n. Not differentiable (indices); the selection is piecewise constant |
 | `take_along(x, i)` | `(..., n), (..., k) -> (..., k)`: `x[..., i[..., j]]`, zero where `i` is outside `[0, n)`; the gather that pairs with `topk`. Lowered to `take` over the flattened rows, so its gradient is a scatter-add into `x` |
+| `memory_scan(m0, p, v)`, `memory_final(m0, p, v)` | a delta-rule memory written while a sequence is read: `m0` (rows, dv), `p` (T, n, k, 3) holding k (row, read weight a, write weight c) triples per step and stream, `v` (T, n, dv). Step t, stream g, in order: `r = sum_i a_i M[row_i]`, then `M[row_i] += c_i (v - r)`. `memory_scan` returns the reads (T, n, dv), `memory_final` the memory after the last step (rows, dv). Only the addressed rows are touched; rows outside `[0, rows)` are skipped (section 20) |
 | `grad(y, x)` | `y` scalar, `x` a name; returns dy/dx with the shape of `x` (section 16) |
 | `mse(p, t)`, `bce(p, t)`, `xent(logits, onehot)` | scalar losses (section 17) |
 
@@ -518,7 +519,11 @@ model compiles to freestanding C like any other.
   get zero. Its two derivative operations are themselves differentiable, so
   second-order gradients through `spmm` work;
 - `take` sends its gradient to the table as a scatter-add (`take_t`), whose
-  own derivative is `take`; `active` and `topk` return indices and have
+  own derivative is `take`; `memory_scan` sends gradients to the memory,
+  the read and write weights and the values through `memscan_t`, which runs
+  the steps backwards from the final memory and undoes each write (no
+  per-step copy of the memory is stored; the rows get none);
+  `active` and `topk` return indices and have
   none, so a top-k selection passes gradient only through the gathered
   scores and rows (`take_along`, `take`);
 - `scan` loops are differentiated by backpropagation through time
