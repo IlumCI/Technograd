@@ -1,0 +1,20 @@
+# memory_scan with 4-field entries (row, read, write, delta read): reads and
+# writes at different rows; returns the reads and the gradient wrt the values.
+model mscan4
+
+param M0 : f32[6, 3] = rand(1, 1)
+param I : f32[4, 2, 2] = [[[0, 4], [3, 5]], [[1, 4], [3, 3]], [[0, 2], [5, 4]], [[4, 1], [3, 0]]]
+param A : f32[4, 2, 2] = [[[1, 0], [0.5, 0]], [[1, 0], [0.7, 0]], [[0.6, 0], [1, 0]], [[1, 0], [0.4, 0]]]
+param C : f32[4, 2, 2] = [[[0, 0.9], [0, 0.6]], [[0, 0.8], [0, 0.5]], [[0, 0.7], [0, 1]], [[0, 0.3], [0, 0.9]]]
+param W : f32[4, 2, 3] = rand(4, 1)
+param e0 : f32[1, 4] = [[1, 0, 0, 0]]
+param e1 : f32[1, 4] = [[0, 1, 0, 0]]
+param e2 : f32[1, 4] = [[0, 0, 1, 0]]
+param e3 : f32[1, 4] = [[0, 0, 0, 1]]
+param h : f32[2, 1, 1, 1] = [[[[1]]], [[[0]]]]
+
+def forward(v: f32[4, 2, 3]) -> f32[2, 4, 2, 3]:
+    P = reshape(I, 4, 2, 2, 1) * e0 + reshape(A, 4, 2, 2, 1) * e1 + reshape(C, 4, 2, 2, 1) * e2 + reshape(C, 4, 2, 2, 1) * e3
+    R = memory_scan(M0, P, v)
+    G = grad(sum(memory_scan(M0, P, v) * W) + sum(memory_final(M0, P, v) * memory_final(M0, P, v)), v)
+    return reshape(R, 1, 4, 2, 3) * h + reshape(G, 1, 4, 2, 3) * (1 - h)

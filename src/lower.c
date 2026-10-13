@@ -278,10 +278,11 @@ static int const_param(L *l, const char *name, const Shape *sh, const float *dat
  *   ok = step(i + 1) * step(n - i), idx = (i + off) * ok + ok - 1 */
 /* memory_scan(m0, p, v): a delta-rule memory written while a sequence is
  * read (section 20). m0 (rows, dv), p (T, n, k, 3) holding k (row, read
- * weight, write weight) triples per step and stream, v (T, n, dv). Returns
- * the reads (T, n, dv); memory_final(m0, p, v) returns the memory after the
- * last step (rows, dv). Both are a memscan, whose output stacks the reads
- * over the final memory, and a take of its rows. */
+ * weight, write weight) entries per step and stream, or (T, n, k, 4) with a
+ * delta-read weight as well, v (T, n, dv). Returns the reads (T, n, dv);
+ * memory_final(m0, p, v) returns the memory after the last step (rows, dv).
+ * Both are a memscan, whose output stacks the reads, the delta reads and the
+ * final memory, and a take of its rows. */
 static int lower_memory(L *l, Block *b, Env *e, Sx *x)
 {
 	Module *m = l->m;
@@ -290,7 +291,7 @@ static int lower_memory(L *l, Block *b, Env *e, Sx *x)
 	int m0 = lower_expr(l, b, e, x->v[2]), p = lower_expr(l, b, e, x->v[3]), v = lower_expr(l, b, e, x->v[4]);
 	int raw = ir_op3(m, b, OP_MEMSCAN, m0, p, v, l->file, x->line);
 	Shape ps = m->val[p].sh, vs = m->val[v].sh;
-	int tn = ps.dim[0] * ps.dim[1], rows = m->val[m0].sh.dim[0], len = fin ? rows : tn, start = fin ? tn : 0;
+	int tn = ps.dim[0] * ps.dim[1], rows = m->val[m0].sh.dim[0], len = fin ? rows : tn, start = fin ? 2 * tn : 0;
 	char name[64];
 	snprintf(name, sizeof name, "__range_%d_%d", start, len);
 	Shape rs = { 1, { len } };

@@ -250,30 +250,30 @@ int op_infer(Op op, const Shape *a, int na, Shape *out, char *err, size_t errn)
 		return 1;
 	}
 	case CLS_MEMSCAN: {
-		/* memscan(m0, p, v) -> (T n + rows, dv): m0 (rows, dv), p (T, n, k, 3), v (T, n, dv)
-		 * memscan_t(y, pv, g) -> (N): y and g (T n + rows, dv), pv (T, n, 3k + dv) */
+		/* memscan(m0, p, v) -> (2 T n + rows, dv): m0 (rows, dv), p (T, n, k, 3 or 4), v (T, n, dv)
+		 * memscan_t(y, pv, g) -> (N): y and g (2 T n + rows, dv), pv (T, n, 4k + dv) */
 		if (op == OP_MEMSCAN) {
 			const Shape *m0 = &a[0], *p = &a[1], *v = &a[2];
-			if (m0->rank != 2 || p->rank != 4 || p->dim[3] != 3 || v->rank != 3 || v->dim[0] != p->dim[0] || v->dim[1] != p->dim[1] ||
-			    v->dim[2] != m0->dim[1]) {
+			if (m0->rank != 2 || p->rank != 4 || (p->dim[3] != 3 && p->dim[3] != 4) || v->rank != 3 || v->dim[0] != p->dim[0] ||
+			    v->dim[1] != p->dim[1] || v->dim[2] != m0->dim[1]) {
 				shape_str(p, s0, sizeof s0);
 				shape_str(v, s1, sizeof s1);
-				snprintf(err, errn, "'memscan' needs a memory (rows, dv), triples (T, n, k, 3) and values (T, n, dv); got %s and %s", s0, s1);
+				snprintf(err, errn, "'memscan' needs a memory (rows, dv), entries (T, n, k, 3 or 4) and values (T, n, dv); got %s and %s", s0, s1);
 				return 0;
 			}
 			out->rank = 2;
-			out->dim[0] = p->dim[0] * p->dim[1] + m0->dim[0];
+			out->dim[0] = 2 * p->dim[0] * p->dim[1] + m0->dim[0];
 			out->dim[1] = m0->dim[1];
 			return 1;
 		}
 		const Shape *y = &a[0], *pv = &a[1], *g = &a[2];
 		int dv = y->rank == 2 ? y->dim[1] : 0, tn = pv->rank == 3 ? pv->dim[0] * pv->dim[1] : 0;
-		if (!dv || !tn || !shape_eq(y, g) || y->dim[0] <= tn || pv->dim[2] <= dv || (pv->dim[2] - dv) % 3) {
-			snprintf(err, errn, "'memscan_t' needs memscan's output, the packed triples and values, and the output's adjoint");
+		if (!dv || !tn || !shape_eq(y, g) || y->dim[0] <= 2 * tn || pv->dim[2] <= dv || (pv->dim[2] - dv) % 4) {
+			snprintf(err, errn, "'memscan_t' needs memscan's output, the packed entries and values, and the output's adjoint");
 			return 0;
 		}
 		long o1, o2, o3, N;
-		memscan_layout(pv->dim[0], pv->dim[1], (pv->dim[2] - dv) / 3, y->dim[0] - tn, dv, &o1, &o2, &o3, &N);
+		memscan_layout(pv->dim[0], pv->dim[1], (pv->dim[2] - dv) / 4, y->dim[0] - 2 * tn, dv, &o1, &o2, &o3, &N);
 		out->rank = 1;
 		out->dim[0] = (int)N;
 		return 1;

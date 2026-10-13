@@ -279,8 +279,14 @@ static void gen_ssm_weights(char *b, size_t cap, size_t *o, const Layout *l, int
 			snprintf(sh, sizeof sh, "f32[%d]", D);
 			snprintf(in, sizeof in, "rand(%d, %.6g)", sd + 70, a);
 			ssm_w(b, cap, o, mode, "wrg", k, sh, in);
+			snprintf(in, sizeof in, "rand(%d, %.6g)", sd + 71, a);
+			ssm_w(b, cap, o, mode, "wrc", k, sh, in);
+			snprintf(in, sizeof in, "rand(%d, %.6g)", sd + 72, a);
+			ssm_w(b, cap, o, mode, "wrp", k, sh, in);
 			ssm_w(b, cap, o, mode, "gr", k, sh, "ones");
 			ssm_w(b, cap, o, mode, "brg", k, "f32", "0");
+			ssm_w(b, cap, o, mode, "brc", k, "f32", "0");
+			ssm_w(b, cap, o, mode, "brp", k, "f32", "0");
 		}
 		snprintf(sh, sizeof sh, "f32[%d]", D);
 		ssm_w(b, cap, o, mode, "g1", k, sh, "ones");
@@ -350,7 +356,8 @@ static void gen_ssm_weights(char *b, size_t cap, size_t *o, const Layout *l, int
 		for (int i = 0; i < Bm; i++) PW("%s[%d]", i ? ", " : "", i * l->recall);
 		PW("]\nparam rprev : f32[%d] = [", T * Bm); /* row of the same stream one step earlier; -1 (zero) at the first step */
 		for (int i = 0; i < T * Bm; i++) PW("%s%d", i ? ", " : "", i < Bm ? -1 : i - Bm);
-		PW("]\nparam tidx : f32[1, 3] = [[1, 0, 0]]\nparam trd : f32[1, 3] = [[0, 1, 0]]\nparam twr : f32[1, 3] = [[0, 0, 1]]\n");
+		PW("]\nparam tidx : f32[1, 4] = [[1, 0, 0, 0]]\nparam trd : f32[1, 4] = [[0, 1, 0, 0]]\nparam twr : f32[1, 4] = [[0, 0, 1, 0]]\n"
+		   "param tdr : f32[1, 4] = [[0, 0, 0, 1]]\nparam tcur : f32[2, 1, 1] = [[[1]], [[0]]]\n");
 	}
 	if (l->mem) PW("param pidx : f32[1, 2] = [[1, 0]]\nparam pwt : f32[1, 2] = [[0, 1]]\n"); /* (index, weight) pairs for spmm */ /* (v0, v1) @ J = (-v1, v0): a quarter turn of each channel pair */
 	PW("param h0 : f32[%d, %d, %d] = zeros\n", Bm * Hh, N, P);
@@ -402,16 +409,25 @@ static void gen_ssm_def(char *b, size_t cap, size_t *o, const Layout *l, int Bm,
 			int n = (int)(sqrt((double)l->recall) + 0.5);
 			PW("    # block %d: in-context memory, %d slots per sequence, written and read while the sequence is read\n", k, l->recall);
 			PW("    c = rmsnorm(e%dm) * gr_%d\n", k, k);
-			PW("    kp = take(e0, rprev)\n"); /* the previous token's embedding: the address (an induction head's key) */
-			PW("    rs1 = (rmsnorm(kp @ Wr1_%d) @ transpose(rmsnorm(R1_%d))) * 4\n", k, k);
-			PW("    rs2 = (rmsnorm(kp @ Wr2_%d) @ transpose(rmsnorm(R2_%d))) * 4\n", k, k);
-			PW("    ri1 = topk(rs1, 8)\n    ri2 = topk(rs2, 8)\n");
-			PW("    rcs = reshape(reshape(take_along(rs1, ri1), %d, 8, 1) + reshape(take_along(rs2, ri2), %d, 1, 8), %d, 64)\n", TB, TB, TB);
-			PW("    rci = reshape(reshape(ri1, %d, 8, 1) * %d + reshape(ri2, %d, 1, 8), %d, 64)\n", TB, n, TB, TB);
-			PW("    rj = topk(rcs, 8)\n");
-			PW("    ra = reshape(softmax(take_along(rcs, rj)), %d, %d, 8, 1)\n", T, Bm);
-			PW("    rg = reshape(sigmoid(c @ wrg_%d + brg_%d) * reshape(m, %d), %d, %d, 1, 1)\n", k, k, TB, T, Bm);
-			PW("    RP = reshape(reshape(take_along(rci, rj), %d, %d, 8) + roff, %d, %d, 8, 1) * tidx + ra * trd + ra * rg * twr\n", T, Bm, T, Bm);
+			/* one address function f(token embedding): the current token reads what followed it before;
+			 * the previous token's address takes the current state (and can be read too) */
+			for (int w = 0; w < 2; w++) {
+				const char *x = w ? "take(e0, rprev)" : "e0", *z = w ? "p" : "c";
+				PW("    %s1 = (rmsnorm(%s @ Wr1_%d) @ transpose(rmsnorm(R1_%d))) * 4\n", z, x, k, k);
+				PW("    %s2 = (rmsnorm(%s @ Wr2_%d) @ transpose(rmsnorm(R2_%d))) * 4\n", z, x, k, k);
+				PW("    %si1 = topk(%s1, 8)\n    %si2 = topk(%s2, 8)\n", z, z, z, z);
+				PW("    %scs = reshape(reshape(take_along(%s1, %si1), %d, 8, 1) + reshape(take_along(%s2, %si2), %d, 1, 8), %d, 64)\n", z, z, z, TB, z, z, TB, TB);
+				PW("    %sci = reshape(reshape(%si1, %d, 8, 1) * %d + reshape(%si2, %d, 1, 8), %d, 64)\n", z, z, TB, n, z, TB, TB);
+				PW("    %sj = topk(%scs, 8)\n", z, z);
+				PW("    %sa = reshape(softmax(take_along(%scs, %sj)), %d, %d, 8, 1)\n", z, z, z, T, Bm);
+				PW("    %srow = reshape(reshape(take_along(%sci, %sj), %d, %d, 8) + roff, %d, %d, 8, 1)\n", z, z, z, T, Bm, T, Bm);
+			}
+			PW("    gc = reshape(sigmoid(c @ wrc_%d + brc_%d), %d, %d, 1, 1)\n", k, k, T, Bm);
+			PW("    gp = reshape(sigmoid(c @ wrp_%d + brp_%d), %d, %d, 1, 1)\n", k, k, T, Bm);
+			PW("    gw = reshape(sigmoid(c @ wrg_%d + brg_%d) * reshape(m, %d), %d, %d, 1, 1)\n", k, k, TB, T, Bm);
+			PW("    Ec = crow * tidx + ca * gc * trd\n");
+			PW("    Ep = prow * tidx + pa * gp * trd + pa * gw * twr + pa * tdr\n");
+			PW("    RP = reshape(reshape(Ec, %d, 1, 8, 4) * tcur + reshape(Ep, %d, 1, 8, 4) * (1 - tcur), %d, %d, 16, 4)\n", TB, TB, T, Bm);
 			PW("    rr = memory_scan(rM0, RP, reshape(c @ Wrv_%d, %d, %d, %d))\n", k, T, Bm, D);
 			PW("    e%dm = e%dm + reshape(rr, %d, %d) @ Wro_%d\n", k, k, TB, D, k);
 		}

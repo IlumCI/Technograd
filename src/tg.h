@@ -217,7 +217,7 @@ int ir_op3(Module *m, Block *b, Op op, int p, int q, int r, const char *file, in
 int ir_k(Module *m, Block *b, float k);
 int ir_reshape(Module *m, Block *b, int x, const Shape *to); /* same data, new shape (equal element count) */
 int ir_topk(Module *m, Block *b, int x, int k); /* indices of the k largest along the last axis */
-/* memscan_t's packed output (floats): dP at 0, dM0 at *o1, dV at *o2, work memory at *o3; N a multiple of 3 and dv */
+/* memscan_t's packed output (floats): dP (T n k 4) at 0, dM0 at *o1, dV at *o2, work memory at *o3; N a multiple of 4 and dv */
 void memscan_layout(int T, int n, int k, int rows, int dv, long *o1, long *o2, long *o3, long *N);
 void memscan_dims(const Module *m, const Ins *in, int *tn, int *k, int *rows, int *dv); /* kernel arguments of memscan / memscan_t */
 void optim_train(Module *m, Block *b, int loss, const char *opt, const char **keys, const double *vals, int nkv,

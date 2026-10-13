@@ -545,26 +545,35 @@ static void vjp(AD *a, const Ins *in, int g, Adj *adj)
 	}
 	case OP_MEMSCAN: { /* memscan_t runs the steps backwards from the final memory; indices get none */
 		Shape ps = *SH(a, x1), vs = *SH(a, x2); /* copies: emitting values may move m->val */
-		int T = ps.dim[0], n = ps.dim[1], k = ps.dim[2], tn = T * n, rows = SH(a, x0)->dim[0], dv = SH(a, x0)->dim[1], w = 3 * k + dv;
+		int T = ps.dim[0], n = ps.dim[1], k = ps.dim[2], q = ps.dim[3], tn = T * n, rows = SH(a, x0)->dim[0], dv = SH(a, x0)->dim[1],
+		    w = 4 * k + dv;
 		char name[64];
-		float *s1 = xmalloc((size_t)3 * k * w * sizeof *s1), *s2 = xmalloc((size_t)dv * w * sizeof *s2);
-		memset(s1, 0, (size_t)3 * k * w * sizeof *s1);
+		/* entries as (row, a, c, d): three-field entries read with d = a */
+		static const float q34[12] = { 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 1, 0 }, q43[12] = { 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0 };
+		Shape s34 = { 2, { 3, 4 } }, s43 = { 2, { 4, 3 } }, p3 = { 2, { tn * k, 3 } }, p4 = { 4, { T, n, k, 4 } };
+		int P4 = x1;
+		if (q == 3) P4 = RESHAPE(a, E(a, OP_MATMUL, RESHAPE(a, x1, &p3), CONST_DATA(a, "__mem_q34", &s34, q34)), &p4);
+		float *s1 = xmalloc((size_t)4 * k * w * sizeof *s1), *s2 = xmalloc((size_t)dv * w * sizeof *s2);
+		memset(s1, 0, (size_t)4 * k * w * sizeof *s1);
 		memset(s2, 0, (size_t)dv * w * sizeof *s2);
-		for (int i = 0; i < 3 * k; i++) s1[i * w + i] = 1;
-		for (int i = 0; i < dv; i++) s2[i * w + 3 * k + i] = 1;
-		Shape sh1 = { 2, { 3 * k, w } }, sh2 = { 2, { dv, w } }, pf = { 2, { tn, 3 * k } }, vf = { 2, { tn, dv } }, pvs = { 3, { T, n, w } };
-		snprintf(name, sizeof name, "__memsel_p_%d_%d", 3 * k, w);
+		for (int i = 0; i < 4 * k; i++) s1[i * w + i] = 1;
+		for (int i = 0; i < dv; i++) s2[i * w + 4 * k + i] = 1;
+		Shape sh1 = { 2, { 4 * k, w } }, sh2 = { 2, { dv, w } }, pf = { 2, { tn, 4 * k } }, vf = { 2, { tn, dv } }, pvs = { 3, { T, n, w } };
+		snprintf(name, sizeof name, "__memsel_p_%d_%d", 4 * k, w);
 		int c1 = CONST_DATA(a, name, &sh1, s1);
 		snprintf(name, sizeof name, "__memsel_v_%d_%d", dv, w);
 		int c2 = CONST_DATA(a, name, &sh2, s2);
 		xfree(s1);
 		xfree(s2);
-		int pv = RESHAPE(a, E(a, OP_ADD, E(a, OP_MATMUL, RESHAPE(a, x1, &pf), c1), E(a, OP_MATMUL, RESHAPE(a, x2, &vf), c2)), &pvs);
+		int pv = RESHAPE(a, E(a, OP_ADD, E(a, OP_MATMUL, RESHAPE(a, P4, &pf), c1), E(a, OP_MATMUL, RESHAPE(a, x2, &vf), c2)), &pvs);
 		int pk = E3(a, OP_MEMSCAN_T, y, pv, g);
 		long o1, o2, o3, N;
 		memscan_layout(T, n, k, rows, dv, &o1, &o2, &o3, &N);
-		Shape v3 = { 2, { (int)(N / 3), 3 } }, vd = { 2, { (int)(N / dv), dv } };
-		if (w1) acc(a, adj, x1, RESHAPE(a, E(a, OP_TAKE, RESHAPE(a, pk, &v3), RANGE(a, 0, tn * k)), &ps));
+		Shape v4 = { 2, { (int)(N / 4), 4 } }, vd = { 2, { (int)(N / dv), dv } };
+		if (w1) {
+			int d4 = E(a, OP_TAKE, RESHAPE(a, pk, &v4), RANGE(a, 0, tn * k)); /* (tn k, 4): (0, da, dc, dd) */
+			acc(a, adj, x1, RESHAPE(a, q == 4 ? d4 : E(a, OP_MATMUL, d4, CONST_DATA(a, "__mem_q43", &s43, q43)), &ps));
+		}
 		int view = (w0 || w2) ? RESHAPE(a, pk, &vd) : -1;
 		if (w0) acc(a, adj, x0, E(a, OP_TAKE, view, RANGE(a, o1 / dv, rows)));
 		if (w2) acc(a, adj, x2, RESHAPE(a, E(a, OP_TAKE, view, RANGE(a, o2 / dv, tn)), &vs));
