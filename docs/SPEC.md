@@ -1336,6 +1336,37 @@ O(S) to O(sqrt S), 15 times faster in all. A step then costs O(8 dv) in the
 memory and O(sqrt S) in the address; what still grows with S is the
 initial memory, copied once per sequence.
 
+### Long context: trained at 256 steps, recalling at 65,536
+
+`examples/recall/long.pl` (driver `long_run.sh`) removes the write flag:
+a sequence of T steps holds P writes (key, value) at random positions in
+its first three quarters, queries (key, QUERY) in its last quarter, and
+filler (random key, FILL) everywhere else, and the write weight is
+learned, `sigmoid(value embedding . wg + bg)`. Filler uses the same keys as
+the pairs, so a write at a filler step corrupts the memory. Both models
+train at T = 256 (64 writes, 16 queries, 2,000 batches of 16), then the
+same weights run single sequences of up to 65,536 steps (16 per length,
+64 queries each):
+
+| Steps T | memory, 4,096 product-key slots | dense delta rule, dk = 16 |
+|---------|----------------------------------|---------------------------|
+| 256 (training length) | 100% | 58.3% |
+| 4,096 | 100% | 61.2% |
+| 16,384 | 100%; streamed in chunks of 4,096: 100% | 55.7% |
+| 65,536 | 100% (4 s for 1.05M steps); streamed: 100% | 61.0% |
+| 65,536 with 256 pairs | 100% | 15.4% |
+| 65,536 with 512 pairs | 100% | 9.2% |
+
+Training took 101 s (memory) and 57 s (dense). The memory has no position
+dependence and its gate learns to skip filler, so recall does not decay
+with distance; at 512 pairs, eight times the training count and every key
+in the vocabulary, it still recalls every pair. The dense state is limited
+by its 16 dimensions at every length. **Streaming**: the `stream` model
+keeps the memory in a `state` and writes `memory_final` back with `update`,
+so a 65,536-step sequence runs as 16 calls of 4,096 steps with a fixed
+working set; its hits equal the single pass (regression-tested at 8,192
+steps, two chunks).
+
 ## 21. Quantization
 
 ```

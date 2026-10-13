@@ -212,6 +212,19 @@ perl examples/crypto_ctf/gen.pl caesar5 300 999 > "$TMP/cae_test.jsonl"   # disj
 $TGC gen-train "$TMP/cae.jsonl" -o "$TMP/cae" --aligned --epochs 12 --layers 2 --maxlen 24 > "$TMP/cae.log" 2>&1
 em=$($TGC generate "$TMP/cae" --inputs "$TMP/cae_test.jsonl" -o /dev/null 2>&1 | sed -n 's/.*exact-match \([0-9.]*\)%.*/\1/p')
 awk -v e="$em" 'BEGIN { exit !(e >= 90) }' && ok || bad "aligned seq2seq caesar5 exact-match $em% (want >= 90)"
+# in-context memory: learned write gate among filler, trained at T = 64, evaluated at T = 8192
+# in one pass and streamed in two chunks (memory carried in a state): the same hits
+L="perl examples/recall/long.pl"; LT=$TMP/long; mkdir -p "$LT/p" "$LT/e" "$LT/s"
+$L data 16 8 64 8 400 1 > "$LT/tr.csv" && $L model pkm 64 8 "$LT/p" 1024 && (cd "$LT/p" && "$TGC" batch train.tg "$LT/tr.csv" -o out --save-state w > /dev/null)
+awk 'NR > 360 { a += $1; c++ } END { exit !(a / c > 0.9) }' "$LT/p/out" && ok || bad "long recall did not train: $(tail -1 "$LT/p/out")"
+$L data 16 64 8192 1 4 3 > "$LT/ev.csv"; cp "$LT"/p/w.*.bin "$LT/e/"; cp "$LT"/p/w.*.bin "$LT/s/"
+$L model pkm 8192 1 "$LT/e" 1024 eval && $L model pkm 4096 1 "$LT/s" 1024 stream
+(cd "$LT/e" && "$TGC" batch eval.tg "$LT/ev.csv" -o out > /dev/null)
+perl -e 'while (<>) { chomp; my @a = split /,/; for (my $c = 0; $c < 8192; $c += 4096) { print join(",", map { my $o = $_ * 8192 + $c; @a[$o .. $o + 4095] } 0 .. 3), ",", $c ? 0 : 1, "\n" } }' "$LT/ev.csv" > "$LT/s/ch.csv"
+(cd "$LT/s" && "$TGC" batch stream.tg ch.csv -o out > /dev/null)
+h1=$(awk -F, '{ h += $1; q += $2 } END { print h, q }' "$LT/e/out"); h2=$(awk -F, '{ h += $1; q += $2 } END { print h, q }' "$LT/s/out")
+echo "$h1" | awk '{ exit !($2 == 256 && $1 / $2 > 0.9) }' && ok || bad "long recall at 128x the training length: $h1"
+[ "$h1" = "$h2" ] && ok || bad "streamed memory differs from one pass: [$h2] vs [$h1]"
 # product-key memory trains end to end (row-sparse value steps) and recalls every fact
 cap=$(sh examples/memory_capacity/run.sh "$TGC" "$TMP/cap" 40 1024 2>&1)
 echo "$cap" | grep -q "F=1024 pkm recall 100.00%" && echo "$cap" | grep -q "F=1024 dense recall" && ok || bad "memory capacity: $cap"
