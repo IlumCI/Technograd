@@ -1312,6 +1312,30 @@ dimensions; at the same state size as the sparse memory (256 by 32), dense
 addressing still interferes at 64 pairs, while the sparse address, which
 touches 8 of 256 rows per write, recalls every pair.
 
+With 512 distinct keys and more pairs (T = P + 16 steps), the same
+comparison, then the memory as one `memory_scan`:
+
+| Model | P = 128 | P = 256 |
+|-------|---------|---------|
+| dense, dk = 16 | 36.9% (39 s) | 19.7% (71 s) |
+| dense, dk = 256 | 67.2% (395 s) | not run |
+| sparse, S = 256 (`rows`) | 84.0% (178 s) | 73.1% (343 s) |
+| sparse, S = 1,024 (`rows`) | 99.9% (857 s) | not run |
+| sparse, S = 1,024, `memory_scan` (`mem`) | 100% (167 s) | 99.9% (321 s) |
+| product keys, S = 1,024 (`pkm`) | 100% (57 s) | 100% (101 s) |
+| product keys, S = 4,096 | 100% (77 s) | 100% (134 s) |
+| product keys, S = 16,384 | 100% (157 s) | 100% (228 s) |
+
+At equal state (256 by 32) sparse addressing recalls 84.0% of 128 pairs
+against 67.2% for dense addressing; capacity then follows the slot count.
+`memory_scan` trains the 1,024-slot memory 5.1 times faster than the
+take/take_t scan, whose time went to whole-memory adds and scatters (65% of
+it) and whose backward pass stored the memory at every step; product keys
+(two sets of sqrt(S) sub-keys, `pkm` in `models.pl`) cut the scoring from
+O(S) to O(sqrt S), 15 times faster in all. A step then costs O(8 dv) in the
+memory and O(sqrt S) in the address; what still grows with S is the
+initial memory, copied once per sequence.
+
 ## 21. Quantization
 
 ```

@@ -4,7 +4,7 @@
 # 256 slots. Usage: run.sh TGC WORKDIR [ROWS] [P...]. Prints the recall on the
 # last 10% of batches; every batch is new sequences, so this is held out.
 # NK sets the number of distinct keys (default 64); MODELS the models, as
-# KIND:SLOTS (default "dense:16 dense:256 sparse:256").
+# KIND:SLOTS (default "dense:16 dense:256 sparse:256"; KIND also rows, mem, pkm).
 set -e
 TGC=$1; W=$2; N=${3:-3000}; shift 3 2>/dev/null || shift $#
 PS=${*:-"8 16 32 64"}
