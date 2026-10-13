@@ -104,7 +104,7 @@ and parentheses. All binary operators are left associative.
 | `take(w, r)` | `(D, ...) , (n) -> (n, ...)`: rows `r` of `w`; zero for -1 or out-of-range indices; repeats allowed |
 | `topk(x, k)` | `(..., n) -> (..., k)`, k an integer literal 1..256: indices of the k largest entries along the last axis, largest first, ties to the lower index, NaN skipped, -1 where k > n. Not differentiable (indices); the selection is piecewise constant |
 | `take_along(x, i)` | `(..., n), (..., k) -> (..., k)`: `x[..., i[..., j]]`, zero where `i` is outside `[0, n)`; the gather that pairs with `topk`. Lowered to `take` over the flattened rows, so its gradient is a scatter-add into `x` |
-| `memory_scan(m0, p, v)`, `memory_final(m0, p, v)` | a delta-rule memory written while a sequence is read: `m0` (rows, dv), `p` (T, n, k, 3) holding k (row, read weight a, write weight c) triples per step and stream, `v` (T, n, dv). Step t, stream g, in order: `r = sum_i a_i M[row_i]`, then `M[row_i] += c_i (v - r)`. `memory_scan` returns the reads (T, n, dv), `memory_final` the memory after the last step (rows, dv). Only the addressed rows are touched; rows outside `[0, rows)` are skipped (section 20) |
+| `memory_scan(m0, p, v)`, `memory_final(m0, p, v)` | a delta-rule memory written while a sequence is read: `m0` (rows, dv), `p` (T, n, k, 3) holding k (row, read weight a, write weight c) entries per step and stream, or (T, n, k, 4) adding a delta-read weight d (3 fields: d = a), `v` (T, n, dv). Step t, stream g, in order: `r = sum_i a_i M[row_i]`, `rd = sum_i d_i M[row_i]`, then `M[row_i] += c_i (v - rd)`: a step can read at some rows and write at others while each write still replaces what its address held. `memory_scan` returns the reads (T, n, dv), `memory_final` the memory after the last step (rows, dv). Only the addressed rows are touched; rows outside `[0, rows)` are skipped (section 20) |
 | `grad(y, x)` | `y` scalar, `x` a name; returns dy/dx with the shape of `x` (section 16) |
 | `mse(p, t)`, `bce(p, t)`, `xent(logits, onehot)` | scalar losses (section 17) |
 
@@ -826,13 +826,16 @@ h1 = gelu(x @ w1 + spmm(s, wt) + rmsnorm(ssm(tok)) @ wp + b1)
   not O(N^2). The values are read with `spmm`, so the optimizer steps only
   the rows a batch read.
 - **In-context memory** (`--recall S`, S a square, for the same three
-  commands): after the last block's mixer, the previous token's embedding
-  addresses S slots per sequence with product keys (two sets of sqrt(S)
-  sub-keys, the best 8 of the 8 x 8 sums); with `c = rmsnorm(e) gr`, step t
-  writes `c Wrv` with a learned gate `sigmoid(c wrg + brg)` (zero on
-  padding) and reads with the same address, all in one `memory_scan`
-  (section 20); `e += reads Wro`. Keying on the previous token is the
-  induction-head pattern: after "k v", a later "k" reads back v.
+  commands): after the last block's mixer, one product-key function f of a
+  token embedding (two sets of sqrt(S) sub-keys, the best 8 of the 8 x 8
+  sums) addresses S slots per sequence. With `c = rmsnorm(e) gr`, step t
+  reads at f(token t), what followed this token before (the induction-head
+  read), and at f(token t-1), where it writes `c Wrv` with a learned gate
+  (zero on padding); each read has its own learned gate. One `memory_scan`
+  with 16 four-field entries per step (section 20) does both;
+  `e += reads Wro`. Unlike `--memory`, which is trained once and read only,
+  this memory starts empty for every sequence and is written while the
+  sequence is read.
   Measured with `gen-train` on byte strings (`examples/recall/gen.pl`, 6,000
   pairs, 10 epochs, 500 held out): with 8 letter-digit pairs and one query
   ("j3c8e5w3o8t6v2q9:j" -> "3"), exact match goes from 30.4% (no memory)
