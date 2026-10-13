@@ -105,6 +105,7 @@ and parentheses. All binary operators are left associative.
 | `topk(x, k)` | `(..., n) -> (..., k)`, k an integer literal 1..256: indices of the k largest entries along the last axis, largest first, ties to the lower index, NaN skipped, -1 where k > n. Not differentiable (indices); the selection is piecewise constant |
 | `take_along(x, i)` | `(..., n), (..., k) -> (..., k)`: `x[..., i[..., j]]`, zero where `i` is outside `[0, n)`; the gather that pairs with `topk`. Lowered to `take` over the flattened rows, so its gradient is a scatter-add into `x` |
 | `memory_scan(m0, p, v)`, `memory_final(m0, p, v)` | a delta-rule memory written while a sequence is read: `m0` (rows, dv), `p` (T, n, k, 3) holding k (row, read weight a, write weight c) entries per step and stream, or (T, n, k, 4) adding a delta-read weight d (3 fields: d = a), `v` (T, n, dv). Step t, stream g, in order: `r = sum_i a_i M[row_i]`, `rd = sum_i d_i M[row_i]`, then `M[row_i] += c_i (v - rd)`: a step can read at some rows and write at others while each write still replaces what its address held. `memory_scan` returns the reads (T, n, dv), `memory_final` the memory after the last step (rows, dv). Only the addressed rows are touched; rows outside `[0, rows)` are skipped (section 20) |
+| `suffix_match(x)` | `x` (T) or (T, n) token ids, time-major; returns (T, 2) or (T, n, 2): for each step, the token that followed an earlier occurrence of the longest suffix of `x[..t]` seen before t (-1 if none) and that suffix's length. An online suffix automaton (Blumer, Blumer, Ehrenfeucht, Haussler, Chen, Seiferas, TCS 40, 1985), amortized O(1) per step, no parameters; a negative id breaks matches. Not differentiable |
 | `grad(y, x)` | `y` scalar, `x` a name; returns dy/dx with the shape of `x` (section 16) |
 | `mse(p, t)`, `bce(p, t)`, `xent(logits, onehot)` | scalar losses (section 17) |
 
@@ -519,7 +520,8 @@ model compiles to freestanding C like any other.
   get zero. Its two derivative operations are themselves differentiable, so
   second-order gradients through `spmm` work;
 - `take` sends its gradient to the table as a scatter-add (`take_t`), whose
-  own derivative is `take`; `memory_scan` sends gradients to the memory,
+  own derivative is `take`; `suffix_match` returns token ids and lengths
+  and has none; `memory_scan` sends gradients to the memory,
   the read and write weights and the values through `memscan_t`, which runs
   the steps backwards from the final memory and undoes each write (no
   per-step copy of the memory is stored; the rows get none);
@@ -838,9 +840,11 @@ h1 = gelu(x @ w1 + spmm(s, wt) + rmsnorm(ssm(tok)) @ wp + b1)
   this memory starts empty for every sequence.
 
   How the design was reached, by training 3 epochs on text in which every
-  256-word segment is followed by its repeat (window 512; held-out loss,
-  where a model that copies the second copy would approach half its loss
-  on the first):
+  256-word segment is followed by its repeat (window 512; held-out loss).
+  These rows tokenize to about 520 tokens, so windows drift against them
+  and many second copies sit in another window than their first; the table
+  ranks designs on equal terms but understates copying (aligned results
+  below):
 
   | Memory | Loss |
   |--------|------|
@@ -854,6 +858,17 @@ h1 = gelu(x @ w1 + spmm(s, wt) + rmsnorm(ssm(tok)) @ wp + b1)
   On that data the next word equals the last continuation of the same
   1-gram 55.5% of the time, of the 2-gram 91.4%, of the 3-gram 97.6%: a
   single-token key cannot copy text in which common words repeat.
+
+  With alphabetic words only, a row is exactly 512 tokens and every window
+  holds one segment and its repeat. The first copy is unpredictable (about
+  4.09 per token for this model), so perfect copying of the second gives
+  about 2.05 (3 epochs, held-out loss):
+
+  | Model | Loss | Implied loss on the second copy |
+  |-------|------|----------------------------------|
+  | no memory | 4.0907 | about 4.09 |
+  | `--recall 16384` | 2.1420 | about 0.19 |
+  | `--match` | **2.0623** | about 0.03 |
 
   On the military science and purple-team corpus (1.96M words, windows of
   512 tokens, batch 2, 4 epochs; held-out next-token loss, then the loss of
