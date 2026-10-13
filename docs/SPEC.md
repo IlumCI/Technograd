@@ -825,17 +825,35 @@ h1 = gelu(x @ w1 + spmm(s, wt) + rmsnorm(ssm(tok)) @ wp + b1)
   both RMS-normalized); scoring costs O(N),
   not O(N^2). The values are read with `spmm`, so the optimizer steps only
   the rows a batch read.
-- **In-context memory** (`--recall S`, S a square, for the same three
-  commands): after the last block's mixer, one product-key function f of a
-  token embedding (two sets of sqrt(S) sub-keys, the best 8 of the 8 x 8
-  sums) addresses S slots per sequence. With `c = rmsnorm(e) gr`, step t
-  reads at f(token t), what followed this token before (the induction-head
-  read), and at f(token t-1), where it writes `c Wrv` with a learned gate
-  (zero on padding); each read has its own learned gate. One `memory_scan`
-  with 16 four-field entries per step (section 20) does both;
+- **In-context memory** (`--recall S`, S a power of two, for the same
+  three commands): after the last block's mixer, a `memory_scan` over S rows
+  per sequence, addressed by hashes of the token buckets as in Engram's
+  hashed N-gram lookup (arXiv:2601.07372), but written while the sequence
+  is read. Step t reads the rows of the 1-, 2- and 3-gram ending at token t
+  (what followed this context before) and writes `e0 Wrv`, the embedding
+  of token t, at the rows of the 1-, 2- and 3-gram ending at token t-1
+  (also readable): six four-field entries of weight 1, each read and write
+  with a learned gate from `c = rmsnorm(e) gr`, the writes zero on padding.
   `e += reads Wro`. Unlike `--memory`, which is trained once and read only,
-  this memory starts empty for every sequence and is written while the
-  sequence is read.
+  this memory starts empty for every sequence.
+
+  How the design was reached, by training 3 epochs on text in which every
+  256-word segment is followed by its repeat (window 512; held-out loss,
+  where a model that copies the second copy would approach half its loss
+  on the first):
+
+  | Memory | Loss |
+  |--------|------|
+  | none | 4.2978 |
+  | product-key address of the previous token, value = block state | 3.9355 |
+  | the same, unit-norm address weights | 3.9422 |
+  | the same, value = token embedding | 3.8997 |
+  | two hashes of the previous token (16,384 rows) | 3.7915 |
+  | hashes of the 1-, 2- and 3-grams (16,384 rows) | **3.4052** |
+
+  On that data the next word equals the last continuation of the same
+  1-gram 55.5% of the time, of the 2-gram 91.4%, of the 3-gram 97.6%: a
+  single-token key cannot copy text in which common words repeat.
   Measured with `gen-train` on byte strings (`examples/recall/gen.pl`, 6,000
   pairs, 10 epochs, 500 held out): with 8 letter-digit pairs and one query
   ("j3c8e5w3o8t6v2q9:j" -> "3"), exact match goes from 30.4% (no memory)
