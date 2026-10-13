@@ -419,7 +419,8 @@ static void gen_ssm_def(char *b, size_t cap, size_t *o, const Layout *l, int Bm,
 				PW("    %scs = reshape(reshape(take_along(%s1, %si1), %d, 8, 1) + reshape(take_along(%s2, %si2), %d, 1, 8), %d, 64)\n", z, z, z, TB, z, z, TB, TB);
 				PW("    %sci = reshape(reshape(%si1, %d, 8, 1) * %d + reshape(%si2, %d, 1, 8), %d, 64)\n", z, z, TB, n, z, TB, TB);
 				PW("    %sj = topk(%scs, 8)\n", z, z);
-				PW("    %sa = reshape(softmax(take_along(%scs, %sj)), %d, %d, 8, 1)\n", z, z, z, T, Bm);
+				/* unit L2 norm (rmsnorm / sqrt 8): a write with gate 1 replaces what the address held, and a read returns it */
+				PW("    %sa = reshape(rmsnorm(softmax(take_along(%scs, %sj))) * 0.353553391, %d, %d, 8, 1)\n", z, z, z, T, Bm);
 				PW("    %srow = reshape(reshape(take_along(%sci, %sj), %d, %d, 8) + roff, %d, %d, 8, 1)\n", z, z, z, T, Bm, T, Bm);
 			}
 			PW("    gc = reshape(sigmoid(c @ wrc_%d + brc_%d), %d, %d, 1, 1)\n", k, k, T, Bm);
