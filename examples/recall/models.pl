@@ -8,22 +8,43 @@
 # Step t reads r = a M and, on a write step, applies the delta rule
 #   M += beta w a^T (v - r)
 # so a write at an address that already holds a value replaces it.
-# Usage: models.pl KIND STEPS DIR [SLOTS]   (KIND dense|sparse; SLOTS = dk or S)
+# KIND rows is the sparse model with the same arithmetic, but each step reads
+# its 8 rows with take and writes them with take_t (scatter-add) instead of
+# multiplying by the full address.
+# Usage: models.pl KIND STEPS DIR [SLOTS]   (KIND dense|sparse|rows; SLOTS = dk or S)
 use strict;
 my ($kind, $T, $dir, $S) = @ARGV;
 my ($B, $NK, $NV, $d, $dv) = (16, 64, 64, 32, 32);
 $S ||= $kind eq 'dense' ? 16 : 256;
 my $lr = $ENV{LR} || 0.003;
 my $TB = $T * $B;
+my $sp = $kind ne 'dense';
 my $addr = $kind eq 'dense'
 	? "    k = rmsnorm(take(Ek, kid) \@ Wk) * " . sprintf("%.6g", 1 / sqrt($S)) . "\n    A = reshape(k, $T, $B, $S)\n"
 	: "    sc = (rmsnorm(take(Ek, kid) \@ Wk) \@ transpose(rmsnorm(Keys))) * temp\n"
 	. "    j = topk(sc, 8)\n"
 	. "    a8 = softmax(take_along(sc, j))\n"
-	. "    A = reshape(reshape(reshape(a8, $TB, 1, 8) \@ reshape(take(I_S, reshape(j, " . ($TB * 8) . ")), $TB, 8, $S), $TB, $S), $T, $B, $S)\n";
+	. ($kind eq 'rows' ? "    J = reshape(reshape(j, $T, $B, 8) + boff, $T, " . ($B * 8) . ")\n    A = reshape(a8, $T, $B, 8)\n"
+	: "    A = reshape(reshape(reshape(a8, $TB, 1, 8) \@ reshape(take(I_S, reshape(j, " . ($TB * 8) . ")), $TB, 8, $S), $TB, $S), $T, $B, $S)\n");
 my $st = "state Ek : f32[$NK, $d] = rand(1, 1)\nstate Ev : f32[$NV, $dv] = rand(2, 1)\nstate Wk : f32[$d, " . ($kind eq 'dense' ? $S : 16) . "] = rand(3, 0.3)\n"
 	. "state Wo : f32[$dv, $NV] = rand(4, 0.2)\nstate bw : f32 = 2\n";
-$st .= "state Keys : f32[$S, 16] = rand(5, 1)\nstate temp : f32 = 4\nparam I_S : f32[$S, $S] = file(\"eye_s.bin\")\n" if $kind eq 'sparse';
+$st .= "state Keys : f32[$S, 16] = rand(5, 1)\nstate temp : f32 = 4\n" if $sp;
+$st .= "param I_S : f32[$S, $S] = file(\"eye_s.bin\")\n" if $kind eq 'sparse';
+$st .= "param boff : f32[$B, 1] = [" . join(", ", map { "[" . $_ * $S . "]" } 0 .. $B - 1) . "]\n" if $kind eq 'rows';
+my $scan = $kind eq 'rows' ? <<"R" : <<"D";
+    M = M0f
+    scan M over jt in J, at in A, vt in V, wt in W:
+        g = reshape(take(M, jt), $B, 8, $dv)
+        r = reshape(reshape(at, $B, 1, 8) \@ g, $B, $dv)
+        emit rs = r
+        M = M + take_t(jt, reshape(reshape(at, $B, 8, 1) * wt * reshape(vt - r, $B, 1, $dv), ${\($B * 8)}, $dv), M)
+R
+    M = M0
+    scan M over at in A, vt in V, wt in W:
+        r = reshape(reshape(at, $B, 1, $S) \@ M, $B, $dv)
+        emit rs = r
+        M = M + reshape(at, $B, $S, 1) * wt * reshape(vt - r, $B, 1, $dv)
+D
 open my $f, '>', "$dir/train.tg" or die;
 print $f <<"M";
 model recall_$kind
@@ -31,6 +52,7 @@ $st
 param I_V : f32[$NV, $NV] = file("eye_v.bin")
 param onesV : f32[$NV] = ones
 param M0 : f32[$B, $S, $dv] = zeros
+param M0f : f32[${\($B * $S)}, $dv] = zeros
 
 # kid, vid: key and value token of each step (time-major); w: 1 on a write
 # step, 0 on a query step, whose target is vid.
@@ -38,12 +60,7 @@ def forward(kid: f32[$TB], vid: f32[$TB], w: f32[$TB]) -> f32:
 $addr    V = reshape(take(Ev, vid) * reshape(w, $TB, 1), $T, $B, $dv)
     beta = sigmoid(bw)
     W = reshape(w, $T, $B, 1, 1) * beta
-    M = M0
-    scan M over at in A, vt in V, wt in W:
-        r = reshape(reshape(at, $B, 1, $S) \@ M, $B, $dv)
-        emit rs = r
-        M = M + reshape(at, $B, $S, 1) * wt * reshape(vt - r, $B, 1, $dv)
-    q = 1 - w
+$scan    q = 1 - w
     logits = reshape(rs, $TB, $dv) \@ Wo
     tv = take(I_V, vid)
     loss = -sum(reshape(q, $TB, 1) * tv * log(softmax(logits) + 0.000000001)) / sum(q)
