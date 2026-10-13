@@ -1,0 +1,7 @@
+# suffix_match: for each step, the token that followed an earlier occurrence
+# of the longest suffix seen before (or -1), and that suffix's length; two
+# streams, time-major; a negative id breaks matches.
+model sufm
+
+def forward(x: f32[12, 2]) -> f32[12, 2, 2]:
+    return suffix_match(x)

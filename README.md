@@ -42,7 +42,7 @@ sh examples/memory_capacity/run.sh build/tgc work   # product-key memory vs dens
 sh examples/recall/long_run.sh build/tgc work       # in-context memory: train at 256 steps, recall at 65,536 (one pass and streamed)
 build/tgc gen-train pairs.jsonl --recall 1024 -o m   # Mamba-3 blocks plus an in-context memory written while reading
 build/tgc predict iris_model new_flowers.csv     # predictions on raw new data
-make test       # 348 checks (offline; TG_TEST_NETWORK=1 adds a Hugging Face run)
+make test       # 359 checks (offline; TG_TEST_NETWORK=1 adds a Hugging Face run)
 make fixer      # retrain the auto-fix forest (deterministic, ~15 s) and evaluate it on held-out programs
 
 build/tgc run  examples/latent_reasoner.tg 1,0,0,1,0,1,1,0

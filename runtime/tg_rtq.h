@@ -618,4 +618,90 @@ TG_FN void tg_memscan_t(tg_t *o, const tg_t *y, const tg_t *pv, const tg_t *g, i
 	}
 }
 
+/* Longest earlier match by an online suffix automaton (see tg_rt.h). Ids
+ * and lengths are Q16.16 (a length saturates at 32767); the workspace holds
+ * raw integers. */
+TG_FN long tg_sufmatch_cap(long T)
+{
+	long h = 16;
+	while (h < 6 * T + 6) h *= 2;
+	return h;
+}
+TG_FN long tg_sufmatch_ws(long T) { return 4 * (2 * T + 2) + 4 * tg_sufmatch_cap(T); }
+TG_FN long tg_sm_slot(const tg_t *E, long H, long st, long c)
+{
+	unsigned long h = ((unsigned long)st * 2654435761UL ^ (unsigned long)c * 40503UL) & (unsigned long)(H - 1);
+	while (E[h * 4] >= 0 && (E[h * 4] != st || E[h * 4 + 1] != c)) h = (h + 1) & (unsigned long)(H - 1);
+	return (long)h;
+}
+TG_FN long tg_sm_get(const tg_t *E, long H, long st, long c)
+{
+	long h = tg_sm_slot(E, H, st, c);
+	return E[h * 4] < 0 ? -1 : E[h * 4 + 2];
+}
+TG_FN void tg_sm_set(tg_t *E, tg_t *S, long H, long st, long c, long to)
+{
+	long h = tg_sm_slot(E, H, st, c);
+	if (E[h * 4] < 0) {
+		E[h * 4] = (tg_t)st;
+		E[h * 4 + 1] = (tg_t)c;
+		E[h * 4 + 3] = S[st * 4 + 3];
+		S[st * 4 + 3] = (tg_t)h;
+	}
+	E[h * 4 + 2] = (tg_t)to;
+}
+TG_FN void tg_sufmatch(tg_t *o, const tg_t *x, int T, int n)
+{
+	long H = tg_sufmatch_cap(T);
+	tg_t *S = o + 2L * T * n, *E = S + 4 * (2L * T + 2);
+	for (int g = 0; g < n; g++) {
+		long sz = 1, last = 0, m = 0, l = 0;
+		for (long i = 0; i < H; i++) E[i * 4] = -1;
+		S[0] = 0; S[1] = -1; S[2] = -1; S[3] = -1;
+		for (long t = 0; t < T; t++) {
+			tg_t xv = x[t * n + g];
+			long c = xv >= 0 ? (long)(((int64_t)xv + 32768) >> 16) : -1;
+			tg_t *out = o + (t * n + g) * 2;
+			if (c < 0) {
+				m = 0, l = 0;
+				out[0] = -TG_ONE, out[1] = 0;
+				continue;
+			}
+			while (m != 0 && tg_sm_get(E, H, m, c) < 0) {
+				m = S[m * 4 + 1];
+				l = S[m * 4];
+			}
+			long tr = tg_sm_get(E, H, m, c);
+			if (tr >= 0) m = tr, l++;
+			else m = 0, l = 0;
+			long e = l > 0 ? (long)S[m * 4 + 2] : -1;
+			out[0] = e >= 0 && e + 1 <= t ? x[(e + 1) * n + g] : -TG_ONE;
+			out[1] = l < 32768 ? (tg_t)(l * TG_ONE) : TG_MAXV;
+			long cur = sz++, p = last;
+			S[cur * 4] = S[last * 4] + 1; S[cur * 4 + 2] = (tg_t)t; S[cur * 4 + 3] = -1;
+			while (p != -1 && tg_sm_get(E, H, p, c) < 0) {
+				tg_sm_set(E, S, H, p, c, cur);
+				p = S[p * 4 + 1];
+			}
+			if (p == -1) S[cur * 4 + 1] = 0;
+			else {
+				long q = tg_sm_get(E, H, p, c);
+				if (S[p * 4] + 1 == S[q * 4]) S[cur * 4 + 1] = (tg_t)q;
+				else {
+					long cl = sz++;
+					S[cl * 4] = S[p * 4] + 1; S[cl * 4 + 1] = S[q * 4 + 1]; S[cl * 4 + 2] = S[q * 4 + 2]; S[cl * 4 + 3] = -1;
+					for (long h = S[q * 4 + 3]; h >= 0; h = E[h * 4 + 3]) tg_sm_set(E, S, H, cl, E[h * 4 + 1], E[h * 4 + 2]);
+					while (p != -1 && tg_sm_get(E, H, p, c) == q) {
+						tg_sm_set(E, S, H, p, c, cl);
+						p = S[p * 4 + 1];
+					}
+					S[q * 4 + 1] = (tg_t)cl; S[cur * 4 + 1] = (tg_t)cl;
+					if (m == q && l <= S[cl * 4]) m = cl;
+				}
+			}
+			last = cur;
+		}
+	}
+}
+
 #endif

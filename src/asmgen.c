@@ -446,6 +446,11 @@ static void ins(A *a, const Ins *in)
 		call(a, "tg_topk", c, 5);
 		return;
 	}
+	case CLS_SUFMATCH: {
+		Arg c[4] = { V(in->out), V(in->a[0]), I(s0->dim[0]), I(s0->rank == 2 ? s0->dim[1] : 1) };
+		call(a, "tg_sufmatch", c, 4);
+		return;
+	}
 	case CLS_MEMSCAN: {
 		int tn, k, rows, dv;
 		memscan_dims(m, in, &tn, &k, &rows, &dv);

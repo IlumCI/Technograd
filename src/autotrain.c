@@ -28,7 +28,7 @@
 
 typedef struct {
 	const char *source, *target, *out, *optimizer, *init, *column, *incol, *outcol, *input;
-	int epochs, hidden, max_rows, seed, text_dim, batch, ssm, layers, mimo, steps, maxlen, aligned, memory, recall, window;
+	int epochs, hidden, max_rows, seed, text_dim, batch, ssm, layers, mimo, steps, maxlen, aligned, memory, recall, window, match;
 	double lr, val;
 } Opts;
 
@@ -39,12 +39,12 @@ static void usage_data(void)
 	      "  tgc data prep SOURCE -o OUT.csv [--target COL]\n"
 	      "  tgc train SOURCE [-o DIR] [--target COL] [--epochs N] [--hidden H] [--lr X]\n"
 	      "                   [--optimizer sgd|momentum|adam|adamw|muon] [--val FRACTION] [--max-rows N]\n"
-	      "                   [--batch N] [--text-dim N] [--model bow|ssm] [--layers N] [--mimo R] [--memory N] [--recall S] [--seed S]\n"
+	      "                   [--batch N] [--text-dim N] [--model bow|ssm] [--layers N] [--mimo R] [--memory N] [--recall S] [--match] [--seed S]\n"
 	      "                   [--init PRETRAINED_DIR]\n"
 	      "  tgc pretrain SOURCE [-o DIR] [--column COL] [--epochs N] [--steps N] [--batch N] [--lr X]\n"
-	      "                   [--window T] [--layers N] [--mimo R] [--memory N] [--recall S] [--max-rows N] [--seed S]\n"
+	      "                   [--window T] [--layers N] [--mimo R] [--memory N] [--recall S] [--match] [--max-rows N] [--seed S]\n"
 	      "  tgc gen-train SOURCE [-o DIR] [--in COL] [--out COL] [--maxlen N] [--epochs N] [--batch N]\n"
-	      "                   [--lr X] [--layers N] [--mimo R] [--memory N] [--recall S] [--init DIR] [--aligned] [--seed S]   byte seq-to-seq (--aligned: length-preserving)\n"
+	      "                   [--lr X] [--layers N] [--mimo R] [--memory N] [--recall S] [--match] [--init DIR] [--aligned] [--seed S]   byte seq-to-seq (--aligned: length-preserving)\n"
 	      "  tgc generate DIR (--input STRING | --inputs FILE [--in COL] [--out COL]) [-o OUT]\n"
 	      "  tgc predict DIR SOURCE [-o OUT.csv] [--model QUANTIZED.tgir] [--inputs ROWS.csv]\n"
 	      "SOURCE: a .csv/.tsv/.json/.jsonl/.npy file, or hf:OWNER/NAME[/CONFIG[/SPLIT]]\n",
@@ -57,7 +57,7 @@ static void parse_opts(int argc, char **argv, int first, Opts *o)
 	for (int i = first; i < argc; i++) {
 		const char *a = argv[i];
 		const char *v = i + 1 < argc ? argv[i + 1] : NULL;
-		if (!v && strncmp(a, "--", 2) == 0 && strcmp(a, "--aligned")) usage_data();
+		if (!v && strncmp(a, "--", 2) == 0 && strcmp(a, "--aligned") && strcmp(a, "--match")) usage_data();
 		if (!strcmp(a, "-o")) o->out = v;
 		else if (!strcmp(a, "--target")) o->target = v;
 		else if (!strcmp(a, "--epochs")) o->epochs = atoi(v);
@@ -92,6 +92,7 @@ static void parse_opts(int argc, char **argv, int first, Opts *o)
 		else if (!strcmp(a, "--input")) o->input = v;
 		else if (!strcmp(a, "--maxlen")) o->maxlen = atoi(v);
 		else if (!strcmp(a, "--aligned")) { o->aligned = 1; i--; }
+		else if (!strcmp(a, "--match")) { o->match = 1; i--; }
 		else if (!strcmp(a, "--model")) {
 			if (strcmp(v, "bow") && strcmp(v, "ssm")) die(NULL, 0, "--model is 'bow' (bag of words) or 'ssm' (bag of words + selective state-space sequence layer)");
 			o->ssm = !strcmp(v, "ssm");
@@ -157,12 +158,13 @@ typedef struct {
 	int sf, T, V, hs; /* sequence path: text feature index (-1: none), steps, vocabulary, model width */
 	int layers, mimo; /* Mamba-3 blocks, MIMO rank */
 	int mem;          /* product-key memory in the last block: sub-keys per half (N^2 slots), 0 for none */
-	int recall;       /* in-context memory in the last block: slots per sequence (a square), 0 for none */
+	int recall;       /* in-context memory in the last block: slots per sequence (a power of two), 0 for none */
+	int match;        /* suffix-automaton match in the last block (ROSA-style) */
 } Layout;
 
 static Layout layout_of(const Spec *s)
 {
-	Layout l = { 0, 0, 0, -1, 0, 0, 0, 0, 0, 0, 0 };
+	Layout l = { 0, 0, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0 };
 	for (int i = 0; i < s->nf; i++) {
 		if (s->f[i].kind == COL_TEXT) l.ds += s->f[i].dim;
 		else l.dd += s->f[i].dim;
@@ -264,6 +266,17 @@ static void gen_ssm_weights(char *b, size_t cap, size_t *o, const Layout *l, int
 				ssm_w(b, cap, o, mode, mw[i].n, k, sh, in);
 			}
 		}
+		if (k == L && l->match) { /* suffix-automaton match: the matched token's projection and its gate */
+			snprintf(sh, sizeof sh, "f32[%d, %d]", D, D);
+			snprintf(in, sizeof in, "rand(%d, %.6g)", sd + 80, a);
+			ssm_w(b, cap, o, mode, "Wm", k, sh, in);
+			snprintf(sh, sizeof sh, "f32[%d]", D);
+			snprintf(in, sizeof in, "rand(%d, %.6g)", sd + 81, a);
+			ssm_w(b, cap, o, mode, "wmg", k, sh, in);
+			ssm_w(b, cap, o, mode, "gm", k, sh, "ones");
+			ssm_w(b, cap, o, mode, "wml", k, "f32", "0.5");
+			ssm_w(b, cap, o, mode, "bmg", k, "f32", "-1");
+		}
 		if (k == L && l->recall) { /* in-context memory: value and output projections, read and write gates */
 			struct { const char *n; int r, c; double s; } rw[] = {
 				{ "Wrv", D, D, a }, { "Wro", D, D, sqrt(3.0 / D) / sqrt(2.0 * L) }, { "Wra", D, 6, a }, { "Wrw", D, 3, a },
@@ -341,6 +354,8 @@ static void gen_ssm_weights(char *b, size_t cap, size_t *o, const Layout *l, int
 		PW("]");
 	}
 	PW("]\nparam J : f32[2, 2] = [[0, 1], [-1, 0]]\n");
+	if (l->recall || l->match) PW("param tsel : f32[2] = [1, 0]\n");
+	if (l->match) PW("param msel0 : f32[2] = [1, 0]\nparam msel1 : f32[2] = [0, 1]\n");
 	if (l->recall) {
 		PW("param rM0 : f32[%d, %d] = zeros\nparam roff : f32[%d, 1] = [", Bm * l->recall, D, Bm);
 		for (int i = 0; i < Bm; i++) PW("%s[%d]", i ? ", " : "", i * l->recall);
@@ -348,7 +363,7 @@ static void gen_ssm_weights(char *b, size_t cap, size_t *o, const Layout *l, int
 		for (int i = 0; i < T * Bm; i++) PW("%s%d", i ? ", " : "", i < Bm ? -1 : i - Bm);
 		PW("]\nparam tidx : f32[1, 4] = [[1, 0, 0, 0]]\nparam trd : f32[1, 4] = [[0, 1, 0, 0]]\nparam twr : f32[1, 4] = [[0, 0, 1, 0]]\n"
 		   "param tdr : f32[1, 4] = [[0, 0, 0, 1]]\n"
-		   "param tsel : f32[2] = [1, 0]\nparam wsel : f32[3, 6] = [[0, 0, 0, 1, 0, 0], [0, 0, 0, 0, 1, 0], [0, 0, 0, 0, 0, 1]]\n"
+		   "param wsel : f32[3, 6] = [[0, 0, 0, 1, 0, 0], [0, 0, 0, 0, 1, 0], [0, 0, 0, 0, 0, 1]]\n"
 		   "param dcol : f32[6, 1] = [[0], [0], [0], [1], [1], [1]]\n");
 		for (int j = 0; j < 6; j++) {
 			PW("param ncol%d : f32[1, 6] = [[", j);
@@ -402,6 +417,14 @@ static void gen_ssm_def(char *b, size_t cap, size_t *o, const Layout *l, int Bm,
 		PW("    xr = reshape(x, %d, %d, 1, %d)\n", TB, Hh, P);
 		PW("    y = reshape(sum_to(reshape(ys, %d, %d, %d, %d) * Wyr_%d, xr), %d, %d) + x * dk_%d\n", TB, Hh, R, P, k, TB, Di, k);
 		PW("    e%dm = e%d + (y * silu(u @ Wz_%d)) @ Wo_%d\n", k, p, k, k);
+		if (k == l->layers && l->match) {
+			PW("    # block %d: suffix-automaton match (Blumer et al. 1985; ROSA): the token that followed the longest earlier match\n", k);
+			PW("    mk = reshape(m, %d)\n", TB);
+			PW("    sm = reshape(suffix_match(reshape((reshape(tok, %d, 2) @ tsel) * mk + mk - 1, %d, %d)), %d, 2)\n", TB, T, Bm, TB);
+			PW("    cm = rmsnorm(e%dm) * gm_%d\n", k, k);
+			PW("    mg = sigmoid(log(sm @ msel1 + 1) * wml_%d + cm @ wmg_%d + bmg_%d)\n", k, k, k);
+			PW("    e%dm = e%dm + reshape(mg, %d, 1) * (take(E, sm @ msel0) @ Wm_%d)\n", k, k, TB, k);
+		}
 		if (k == l->layers && l->recall) {
 			PW("    # block %d: in-context memory, %d slots per sequence, written and read while the sequence is read\n", k, l->recall);
 			PW("    c = rmsnorm(e%dm) * gr_%d\n", k, k);
@@ -703,6 +726,7 @@ static int cmd_train(Opts *o)
 		L.mimo = o->mimo > 0 ? o->mimo : 4;
 		L.mem = o->memory;
 		L.recall = o->recall;
+		L.match = o->match;
 		int *ids = xmalloc(65 * sizeof *ids);
 		for (int i = 0; i < ntr; i++) {
 			int w = spec_tokens(s, t, rows[i], L.sf, ids, 64);
@@ -986,7 +1010,7 @@ static int cmd_pretrain(Opts *o)
 	for (int i = 0; i < t->ncols && col < 0; i++)
 		if (o->column ? !strcmp(t->col[i].name, o->column) : t->col[i].kind == COL_TEXT) col = i;
 	if (col < 0) die(NULL, 0, o->column ? "pretrain: no column '%s'" : "pretrain: %s has no text column (name one with --column)", o->column ? o->column : o->source);
-	Layout L = { 0, 0, 0, 0, o->window > 0 ? o->window : 64, o->text_dim, 32, o->layers > 0 ? o->layers : 2, o->mimo > 0 ? o->mimo : 4, o->memory, o->recall };
+	Layout L = { 0, 0, 0, 0, o->window > 0 ? o->window : 64, o->text_dim, 32, o->layers > 0 ? o->layers : 2, o->mimo > 0 ? o->mimo : 4, o->memory, o->recall, o->match };
 	int T = L.T, Bm = o->batch > 0 ? o->batch : 16;
 	/* rows are packed into one token stream (as in GPT pretraining), cut into
 	 * windows of T + 1 tokens that overlap by one */
@@ -1209,6 +1233,7 @@ static int cmd_gentrain(Opts *o)
 	L.mimo = o->mimo > 0 ? o->mimo : 4;
 	L.mem = o->memory;
 	L.recall = o->recall;
+	L.match = o->match;
 	int T = L.T, Bm = o->batch > 0 ? o->batch : 32;
 	int nw = 0, cap = 1024;
 	int *W = xmalloc((size_t)cap * (size_t)T * sizeof *W), *G = xmalloc((size_t)cap * (size_t)T * sizeof *G);

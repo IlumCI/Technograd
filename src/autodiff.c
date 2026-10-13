@@ -492,6 +492,7 @@ static void vjp(AD *a, const Ins *in, int g, Adj *adj)
 		return;
 	case OP_ACTIVE: /* row indices: piecewise constant */
 	case OP_TOPK:
+	case OP_SUFMATCH:
 		return;
 	case OP_TAKE: /* rows are piecewise constant */
 		if (w0) acc(a, adj, x0, E3(a, OP_TAKE_T, x1, g, x0));

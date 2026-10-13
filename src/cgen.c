@@ -201,6 +201,11 @@ static void block(G *g, const Block *b, int d)
 			fprintf(g->f, "tg_topk(%s, %s, %d, %d, %d);\n", o, a, rows, cols, m->val[in->out].sh.dim[m->val[in->out].sh.rank - 1]);
 			break;
 		}
+		case CLS_SUFMATCH: {
+			const Shape *xs = &m->val[in->a[0]].sh;
+			fprintf(g->f, "tg_sufmatch(%s, %s, %d, %d);\n", o, a, xs->dim[0], xs->rank == 2 ? xs->dim[1] : 1);
+			break;
+		}
 		case CLS_MEMSCAN: {
 			int tn, k, rows, dv;
 			memscan_dims(m, in, &tn, &k, &rows, &dv);

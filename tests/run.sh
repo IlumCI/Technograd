@@ -33,6 +33,7 @@ expect_run tests/cases/ops.tg "$(cat tests/cases/ops.expected)" 1,-2,3,0.5
 expect_run tests/memory/topk.tg "1 3 2 5 0 1 2 3 0 1 2 3" 0,5,3,4,-1,2,0,0,0,0,0,0,6,5,4,3,2,1
 expect_run tests/memory/topk_pad.tg "1 0 2 -1 -1" 2,3,1
 expect_run tests/memory/take_along.tg "4 1 0 6 0 11" 1,2,3,4,5,6,7,8,9,10,11,12 3,0,-1,1,4,2
+expect_run tests/memory/sufmatch.tg "-1 0 -1 0 -1 0 -1 0 -1 0 6 1 2 1 5 2 3 2 6 3 1 3 5 4 2 4 -1 0 3 5 6 1 1 6 5 2 -1 0 -1 0 2 1 5 1 3 2 6 2" 1,5,2,6,3,5,1,6,2,5,3,6,1,-1,2,5,3,6,9,7,1,6,2,5
 
 # 2-3. every example and positive case
 CASES="examples/xor.tg:1,0 examples/newton.tg:2,9,16 examples/latent_reasoner.tg:1,0,0,1,0,1,1,0
@@ -44,7 +45,7 @@ tests/sparse/rows.tg:0,1,2,0.5,5,-1,1,1,1,1,9,0.3:0.5,-0.5
 tests/attn/window.tg:0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1,1.1,1.2,1.3,1.4,1.5,1.6,-0.1,-0.2,-0.3,-0.4,-0.5,-0.6,-0.7,-0.8,0.3,0.1,0.4,0.1,0.5,0.9,0.2,0.6,1,0,1,0,1,0,1,0,0,1,0,1,0,1,0,1,0.5,0.5,0.5,0.5,-0.5,-0.5,-0.5,-0.5 tests/scan/scan.tg:1,2,3,4,5,6,7,8:1,0.5,-1,2 tests/think/halt.tg:1,1 tests/think/halt.tg:0,0 tests/scan/nested_grad.tg:0.1,0.2,0.3,-0.4,0.5,0.1,-0.2,0.3 examples/selective_ssm.tg:0.1,0,0.2,0,-0.3,1,0.4,0,0.1,0,0.2,1,-0.1,0,0.3,0,0.2,0,-0.4,1,0.1,0,0.2,0:0.1,0.3,-0.3,0.1,0.2,0.2,0.1,0.4,0.6,-0.4,-0.3,-0.1
 examples/drift_calibration.tg:10,20,30 tests/native/broadcast.tg:1,2,3:0.5,-1,2,0:$(seq -s, -1 0.1 1.3)
 tests/memory/topk.tg:0,5,3,4,-1,2,0,0,0,0,0,0,6,5,4,3,2,1 tests/memory/topk_pad.tg:2,3,1 tests/memory/take_along.tg:1,2,3,4,5,6,7,8,9,10,11,12:3,0,-1,1,4,2
-tests/memory/scan.tg:$(seq -s, -1.1 0.1 1.2) tests/memory/scan_grad.tg:$(seq -s, -1.1 0.1 1.2) tests/memory/scan4.tg:$(seq -s, -1.1 0.1 1.2)"
+tests/memory/scan.tg:$(seq -s, -1.1 0.1 1.2) tests/memory/scan_grad.tg:$(seq -s, -1.1 0.1 1.2) tests/memory/scan4.tg:$(seq -s, -1.1 0.1 1.2) tests/memory/sufmatch.tg:1,5,2,6,3,5,1,6,2,5,3,6,1,-1,2,5,3,6,9,7,1,6,2,5"
 for c in $CASES; do
 	f=${c%%:*}
 	args=$(echo "${c#*:}" | tr ':' ' ')
@@ -203,6 +204,10 @@ $TGC train "$TMP/order.csv" --model ssm --memory 16 --epochs 10 -o "$TMP/ord_mem
 grep -q "accuracy 100.00%" "$TMP/om.log" && grep -q "topk(s1, 8)" "$TMP/ord_mem/infer.tg" && ok || bad "ssm --memory: $(grep 'best epoch' "$TMP/om.log")"
 [ "$($TGC predict "$TMP/ord_mem" "$TMP/onew.csv" 2>/dev/null | cut -d, -f1 | tr '\n' ' ')" = 'prediction "pos" "neg" ' ] && ok || bad "ssm --memory predict"
 $CC -std=c99 -Wall -Werror -c -o "$TMP/ominfer.o" "$TMP/ord_mem/infer.c" && ok || bad "ssm --memory infer.c does not compile"
+# suffix-automaton match (--match): the token that followed the longest earlier match, gated, in the last block
+$TGC train "$TMP/order.csv" --model ssm --match --epochs 10 -o "$TMP/ord_sm" > "$TMP/osm.log" 2>&1
+grep -q "accuracy 100.00%" "$TMP/osm.log" && grep -q "suffix_match(" "$TMP/ord_sm/infer.tg" && ok || bad "ssm --match: $(grep 'best epoch' "$TMP/osm.log")"
+$CC -std=c99 -Wall -Werror -c -o "$TMP/osminfer.o" "$TMP/ord_sm/infer.c" && ok || bad "ssm --match infer.c does not compile"
 # in-context memory (--recall): a memory_scan in the last block, written while the sequence is read
 $TGC train "$TMP/order.csv" --model ssm --recall 64 --epochs 10 -o "$TMP/ord_rc" > "$TMP/orc.log" 2>&1
 grep -q "accuracy 100.00%" "$TMP/orc.log" && grep -q "memory_scan(rM0" "$TMP/ord_rc/infer.tg" && ok || bad "ssm --recall: $(grep 'best epoch' "$TMP/orc.log")"
@@ -307,7 +312,7 @@ for c in "examples/newton.tg 2,9,16" "examples/latent_reasoner.tg 1,0,0,1,0,1,1,
 	"tests/sparse/spmm.tg 0,1,2,0.5,5,-1,0,0,1,1,1,1,9,3,-1,2 0.5,-0.5" "tests/scan/scan.tg 1,2,3,4,5,6,7,8 1,0.5,-1,2" \
 	"$TMP/q4gptq.tgir 0.1,0.2,-0.3,0.4,0.5,-0.6,0.7,0.8,0.9,-0.1,0.2,0.3,0.4,0.5,0.6,0.7 3,0.5,10,1,63,0.25" \
 	"tests/native/broadcast.tg 1,2,3 0.5,-1,2,0 $(seq -s, -1 0.1 1.3)" "tests/memory/topk.tg 0,5,3,4,-1,2,0,0,0,0,0,0,6,5,4,3,2,1" \
-	"tests/memory/scan.tg $(seq -s, -1.1 0.1 1.2)" "tests/memory/scan_grad.tg $(seq -s, -1.1 0.1 1.2)" "tests/memory/scan4.tg $(seq -s, -1.1 0.1 1.2)"; do
+	"tests/memory/scan.tg $(seq -s, -1.1 0.1 1.2)" "tests/memory/scan_grad.tg $(seq -s, -1.1 0.1 1.2)" "tests/memory/scan4.tg $(seq -s, -1.1 0.1 1.2)" "tests/memory/sufmatch.tg 1,5,2,6,3,5,1,6,2,5,3,6,1,-1,2,5,3,6,9,7,1,6,2,5"; do
 	set -- $c
 	e=$(fxcmp "$@")
 	awk -v e="$e" 'BEGIN { exit !(e < 5e-4) }' && ok || bad "fixed point $1: max error $e"
@@ -329,7 +334,7 @@ examples/selective_ssm.tg:0.1,0,0.2,0,-0.3,1,0.4,0,0.1,0,0.2,1,-0.1,0,0.3,0,0.2,
 $TMP/q4gptq.tgir:0.1,0.2,-0.3,0.4,0.5,-0.6,0.7,0.8,0.9,-0.1,0.2,0.3,0.4,0.5,0.6,0.7:3,0.5,10,1,63,0.25
 tests/native/broadcast.tg:1,2,3:0.5,-1,2,0:$(seq -s, -1 0.1 1.3)
 tests/memory/topk.tg:0,5,3,4,-1,2,0,0,0,0,0,0,6,5,4,3,2,1
-tests/memory/scan.tg:$(seq -s, -1.1 0.1 1.2) tests/memory/scan_grad.tg:$(seq -s, -1.1 0.1 1.2) tests/memory/scan4.tg:$(seq -s, -1.1 0.1 1.2)"
+tests/memory/scan.tg:$(seq -s, -1.1 0.1 1.2) tests/memory/scan_grad.tg:$(seq -s, -1.1 0.1 1.2) tests/memory/scan4.tg:$(seq -s, -1.1 0.1 1.2) tests/memory/sufmatch.tg:1,5,2,6,3,5,1,6,2,5,3,6,1,-1,2,5,3,6,9,7,1,6,2,5"
 perl -e 'srand(3); for (1..6) { print join(",", map { sprintf("%.1f", 2*rand()-1) } 1..8), "\n" }' > "$TMP/seq6.csv"
 native() { # TARGET TOLERANCE
 	for c in $NATIVE; do

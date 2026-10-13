@@ -465,3 +465,10 @@ void memscan_dims(const Module *m, const Ins *in, int *tn, int *k, int *rows, in
 		*rows = a0->dim[0] - 2 * *tn;
 	}
 }
+
+long sufmatch_size(long T, long n)
+{ /* the same arithmetic as tg_sufmatch_ws in runtime/tg_rt.h */
+	long h = 16;
+	while (h < 6 * T + 6) h *= 2;
+	return 2 * T * n + 4 * (2 * T + 2) + 4 * h;
+}

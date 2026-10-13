@@ -579,4 +579,97 @@ TG_FN void tg_memscan_t(float *o, const float *y, const float *pv, const float *
 	}
 }
 
+/* Longest earlier match by an online suffix automaton (Blumer, Blumer,
+ * Ehrenfeucht, Haussler, Chen, Seiferas, TCS 40, 1985: the minimal automaton
+ * of a text's subwords, built in linear time). x (T, n): token ids of n
+ * streams, time-major; a negative id breaks matches and is not added. For
+ * each t, o[(t n + g) 2 + 0] is the token that followed an earlier
+ * occurrence of the longest suffix of x[..t] seen before t (-1 if none) and
+ * o[.. + 1] that suffix's length. Amortized O(1) per token. The workspace
+ * after the T n 2 outputs holds the automaton of one stream at a time, as
+ * exact integers in floats: per state (len, link, end, edge list), per edge
+ * slot of an open-addressing table (state, symbol, target, next). */
+TG_FN long tg_sufmatch_cap(long T)
+{
+	long h = 16;
+	while (h < 6 * T + 6) h *= 2;
+	return h;
+}
+TG_FN long tg_sufmatch_ws(long T) { return 4 * (2 * T + 2) + 4 * tg_sufmatch_cap(T); }
+TG_FN long tg_sm_slot(const float *E, long H, long st, long c)
+{
+	unsigned long h = ((unsigned long)st * 2654435761UL ^ (unsigned long)c * 40503UL) & (unsigned long)(H - 1);
+	while (E[h * 4] >= 0.0f && ((long)E[h * 4] != st || (long)E[h * 4 + 1] != c)) h = (h + 1) & (unsigned long)(H - 1);
+	return (long)h;
+}
+TG_FN long tg_sm_get(const float *E, long H, long st, long c)
+{
+	long h = tg_sm_slot(E, H, st, c);
+	return E[h * 4] < 0.0f ? -1 : (long)E[h * 4 + 2];
+}
+TG_FN void tg_sm_set(float *E, float *S, long H, long st, long c, long to)
+{
+	long h = tg_sm_slot(E, H, st, c);
+	if (E[h * 4] < 0.0f) {
+		E[h * 4] = (float)st;
+		E[h * 4 + 1] = (float)c;
+		E[h * 4 + 3] = S[st * 4 + 3];
+		S[st * 4 + 3] = (float)h;
+	}
+	E[h * 4 + 2] = (float)to;
+}
+TG_FN void tg_sufmatch(float *o, const float *x, int T, int n)
+{
+	long H = tg_sufmatch_cap(T);
+	float *S = o + 2L * T * n, *E = S + 4 * (2L * T + 2);
+	for (int g = 0; g < n; g++) {
+		long sz = 1, last = 0, m = 0, l = 0;
+		for (long i = 0; i < H; i++) E[i * 4] = -1.0f;
+		S[0] = 0.0f; S[1] = -1.0f; S[2] = -1.0f; S[3] = -1.0f;
+		for (long t = 0; t < T; t++) {
+			float xv = x[t * n + g];
+			long c = xv >= 0.0f ? (long)(xv + 0.5f) : -1;
+			float *out = o + (t * n + g) * 2;
+			if (c < 0) { /* a break: no match across it, and it is not added */
+				m = 0, l = 0;
+				out[0] = -1.0f, out[1] = 0.0f;
+				continue;
+			}
+			while (m != 0 && tg_sm_get(E, H, m, c) < 0) {
+				m = (long)S[m * 4 + 1];
+				l = (long)S[m * 4];
+			}
+			long tr = tg_sm_get(E, H, m, c);
+			if (tr >= 0) m = tr, l++;
+			else m = 0, l = 0;
+			long e = l > 0 ? (long)S[m * 4 + 2] : -1;
+			out[0] = e >= 0 && e + 1 <= t ? x[(e + 1) * n + g] : -1.0f;
+			out[1] = (float)l;
+			long cur = sz++, p = last; /* extend the automaton with c */
+			S[cur * 4] = S[last * 4] + 1.0f; S[cur * 4 + 2] = (float)t; S[cur * 4 + 3] = -1.0f;
+			while (p != -1 && tg_sm_get(E, H, p, c) < 0) {
+				tg_sm_set(E, S, H, p, c, cur);
+				p = (long)S[p * 4 + 1];
+			}
+			if (p == -1) S[cur * 4 + 1] = 0.0f;
+			else {
+				long q = tg_sm_get(E, H, p, c);
+				if (S[p * 4] + 1.0f == S[q * 4]) S[cur * 4 + 1] = (float)q;
+				else {
+					long cl = sz++;
+					S[cl * 4] = S[p * 4] + 1.0f; S[cl * 4 + 1] = S[q * 4 + 1]; S[cl * 4 + 2] = S[q * 4 + 2]; S[cl * 4 + 3] = -1.0f;
+					for (long h = (long)S[q * 4 + 3]; h >= 0; h = (long)E[h * 4 + 3]) tg_sm_set(E, S, H, cl, (long)E[h * 4 + 1], (long)E[h * 4 + 2]);
+					while (p != -1 && tg_sm_get(E, H, p, c) == q) {
+						tg_sm_set(E, S, H, p, c, cl);
+						p = (long)S[p * 4 + 1];
+					}
+					S[q * 4 + 1] = (float)cl; S[cur * 4 + 1] = (float)cl;
+					if (m == q && l <= (long)S[cl * 4]) m = cl;
+				}
+			}
+			last = cur;
+		}
+	}
+}
+
 #endif

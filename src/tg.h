@@ -85,12 +85,13 @@ typedef enum {
 	OP_SUM_TO,
 	OP_TOPK,
 	OP_MEMSCAN, OP_MEMSCAN_T,
+	OP_SUFMATCH,
 	OP_THINK,
 	OP_SCAN,
 	OP_COUNT
 } Op;
 
-typedef enum { CLS_CONST, CLS_BIN, CLS_UN, CLS_MATMUL, CLS_ROW, CLS_RED, CLS_TRANS, CLS_OUTER, CLS_SPMM, CLS_ROWS, CLS_RESHAPE, CLS_SUMTO, CLS_TOPK, CLS_MEMSCAN, CLS_THINK, CLS_SCAN } OpClass;
+typedef enum { CLS_CONST, CLS_BIN, CLS_UN, CLS_MATMUL, CLS_ROW, CLS_RED, CLS_TRANS, CLS_OUTER, CLS_SPMM, CLS_ROWS, CLS_RESHAPE, CLS_SUMTO, CLS_TOPK, CLS_MEMSCAN, CLS_SUFMATCH, CLS_THINK, CLS_SCAN } OpClass;
 
 typedef struct {
 	const char *name;
@@ -219,6 +220,7 @@ int ir_reshape(Module *m, Block *b, int x, const Shape *to); /* same data, new s
 int ir_topk(Module *m, Block *b, int x, int k); /* indices of the k largest along the last axis */
 /* memscan_t's packed output (floats): dP (T n k 4) at 0, dM0 at *o1, dV at *o2, work memory at *o3; N a multiple of 4 and dv */
 void memscan_layout(int T, int n, int k, int rows, int dv, long *o1, long *o2, long *o3, long *N);
+long sufmatch_size(long T, long n); /* sufmatch's output: 2 T n results, then the automaton's workspace */
 void memscan_dims(const Module *m, const Ins *in, int *tn, int *k, int *rows, int *dv); /* kernel arguments of memscan / memscan_t */
 void optim_train(Module *m, Block *b, int loss, const char *opt, const char **keys, const double *vals, int nkv,
 		 const int *over, int nover, const char *file, int line); /* optim.c */

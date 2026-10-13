@@ -343,6 +343,11 @@ static void exec_one(VM *vm, const Ins *in)
 			tg_topk(o, a, rows, cols, os->dim[os->rank - 1]);
 			break;
 		}
+		case CLS_SUFMATCH: {
+			const Shape *xs = &m->val[in->a[0]].sh;
+			tg_sufmatch(o, a, xs->dim[0], xs->rank == 2 ? xs->dim[1] : 1);
+			break;
+		}
 		case CLS_MEMSCAN: {
 			int tn, k, rows, dv;
 			memscan_dims(m, in, &tn, &k, &rows, &dv);

@@ -45,6 +45,7 @@ const OpInfo tg_ops[OP_COUNT] = {
 	[OP_TOPK]      = { "topk",      1, CLS_TOPK },
 	[OP_MEMSCAN]   = { "memscan",   3, CLS_MEMSCAN },
 	[OP_MEMSCAN_T] = { "memscan_t", 3, CLS_MEMSCAN },
+	[OP_SUFMATCH]  = { "sufmatch",  1, CLS_SUFMATCH },
 	[OP_THINK]     = { "think",     0, CLS_THINK },
 	[OP_SCAN]      = { "scan",      0, CLS_SCAN },
 };
@@ -276,6 +277,17 @@ int op_infer(Op op, const Shape *a, int na, Shape *out, char *err, size_t errn)
 		memscan_layout(pv->dim[0], pv->dim[1], (pv->dim[2] - dv) / 4, y->dim[0] - 2 * tn, dv, &o1, &o2, &o3, &N);
 		out->rank = 1;
 		out->dim[0] = (int)N;
+		return 1;
+	}
+	case CLS_SUFMATCH: { /* sufmatch(x) -> (N): x (T) or (T, n) token ids; see suffix_match in lower.c */
+		const Shape *x = &a[0];
+		if (x->rank != 1 && x->rank != 2) {
+			shape_str(x, s0, sizeof s0);
+			snprintf(err, errn, "'sufmatch' needs token ids (T) or (T, n), got %s", s0);
+			return 0;
+		}
+		out->rank = 1;
+		out->dim[0] = (int)sufmatch_size(x->dim[0], x->rank == 2 ? x->dim[1] : 1);
 		return 1;
 	}
 	case CLS_TOPK: /* k is not a function of the operand: see ir_topk */

@@ -116,6 +116,7 @@ static int lower_block(L *l, Block *b, Env *e, Sx *stmts, int is_fn);
 static int lower_attn(L *l, Block *b, Env *e, Sx *x);
 static int lower_take_along(L *l, Block *b, Env *e, Sx *x);
 static int lower_memory(L *l, Block *b, Env *e, Sx *x);
+static int lower_sufmatch(L *l, Block *b, Env *e, Sx *x);
 
 static int lower_expr(L *l, Block *b, Env *e, Sx *x)
 {
@@ -156,6 +157,7 @@ static int lower_expr(L *l, Block *b, Env *e, Sx *x)
 	}
 	if (strcmp(fn->s, "take_along") == 0) return lower_take_along(l, b, e, x);
 	if (strcmp(fn->s, "memory_scan") == 0 || strcmp(fn->s, "memory_final") == 0) return lower_memory(l, b, e, x);
+	if (strcmp(fn->s, "suffix_match") == 0) return lower_sufmatch(l, b, e, x);
 	if (strcmp(fn->s, "reshape") == 0) { /* reshape(x, d0, d1, ...): literal dimensions */
 		Shape to = { 0 };
 		if (x->len < 4 || x->len - 3 > TG_MAXRANK) die(l->file, x->line, "'reshape' takes a tensor and 1 to %d dimensions", TG_MAXRANK);
@@ -283,6 +285,33 @@ static int const_param(L *l, const char *name, const Shape *sh, const float *dat
  * memory_final(m0, p, v) returns the memory after the last step (rows, dv).
  * Both are a memscan, whose output stacks the reads, the delta reads and the
  * final memory, and a take of its rows. */
+/* suffix_match(x): x (T) or (T, n) token ids, time-major. For each step,
+ * (the token that followed an earlier occurrence of the longest suffix of
+ * x[..t] seen before t, or -1; that suffix's length): (T, 2) or (T, n, 2).
+ * An online suffix automaton (Blumer et al., 1985), amortized O(1) per step;
+ * a sufmatch, whose output holds the results and the automaton's workspace,
+ * and a take of the results. Not differentiable. */
+static int lower_sufmatch(L *l, Block *b, Env *e, Sx *x)
+{
+	Module *m = l->m;
+	if (x->len != 3) die(l->file, x->line, "'suffix_match' takes token ids (T) or (T, n)");
+	int v = lower_expr(l, b, e, x->v[2]);
+	Shape xs = m->val[v].sh;
+	if (xs.rank != 1 && xs.rank != 2) die(l->file, x->line, "'suffix_match' takes token ids (T) or (T, n)");
+	int raw = ir_op(m, b, OP_SUFMATCH, v, -1, l->file, x->line);
+	int tn = shape_numel(&xs);
+	long N = sufmatch_size(xs.dim[0], xs.rank == 2 ? xs.dim[1] : 1);
+	char name[64];
+	snprintf(name, sizeof name, "__range_0_%d", tn);
+	Shape rs = { 1, { tn } }, pv = { 2, { (int)(N / 2), 2 } }, out = xs;
+	float *d = xmalloc((size_t)tn * sizeof *d);
+	for (int i = 0; i < tn; i++) d[i] = (float)i;
+	int r = const_param(l, name, &rs, d);
+	xfree(d);
+	out.dim[out.rank++] = 2;
+	return ir_reshape(m, b, ir_op(m, b, OP_TAKE, ir_reshape(m, b, raw, &pv), r, l->file, x->line), &out);
+}
+
 static int lower_memory(L *l, Block *b, Env *e, Sx *x)
 {
 	Module *m = l->m;
