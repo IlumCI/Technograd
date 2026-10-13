@@ -832,7 +832,17 @@ h1 = gelu(x @ w1 + spmm(s, wt) + rmsnorm(ssm(tok)) @ wp + b1)
   writes `c Wrv` with a learned gate `sigmoid(c wrg + brg)` (zero on
   padding) and reads with the same address, all in one `memory_scan`
   (section 20); `e += reads Wro`. Keying on the previous token is the
-  induction-head pattern: after "k v", a later "k" reads back v. Unlike
+  induction-head pattern: after "k v", a later "k" reads back v.
+  Measured with `gen-train` on byte strings (`examples/recall/gen.pl`, 6,000
+  pairs, 10 epochs, 500 held out): with 8 letter-digit pairs and one query
+  ("j3c8e5w3o8t6v2q9:j" -> "3"), exact match goes from 30.4% (no memory)
+  and 30.0% (memory keyed on the block's own state) to **100%** keyed on
+  the previous token, validation loss 0.895 -> 0.00016, in 200 s. With
+  several queries answered after all of them ("...:mxq" -> "103"), output
+  j must find query j several positions back; that is an alignment problem
+  the memory does not address (4 pairs, 4 queries: 3.75% without, 3.50%
+  with; 16 pairs: 0.2% both). The token-level benchmark of section 20, which
+  answers each query where it is asked, is the memory's measure. Unlike
   `--memory`, which is trained once and read only, this memory starts empty
   for every sequence and is written while the sequence is read.
 - **Training** is backpropagation through time (section 19) inside the same

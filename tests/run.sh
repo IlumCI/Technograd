@@ -217,6 +217,11 @@ perl examples/crypto_ctf/gen.pl caesar5 300 999 > "$TMP/cae_test.jsonl"   # disj
 $TGC gen-train "$TMP/cae.jsonl" -o "$TMP/cae" --aligned --epochs 12 --layers 2 --maxlen 24 > "$TMP/cae.log" 2>&1
 em=$($TGC generate "$TMP/cae" --inputs "$TMP/cae_test.jsonl" -o /dev/null 2>&1 | sed -n 's/.*exact-match \([0-9.]*\)%.*/\1/p')
 awk -v e="$em" 'BEGIN { exit !(e >= 90) }' && ok || bad "aligned seq2seq caesar5 exact-match $em% (want >= 90)"
+# byte-level recall with gen-train --recall (memory keyed on the previous token): one query of 4 pairs
+perl examples/recall/gen.pl 4 1 1500 1 > "$TMP/rc4.jsonl"; perl examples/recall/gen.pl 4 1 200 2 > "$TMP/rc4t.jsonl"
+$TGC gen-train "$TMP/rc4.jsonl" --maxlen 16 --epochs 6 --recall 256 -o "$TMP/rc4" > /dev/null 2>&1
+em=$($TGC generate "$TMP/rc4" --inputs "$TMP/rc4t.jsonl" -o /dev/null 2>&1 | sed -n 's/.*exact-match \([0-9.]*\)%.*/\1/p')
+awk -v e="$em" 'BEGIN { exit !(e >= 95) }' && ok || bad "gen-train --recall exact-match $em% (want >= 95)"
 # in-context memory: learned write gate among filler, trained at T = 64, evaluated at T = 8192
 # in one pass and streamed in two chunks (memory carried in a state): the same hits
 L="perl examples/recall/long.pl"; LT=$TMP/long; mkdir -p "$LT/p" "$LT/e" "$LT/s"
