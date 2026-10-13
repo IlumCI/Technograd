@@ -477,4 +477,92 @@ TG_FN void tg_topk(float *o, const float *a, int rows, int n, int k)
 	}
 }
 
+/* Delta-rule memory written while a sequence is read (sparse delta memory).
+ * m0 (rows, dv) is the initial memory; p (T, n, k, 3) holds, for step t and
+ * stream g, k (row, read weight a, write weight c) triples; v (T, n, dv) the
+ * values. Step t, stream g (in order): r = sum_i a_i M[row_i];
+ * M[row_i] += c_i (v - r). o (T n + rows, dv): the reads r, then the final M.
+ * Rows outside [0, rows) are skipped. tn = T n. */
+TG_FN void tg_memscan(float *o, const float *m0, const float *p, const float *v, int tn, int k, int rows, int dv)
+{
+	float *M = o + (long)tn * dv;
+	for (long i = 0; i < (long)rows * dv; i++) M[i] = m0[i];
+	for (long s = 0; s < tn; s++) {
+		const float *q = p + s * k * 3, *x = v + s * dv;
+		float *r = o + s * dv;
+		for (int j = 0; j < dv; j++) r[j] = 0.0f;
+		for (int i = 0; i < k; i++) {
+			int t = tg_ell_idx(q[i * 3], rows);
+			if (t < 0 || q[i * 3 + 1] == 0.0f) continue;
+			for (int j = 0; j < dv; j++) r[j] += q[i * 3 + 1] * M[(long)t * dv + j];
+		}
+		for (int i = 0; i < k; i++) {
+			int t = tg_ell_idx(q[i * 3], rows);
+			float c = q[i * 3 + 2];
+			if (t < 0 || c == 0.0f) continue;
+			for (int j = 0; j < dv; j++) M[(long)t * dv + j] += c * (x[j] - r[j]);
+		}
+	}
+}
+
+/* Its derivatives, by running the steps backwards from the final memory and
+ * undoing each write (no per-step memory is stored). y is tg_memscan's
+ * output, pv (T, n, 3k + dv) the triples followed by the value of each step,
+ * g (T n + rows, dv) the adjoint of y. o (N): dP (T n k 3, index entries 0)
+ * at 0, dM0 (rows, dv) at o1, dV (T n, dv) at o2, the working memory at o3
+ * (tg_memscan_layout; N is a multiple of 3 and of dv). */
+TG_FN void tg_memscan_layout(long tn, int k, int rows, int dv, long *o1, long *o2, long *o3, long *N)
+{
+	long np = tn * k * 3, L = dv % 3 ? 3L * dv : dv, end;
+	*o1 = (np + dv - 1) / dv * dv;
+	*o2 = *o1 + (long)rows * dv;
+	*o3 = *o2 + tn * dv;
+	end = *o3 + (long)rows * dv;
+	*N = (end + L - 1) / L * L;
+}
+TG_FN void tg_memscan_t(float *o, const float *y, const float *pv, const float *g, int tn, int k, int rows, int dv)
+{
+	long w = 3L * k + dv, o1, o2, o3, N;
+	tg_memscan_layout(tn, k, rows, dv, &o1, &o2, &o3, &N);
+	float *dP = o, *dM = o + o1, *dV = o + o2, *M = o + o3;
+	for (long i = 0; i < N; i++) o[i] = 0.0f;
+	for (long i = 0; i < (long)rows * dv; i++) {
+		M[i] = y[tn * dv + i];
+		dM[i] = g[tn * dv + i];
+	}
+	for (long s = tn - 1; s >= 0; s--) {
+		const float *q = pv + s * w, *x = q + 3 * k, *r = y + s * dv, *dr = g + s * dv;
+		float *dp = dP + s * k * 3, *dx = dV + s * dv;
+		for (int i = k - 1; i >= 0; i--) { /* undo the writes: M as the step read it */
+			int t = tg_ell_idx(q[i * 3], rows);
+			float c = q[i * 3 + 2];
+			if (t < 0 || c == 0.0f) continue;
+			for (int j = 0; j < dv; j++) M[(long)t * dv + j] -= c * (x[j] - r[j]);
+		}
+		for (int i = 0; i < k; i++) { /* de = sum_i c_i dM[row_i]; dc_i = dM[row_i] . e */
+			int t = tg_ell_idx(q[i * 3], rows);
+			float c = q[i * 3 + 2], d = 0.0f;
+			if (t < 0) continue;
+			for (int j = 0; j < dv; j++) {
+				d += dM[(long)t * dv + j] * (x[j] - r[j]);
+				dx[j] += c * dM[(long)t * dv + j];
+			}
+			dp[i * 3 + 2] = d;
+		}
+		for (int i = 0; i < k; i++) { /* the read: da_i = (dr - de) . M[row_i]; dM[row_i] += a_i (dr - de) */
+			int t = tg_ell_idx(q[i * 3], rows);
+			float d = 0.0f;
+			if (t < 0) continue;
+			for (int j = 0; j < dv; j++) d += (dr[j] - dx[j]) * M[(long)t * dv + j];
+			dp[i * 3 + 1] = d;
+		}
+		for (int i = 0; i < k; i++) {
+			int t = tg_ell_idx(q[i * 3], rows);
+			float a = q[i * 3 + 1];
+			if (t < 0 || a == 0.0f) continue;
+			for (int j = 0; j < dv; j++) dM[(long)t * dv + j] += a * (dr[j] - dx[j]);
+		}
+	}
+}
+
 #endif

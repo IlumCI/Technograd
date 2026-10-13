@@ -115,6 +115,7 @@ static int emit_op(L *l, Block *b, Op op, const int *args, int na, int line)
 static int lower_block(L *l, Block *b, Env *e, Sx *stmts, int is_fn);
 static int lower_attn(L *l, Block *b, Env *e, Sx *x);
 static int lower_take_along(L *l, Block *b, Env *e, Sx *x);
+static int lower_memory(L *l, Block *b, Env *e, Sx *x);
 
 static int lower_expr(L *l, Block *b, Env *e, Sx *x)
 {
@@ -154,6 +155,7 @@ static int lower_expr(L *l, Block *b, Env *e, Sx *x)
 		return ir_topk(l->m, b, v, (int)d->v[1]->n);
 	}
 	if (strcmp(fn->s, "take_along") == 0) return lower_take_along(l, b, e, x);
+	if (strcmp(fn->s, "memory_scan") == 0 || strcmp(fn->s, "memory_final") == 0) return lower_memory(l, b, e, x);
 	if (strcmp(fn->s, "reshape") == 0) { /* reshape(x, d0, d1, ...): literal dimensions */
 		Shape to = { 0 };
 		if (x->len < 4 || x->len - 3 > TG_MAXRANK) die(l->file, x->line, "'reshape' takes a tensor and 1 to %d dimensions", TG_MAXRANK);
@@ -274,6 +276,32 @@ static int const_param(L *l, const char *name, const Shape *sh, const float *dat
  * take: x flattens to (R n, 1) and i shifts by a constant row offset (R, 1),
  * so the gradient to x is take's scatter-add and none flows to i:
  *   ok = step(i + 1) * step(n - i), idx = (i + off) * ok + ok - 1 */
+/* memory_scan(m0, p, v): a delta-rule memory written while a sequence is
+ * read (section 20). m0 (rows, dv), p (T, n, k, 3) holding k (row, read
+ * weight, write weight) triples per step and stream, v (T, n, dv). Returns
+ * the reads (T, n, dv); memory_final(m0, p, v) returns the memory after the
+ * last step (rows, dv). Both are a memscan, whose output stacks the reads
+ * over the final memory, and a take of its rows. */
+static int lower_memory(L *l, Block *b, Env *e, Sx *x)
+{
+	Module *m = l->m;
+	int fin = !strcmp(x->v[1]->s, "memory_final");
+	if (x->len != 5) die(l->file, x->line, "'%s' takes (memory, triples, values)", x->v[1]->s);
+	int m0 = lower_expr(l, b, e, x->v[2]), p = lower_expr(l, b, e, x->v[3]), v = lower_expr(l, b, e, x->v[4]);
+	int raw = ir_op3(m, b, OP_MEMSCAN, m0, p, v, l->file, x->line);
+	Shape ps = m->val[p].sh, vs = m->val[v].sh;
+	int tn = ps.dim[0] * ps.dim[1], rows = m->val[m0].sh.dim[0], len = fin ? rows : tn, start = fin ? tn : 0;
+	char name[64];
+	snprintf(name, sizeof name, "__range_%d_%d", start, len);
+	Shape rs = { 1, { len } };
+	float *d = xmalloc((size_t)len * sizeof *d);
+	for (int i = 0; i < len; i++) d[i] = (float)(start + i);
+	int r = const_param(l, name, &rs, d);
+	xfree(d);
+	int g = ir_op(m, b, OP_TAKE, raw, r, l->file, x->line);
+	return fin ? g : ir_reshape(m, b, g, &vs);
+}
+
 static int lower_take_along(L *l, Block *b, Env *e, Sx *x)
 {
 	Module *m = l->m;

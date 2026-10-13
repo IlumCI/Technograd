@@ -343,6 +343,13 @@ static void exec_one(VM *vm, const Ins *in)
 			tg_topk(o, a, rows, cols, os->dim[os->rank - 1]);
 			break;
 		}
+		case CLS_MEMSCAN: {
+			int tn, k, rows, dv;
+			memscan_dims(m, in, &tn, &k, &rows, &dv);
+			if (in->op == OP_MEMSCAN) tg_memscan(o, a, c, e, tn, k, rows, dv);
+			else tg_memscan_t(o, a, c, e, tn, k, rows, dv);
+			break;
+		}
 		case CLS_SUMTO: {
 			int d[TG_BCAST_DESC];
 			bcast_desc(&m->val[in->a[0]].sh, &m->val[in->a[1]].sh, NULL, d);

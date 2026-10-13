@@ -201,6 +201,12 @@ static void block(G *g, const Block *b, int d)
 			fprintf(g->f, "tg_topk(%s, %s, %d, %d, %d);\n", o, a, rows, cols, m->val[in->out].sh.dim[m->val[in->out].sh.rank - 1]);
 			break;
 		}
+		case CLS_MEMSCAN: {
+			int tn, k, rows, dv;
+			memscan_dims(m, in, &tn, &k, &rows, &dv);
+			fprintf(g->f, "tg_%s(%s, %s, %s, %s, %d, %d, %d, %d);\n", tg_ops[in->op].name, o, a, c, e, tn, k, rows, dv);
+			break;
+		}
 		case CLS_SUMTO:
 			fprintf(g->f, "tg_sum_to(%s, %s, %d, ", o, a, n);
 			desc(g, &m->val[in->a[0]].sh, &m->val[in->a[1]].sh, NULL);

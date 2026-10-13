@@ -446,6 +446,13 @@ static void ins(A *a, const Ins *in)
 		call(a, "tg_topk", c, 5);
 		return;
 	}
+	case CLS_MEMSCAN: {
+		int tn, k, rows, dv;
+		memscan_dims(m, in, &tn, &k, &rows, &dv);
+		Arg c[8] = { V(in->out), V(in->a[0]), V(in->a[1]), V(in->a[2]), I(tn), I(k), I(rows), I(dv) };
+		call(a, in->op == OP_MEMSCAN ? "tg_memscan" : "tg_memscan_t", c, 8);
+		return;
+	}
 	case CLS_SUMTO: {
 		Arg c[4] = { V(in->out), V(in->a[0]), I(n), desc(a, s0, &m->val[in->a[1]].sh, NULL) };
 		call(a, "tg_sum_to", c, 4);

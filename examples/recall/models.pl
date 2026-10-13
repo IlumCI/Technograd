@@ -10,8 +10,13 @@
 # so a write at an address that already holds a value replaces it.
 # KIND rows is the sparse model with the same arithmetic, but each step reads
 # its 8 rows with take and writes them with take_t (scatter-add) instead of
-# multiplying by the full address.
-# Usage: models.pl KIND STEPS DIR [SLOTS]   (KIND dense|sparse|rows; SLOTS = dk or S)
+# multiplying by the full address. KIND mem is it again as one memory_scan,
+# whose steps touch only the addressed rows and whose backward pass undoes
+# the writes instead of storing the memory at every step.
+# KIND pkm is mem with product-key addressing (arXiv:1907.05242): two sets of
+# sqrt(S) sub-keys, the top 8 of each, and the best 8 of their 64 sums, so
+# scoring costs O(sqrt S) instead of O(S).
+# Usage: models.pl KIND STEPS DIR [SLOTS]   (KIND dense|sparse|rows|mem|pkm; SLOTS = dk or S)
 use strict;
 my ($kind, $T, $dir, $S) = @ARGV;
 my ($B, $NV, $d, $dv) = (16, 64, 32, 32);
@@ -20,19 +25,37 @@ $S ||= $kind eq 'dense' ? 16 : 256;
 my $lr = $ENV{LR} || 0.003;
 my $TB = $T * $B;
 my $sp = $kind ne 'dense';
-my $addr = $kind eq 'dense'
+my $pk = $kind eq 'pkm';
+my $n = int(sqrt($S) + 0.5);
+die "pkm needs a square slot count\n" if $pk && $n * $n != $S;
+$kind = 'mem' if $pk; # the same memory, another address
+my $addr = $pk
+	? "    x = take(Ek, kid)\n"
+	. "    s1 = (rmsnorm(x \@ Wk1) \@ transpose(rmsnorm(K1))) * temp\n"
+	. "    s2 = (rmsnorm(x \@ Wk2) \@ transpose(rmsnorm(K2))) * temp\n"
+	. "    i1 = topk(s1, 8)\n    i2 = topk(s2, 8)\n"
+	. "    cs = reshape(reshape(take_along(s1, i1), $TB, 8, 1) + reshape(take_along(s2, i2), $TB, 1, 8), $TB, 64)\n"
+	. "    ci = reshape(reshape(i1, $TB, 8, 1) * $n + reshape(i2, $TB, 1, 8), $TB, 64)\n"
+	. "    j0 = topk(cs, 8)\n    j = take_along(ci, j0)\n    a8 = softmax(take_along(cs, j0))\n"
+	. "    J = reshape(reshape(j, $T, $B, 8) + boff, $T, $B, 8, 1)\n    a4 = reshape(a8, $T, $B, 8, 1)\n"
+	. "    P = J * pidx + a4 * prd + a4 * reshape(w, $T, $B, 1, 1) * sigmoid(bw) * pwr\n"
+	: $kind eq 'dense'
 	? "    k = rmsnorm(take(Ek, kid) \@ Wk) * " . sprintf("%.6g", 1 / sqrt($S)) . "\n    A = reshape(k, $T, $B, $S)\n"
 	: "    sc = (rmsnorm(take(Ek, kid) \@ Wk) \@ transpose(rmsnorm(Keys))) * temp\n"
 	. "    j = topk(sc, 8)\n"
 	. "    a8 = softmax(take_along(sc, j))\n"
-	. ($kind eq 'rows' ? "    J = reshape(reshape(j, $T, $B, 8) + boff, $T, " . ($B * 8) . ")\n    A = reshape(a8, $T, $B, 8)\n"
+	. ($kind eq 'mem' ? "    J = reshape(reshape(j, $T, $B, 8) + boff, $T, $B, 8, 1)\n    a4 = reshape(a8, $T, $B, 8, 1)\n"
+	. "    P = J * pidx + a4 * prd + a4 * reshape(w, $T, $B, 1, 1) * sigmoid(bw) * pwr\n"
+	: $kind eq 'rows' ? "    J = reshape(reshape(j, $T, $B, 8) + boff, $T, " . ($B * 8) . ")\n    A = reshape(a8, $T, $B, 8)\n"
 	: "    A = reshape(reshape(reshape(a8, $TB, 1, 8) \@ reshape(take(I_S, reshape(j, " . ($TB * 8) . ")), $TB, 8, $S), $TB, $S), $T, $B, $S)\n");
 my $st = "state Ek : f32[$NK, $d] = rand(1, 1)\nstate Ev : f32[$NV, $dv] = rand(2, 1)\nstate Wk : f32[$d, " . ($kind eq 'dense' ? $S : 16) . "] = rand(3, 0.3)\n"
 	. "state Wo : f32[$dv, $NV] = rand(4, 0.2)\nstate bw : f32 = 2\n";
-$st .= "state Keys : f32[$S, 16] = rand(5, 1)\nstate temp : f32 = 4\n" if $sp;
+$st .= $pk ? "state Wk1 : f32[$d, 8] = rand(6, 0.3)\nstate Wk2 : f32[$d, 8] = rand(7, 0.3)\nstate K1 : f32[$n, 8] = rand(8, 1)\nstate K2 : f32[$n, 8] = rand(9, 1)\nstate temp : f32 = 4\n"
+	: "state Keys : f32[$S, 16] = rand(5, 1)\nstate temp : f32 = 4\n" if $sp;
 $st .= "param I_S : f32[$S, $S] = file(\"eye_s.bin\")\n" if $kind eq 'sparse';
-$st .= "param boff : f32[$B, 1] = [" . join(", ", map { "[" . $_ * $S . "]" } 0 .. $B - 1) . "]\n" if $kind eq 'rows';
-my $scan = $kind eq 'rows' ? <<"R" : <<"D";
+$st .= "param boff : f32[$B, 1] = [" . join(", ", map { "[" . $_ * $S . "]" } 0 .. $B - 1) . "]\n" if $kind eq 'rows' || $kind eq 'mem';
+$st .= "param pidx : f32[1, 3] = [[1, 0, 0]]\nparam prd : f32[1, 3] = [[0, 1, 0]]\nparam pwr : f32[1, 3] = [[0, 0, 1]]\n" if $kind eq 'mem';
+my $scan = $kind eq 'mem' ? "    rs = memory_scan(M0f, P, reshape(take(Ev, vid), $T, $B, $dv))\n" : $kind eq 'rows' ? <<"R" : <<"D";
     M = M0f
     scan M over jt in J, at in A, vt in V, wt in W:
         g = reshape(take(M, jt), $B, 8, $dv)

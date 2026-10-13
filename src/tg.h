@@ -84,12 +84,13 @@ typedef enum {
 	OP_SIN, OP_COS, OP_RESHAPE, OP_FLOOR,
 	OP_SUM_TO,
 	OP_TOPK,
+	OP_MEMSCAN, OP_MEMSCAN_T,
 	OP_THINK,
 	OP_SCAN,
 	OP_COUNT
 } Op;
 
-typedef enum { CLS_CONST, CLS_BIN, CLS_UN, CLS_MATMUL, CLS_ROW, CLS_RED, CLS_TRANS, CLS_OUTER, CLS_SPMM, CLS_ROWS, CLS_RESHAPE, CLS_SUMTO, CLS_TOPK, CLS_THINK, CLS_SCAN } OpClass;
+typedef enum { CLS_CONST, CLS_BIN, CLS_UN, CLS_MATMUL, CLS_ROW, CLS_RED, CLS_TRANS, CLS_OUTER, CLS_SPMM, CLS_ROWS, CLS_RESHAPE, CLS_SUMTO, CLS_TOPK, CLS_MEMSCAN, CLS_THINK, CLS_SCAN } OpClass;
 
 typedef struct {
 	const char *name;
@@ -216,6 +217,9 @@ int ir_op3(Module *m, Block *b, Op op, int p, int q, int r, const char *file, in
 int ir_k(Module *m, Block *b, float k);
 int ir_reshape(Module *m, Block *b, int x, const Shape *to); /* same data, new shape (equal element count) */
 int ir_topk(Module *m, Block *b, int x, int k); /* indices of the k largest along the last axis */
+/* memscan_t's packed output (floats): dP at 0, dM0 at *o1, dV at *o2, work memory at *o3; N a multiple of 3 and dv */
+void memscan_layout(int T, int n, int k, int rows, int dv, long *o1, long *o2, long *o3, long *N);
+void memscan_dims(const Module *m, const Ins *in, int *tn, int *k, int *rows, int *dv); /* kernel arguments of memscan / memscan_t */
 void optim_train(Module *m, Block *b, int loss, const char *opt, const char **keys, const double *vals, int nkv,
 		 const int *over, int nover, const char *file, int line); /* optim.c */
 void value_name(const Module *m, int v, char *buf, size_t n);

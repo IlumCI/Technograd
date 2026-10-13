@@ -527,4 +527,86 @@ TG_FN void tg_topk(tg_t *o, const tg_t *a, int rows, int n, int k)
 	}
 }
 
+/* Delta-rule memory (see tg_rt.h): o (T n + rows, dv) the reads, then the
+ * final memory. Q16.16 with 64-bit accumulation and saturation. */
+TG_FN void tg_memscan(tg_t *o, const tg_t *m0, const tg_t *p, const tg_t *v, int tn, int k, int rows, int dv)
+{
+	tg_t *M = o + (long)tn * dv;
+	for (long i = 0; i < (long)rows * dv; i++) M[i] = m0[i];
+	for (long s = 0; s < tn; s++) {
+		const tg_t *q = p + s * k * 3, *x = v + s * dv;
+		tg_t *r = o + s * dv;
+		for (int j = 0; j < dv; j++) {
+			int64_t acc = 0;
+			for (int i = 0; i < k; i++) {
+				int t = tg_ell_idx(q[i * 3], rows);
+				if (t >= 0 && q[i * 3 + 1] != 0) acc += tg_fmul(q[i * 3 + 1], M[(long)t * dv + j]);
+			}
+			r[j] = tg_sat(acc);
+		}
+		for (int i = 0; i < k; i++) {
+			int t = tg_ell_idx(q[i * 3], rows);
+			tg_t c = q[i * 3 + 2];
+			if (t < 0 || c == 0) continue;
+			for (int j = 0; j < dv; j++)
+				M[(long)t * dv + j] = tg_sat((int64_t)M[(long)t * dv + j] + tg_fmul(c, tg_sat((int64_t)x[j] - r[j])));
+		}
+	}
+}
+TG_FN void tg_memscan_layout(long tn, int k, int rows, int dv, long *o1, long *o2, long *o3, long *N)
+{
+	long np = tn * k * 3, L = dv % 3 ? 3L * dv : dv, end;
+	*o1 = (np + dv - 1) / dv * dv;
+	*o2 = *o1 + (long)rows * dv;
+	*o3 = *o2 + tn * dv;
+	end = *o3 + (long)rows * dv;
+	*N = (end + L - 1) / L * L;
+}
+TG_FN void tg_memscan_t(tg_t *o, const tg_t *y, const tg_t *pv, const tg_t *g, int tn, int k, int rows, int dv)
+{
+	long w = 3L * k + dv, o1, o2, o3, N;
+	tg_memscan_layout(tn, k, rows, dv, &o1, &o2, &o3, &N);
+	tg_t *dP = o, *dM = o + o1, *dV = o + o2, *M = o + o3;
+	for (long i = 0; i < N; i++) o[i] = 0;
+	for (long i = 0; i < (long)rows * dv; i++) {
+		M[i] = y[(long)tn * dv + i];
+		dM[i] = g[(long)tn * dv + i];
+	}
+	for (long s = (long)tn - 1; s >= 0; s--) {
+		const tg_t *q = pv + s * w, *x = q + 3 * k, *r = y + s * dv, *dr = g + s * dv;
+		tg_t *dp = dP + s * k * 3, *dx = dV + s * dv;
+		for (int i = k - 1; i >= 0; i--) {
+			int t = tg_ell_idx(q[i * 3], rows);
+			tg_t c = q[i * 3 + 2];
+			if (t < 0 || c == 0) continue;
+			for (int j = 0; j < dv; j++)
+				M[(long)t * dv + j] = tg_sat((int64_t)M[(long)t * dv + j] - tg_fmul(c, tg_sat((int64_t)x[j] - r[j])));
+		}
+		for (int i = 0; i < k; i++) {
+			int t = tg_ell_idx(q[i * 3], rows);
+			int64_t d = 0;
+			if (t < 0) continue;
+			for (int j = 0; j < dv; j++) {
+				d += tg_fmul(dM[(long)t * dv + j], tg_sat((int64_t)x[j] - r[j]));
+				dx[j] = tg_sat((int64_t)dx[j] + tg_fmul(q[i * 3 + 2], dM[(long)t * dv + j]));
+			}
+			dp[i * 3 + 2] = tg_sat(d);
+		}
+		for (int i = 0; i < k; i++) {
+			int t = tg_ell_idx(q[i * 3], rows);
+			int64_t d = 0;
+			if (t < 0) continue;
+			for (int j = 0; j < dv; j++) d += tg_fmul(tg_sat((int64_t)dr[j] - dx[j]), M[(long)t * dv + j]);
+			dp[i * 3 + 1] = tg_sat(d);
+		}
+		for (int i = 0; i < k; i++) {
+			int t = tg_ell_idx(q[i * 3], rows);
+			tg_t a = q[i * 3 + 1];
+			if (t < 0 || a == 0) continue;
+			for (int j = 0; j < dv; j++)
+				dM[(long)t * dv + j] = tg_sat((int64_t)dM[(long)t * dv + j] + tg_fmul(a, tg_sat((int64_t)dr[j] - dx[j])));
+		}
+	}
+}
+
 #endif

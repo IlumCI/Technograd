@@ -154,6 +154,32 @@ static int ELL_SLOT(AD *a, const Shape *sp, int slot)
 	return v;
 }
 
+/* A compiler-generated constant with the given contents, shared by name. */
+static int CONST_DATA(AD *a, const char *name, const Shape *sp, const float *data)
+{
+	Shape s0 = *sp;
+	for (int v = 0; v < a->m->nval; v++)
+		if (a->m->val[v].kind == V_PARAM && a->m->val[v].name && strcmp(a->m->val[v].name, name) == 0) return v;
+	int v = mod_value(a->m, V_PARAM, &s0, name);
+	int n = shape_numel(&s0);
+	a->m->val[v].data = xmalloc((size_t)n * sizeof(float));
+	memcpy(a->m->val[v].data, data, (size_t)n * sizeof(float));
+	return v;
+}
+
+/* The row indices start .. start + len - 1. */
+static int RANGE(AD *a, long start, int len)
+{
+	char name[64];
+	snprintf(name, sizeof name, "__range_%ld_%d", start, len);
+	Shape s = { 1, { len } };
+	float *d = xmalloc((size_t)len * sizeof *d);
+	for (int i = 0; i < len; i++) d[i] = (float)(start + i);
+	int v = CONST_DATA(a, name, &s, d);
+	xfree(d);
+	return v;
+}
+
 static const Shape *SH(AD *a, int v) { return &a->m->val[v].sh; }
 
 /* ---- dependence --------------------------------------------------------- */
@@ -517,6 +543,34 @@ static void vjp(AD *a, const Ins *in, int g, Adj *adj)
 		acc(a, adj, x0, xs.rank > 2 ? RESHAPE(a, dx, &xs) : dx);
 		return;
 	}
+	case OP_MEMSCAN: { /* memscan_t runs the steps backwards from the final memory; indices get none */
+		Shape ps = *SH(a, x1), vs = *SH(a, x2); /* copies: emitting values may move m->val */
+		int T = ps.dim[0], n = ps.dim[1], k = ps.dim[2], tn = T * n, rows = SH(a, x0)->dim[0], dv = SH(a, x0)->dim[1], w = 3 * k + dv;
+		char name[64];
+		float *s1 = xmalloc((size_t)3 * k * w * sizeof *s1), *s2 = xmalloc((size_t)dv * w * sizeof *s2);
+		memset(s1, 0, (size_t)3 * k * w * sizeof *s1);
+		memset(s2, 0, (size_t)dv * w * sizeof *s2);
+		for (int i = 0; i < 3 * k; i++) s1[i * w + i] = 1;
+		for (int i = 0; i < dv; i++) s2[i * w + 3 * k + i] = 1;
+		Shape sh1 = { 2, { 3 * k, w } }, sh2 = { 2, { dv, w } }, pf = { 2, { tn, 3 * k } }, vf = { 2, { tn, dv } }, pvs = { 3, { T, n, w } };
+		snprintf(name, sizeof name, "__memsel_p_%d_%d", 3 * k, w);
+		int c1 = CONST_DATA(a, name, &sh1, s1);
+		snprintf(name, sizeof name, "__memsel_v_%d_%d", dv, w);
+		int c2 = CONST_DATA(a, name, &sh2, s2);
+		xfree(s1);
+		xfree(s2);
+		int pv = RESHAPE(a, E(a, OP_ADD, E(a, OP_MATMUL, RESHAPE(a, x1, &pf), c1), E(a, OP_MATMUL, RESHAPE(a, x2, &vf), c2)), &pvs);
+		int pk = E3(a, OP_MEMSCAN_T, y, pv, g);
+		long o1, o2, o3, N;
+		memscan_layout(T, n, k, rows, dv, &o1, &o2, &o3, &N);
+		Shape v3 = { 2, { (int)(N / 3), 3 } }, vd = { 2, { (int)(N / dv), dv } };
+		if (w1) acc(a, adj, x1, RESHAPE(a, E(a, OP_TAKE, RESHAPE(a, pk, &v3), RANGE(a, 0, tn * k)), &ps));
+		int view = (w0 || w2) ? RESHAPE(a, pk, &vd) : -1;
+		if (w0) acc(a, adj, x0, E(a, OP_TAKE, view, RANGE(a, o1 / dv, rows)));
+		if (w2) acc(a, adj, x2, RESHAPE(a, E(a, OP_TAKE, view, RANGE(a, o2 / dv, tn)), &vs));
+		return;
+	}
+	case OP_MEMSCAN_T: /* backward-only */
 	case OP_SPMM_TC: /* optimizer-internal compact gradient */
 	case OP_THINK:
 	case OP_SCAN:

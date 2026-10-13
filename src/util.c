@@ -441,3 +441,27 @@ int ins_outs(const Ins *in, int *buf)
 		if (buf) buf[n] = s->ys[m];
 	return n;
 }
+
+void memscan_layout(int T, int n, int k, int rows, int dv, long *o1, long *o2, long *o3, long *N)
+{ /* the same arithmetic as tg_memscan_layout in runtime/tg_rt.h */
+	long tn = (long)T * n, np = tn * k * 3, L = dv % 3 ? 3L * dv : dv;
+	*o1 = (np + dv - 1) / dv * dv;
+	*o2 = *o1 + (long)rows * dv;
+	*o3 = *o2 + tn * dv;
+	long end = *o3 + (long)rows * dv;
+	*N = (end + L - 1) / L * L;
+}
+
+void memscan_dims(const Module *m, const Ins *in, int *tn, int *k, int *rows, int *dv)
+{
+	const Shape *a0 = &m->val[in->a[0]].sh, *a1 = &m->val[in->a[1]].sh;
+	*dv = a0->dim[1];
+	*tn = a1->dim[0] * a1->dim[1];
+	if (in->op == OP_MEMSCAN) {
+		*k = a1->dim[2];
+		*rows = a0->dim[0];
+	} else {
+		*k = (a1->dim[2] - *dv) / 3;
+		*rows = a0->dim[0] - *tn;
+	}
+}
