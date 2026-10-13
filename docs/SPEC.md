@@ -839,8 +839,8 @@ h1 = gelu(x @ w1 + spmm(s, wt) + rmsnorm(ssm(tok)) @ wp + b1)
   Measured with `gen-train` on byte strings (`examples/recall/gen.pl`, 6,000
   pairs, 10 epochs, 500 held out): with 8 letter-digit pairs and one query
   ("j3c8e5w3o8t6v2q9:j" -> "3"), exact match goes from 30.4% (no memory)
-  and 30.0% (memory keyed on the block's own state) to **100%** keyed on
-  the previous token, validation loss 0.895 -> 0.00016, in 200 s. With
+  and 30.0% (memory keyed on the block's own state) to **100%** with the
+  token-keyed memory above, validation loss 0.895 -> 0.00017, in 222 s. With
   several queries answered after all of them ("...:mxq" -> "103"), output
   j must find query j several positions back; that is an alignment problem
   the memory does not address (4 pairs, 4 queries: 3.75% without, 3.50%
